@@ -249,10 +249,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # the inference-only EpisodeEEPreprocessorStep (joints->EE FK, needs the robot SDK), which is
     # wrong for training where the dataset already supplies the EE columns. Model weights / optimizer
     # / scheduler / step are restored from the checkpoint independently of the processor.
+    _ee_state_modes = ("episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat",
+                       "episode_ee", "absolute_ee")  # include legacy aliases
+    _ee_action_modes = ("rot6d", "quat", "relative_ee")  # include legacy alias
     _needs_rebuilt_processor = (
         getattr(active_cfg, "use_relative_actions", False)
-        or getattr(active_cfg, "state_mode", "joint") in ("episode_ee", "absolute_ee")
-        or getattr(active_cfg, "action_mode", "joint") == "relative_ee"
+        or getattr(active_cfg, "state_mode", "joint") in _ee_state_modes
+        or getattr(active_cfg, "action_mode", "joint") in _ee_action_modes
     )
     if _needs_rebuilt_processor and processor_pretrained_path is not None:
         logging.warning(

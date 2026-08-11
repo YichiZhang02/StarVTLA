@@ -56,6 +56,8 @@ class EpisodeEEToWorldStep(ActionProcessorStep):
     """
 
     n_arms: int = 2
+    # Rotation format matching the trained policy: "rot6d" (default) or "quat".
+    rot_mode: str = "rot6d"
     ee_step: Any | None = field(default=None, repr=False)
 
     def action(self, action: PolicyAction) -> PolicyAction:
@@ -72,10 +74,10 @@ class EpisodeEEToWorldStep(ActionProcessorStep):
             )
         if a0.device != action.device or a0.dtype != action.dtype:
             a0 = a0.to(device=action.device, dtype=action.dtype)
-        return ee_to_absolute(a0, action, n_arms=self.n_arms)
+        return ee_to_absolute(a0, action, n_arms=self.n_arms, rot_mode=self.rot_mode)
 
     def get_config(self) -> dict[str, Any]:
-        return {"n_arms": self.n_arms}
+        return {"n_arms": self.n_arms, "rot_mode": self.rot_mode}
 
     def transform_features(
         self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]

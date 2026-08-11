@@ -17,25 +17,33 @@
 """Offline: add EE-pose columns to a joint LeRobot v3.0 dataset (in place).
 
 Reads the joint ``observation.state`` / ``action`` (16-dim, dual-arm) and, via Realman forward
-kinematics, ADDS four columns to the SAME dataset (joint columns are left untouched, so joint-mode
+kinematics, ADDS eight columns to the SAME dataset (joint columns are left untouched, so joint-mode
 training is unaffected):
 
     observation.state_episode_ee : 20-dim, EE pose of the STATE joints relative to each episode's
                                    FIRST frame (T0^{-1}·Tt), expressed in the first-frame frame.
+                                   Rotation as rot6d (first two columns of the rotation matrix).
     action_episode_ee            : 20-dim, IDENTICAL to observation.state_episode_ee (the state's own
                                    trajectory). Kept as a separate column so it can carry the action
                                    horizon (delta_indices) independently of the state window.
     observation.state_absolute_ee: 20-dim, EE pose of the STATE joints in the robot base frame (Tt,
-                                   NO T0 subtraction) — keeps absolute workspace position.
+                                   NO T0 subtraction) — keeps absolute workspace position. rot6d.
     action_absolute_ee           : 20-dim, IDENTICAL to observation.state_absolute_ee (separate column
-                                   only so it can carry the action horizon independently).
+                                   only so it can carry the action horizon independently). rot6d.
 
-``action_relative_ee`` stats (the relativized target the model trains on) are anchor-independent
-(T0 cancels in St^-1·S_{t+k}), so they are computed once and reused by both episode_ee and
-absolute_ee state modes.
+    observation.state_episode_quat : 16-dim, same as state_episode_ee but rotation as quaternion
+                                     [x, y, z, w] (per arm: xyz(3) + quat(4) + gripper(1) = 8).
+    action_episode_quat            : 16-dim, IDENTICAL to observation.state_episode_quat.
+    observation.state_absolute_quat: 16-dim, same as state_absolute_ee but quat rotation.
+    action_absolute_quat           : 16-dim, IDENTICAL to observation.state_absolute_quat.
 
-Both use per arm ``[xyz(3), rot6d(6), gripper(1)]`` (rot6d = first two columns of the rotation
-matrix), ordered RIGHT arm first then LEFT (20 = 2 * 10). Gripper is kept absolute.
+``action_relative_ee`` / ``action_relative_quat`` stats (the relativized targets the model trains on)
+are anchor-independent (T0 cancels in St^-1·S_{t+k}), so they are computed once and reused by both
+episode and absolute state modes.
+
+rot6d columns use per arm ``[xyz(3), rot6d(6), gripper(1)]``, ordered RIGHT arm first then LEFT
+(20 = 2 * 10). quat columns use per arm ``[xyz(3), quat_xyzw(4), gripper(1)]`` (16 = 2 * 8).
+Gripper is kept absolute in both representations.
 
 The action is the STATE's own future trajectory: at train time the action chunk (future
 state_episode_ee values) is relativized against the current state_episode_ee anchor S_t, giving
@@ -83,7 +91,9 @@ from Robotic_Arm.rm_ctypes_wrap import rm_force_type_e, rm_robot_arm_model_e  # 
 from Robotic_Arm.rm_robot_interface import Algo  # noqa: E402
 
 PER_ARM_DIM = 10
-EE_DIM = 20
+PER_ARM_DIM_QUAT = 8
+EE_DIM = 20       # rot6d: 2 arms * 10
+EE_DIM_QUAT = 16  # quat:  2 arms * 8
 DOF = 7
 STAT_KEYS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
 NEW_FEATURES = (
@@ -91,6 +101,10 @@ NEW_FEATURES = (
     "action_episode_ee",
     "observation.state_absolute_ee",
     "action_absolute_ee",
+    "observation.state_episode_quat",
+    "action_episode_quat",
+    "observation.state_absolute_quat",
+    "action_absolute_quat",
 )
 
 
@@ -102,6 +116,16 @@ def build_names() -> list[str]:
     for side in ("right", "left"):
         names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
         names += [f"{side}_ee_rot6d_{i}" for i in range(6)]
+        names += [f"{side}_gripper"]
+    return names
+
+
+def build_names_quat() -> list[str]:
+    """16-dim quat output feature names, RIGHT arm first then LEFT."""
+    names: list[str] = []
+    for side in ("right", "left"):
+        names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
+        names += [f"{side}_ee_qx", f"{side}_ee_qy", f"{side}_ee_qz", f"{side}_ee_qw"]
         names += [f"{side}_gripper"]
     return names
 
@@ -153,12 +177,31 @@ def mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
     return np.concatenate([mat[:, 0], mat[:, 1]]).astype(np.float64)
 
 
+def mat_to_quat_np(mat: np.ndarray) -> np.ndarray:
+    """3×3 rotation matrix → quaternion [x, y, z, w]."""
+    q = R.from_matrix(mat).as_quat()  # scipy returns (x, y, z, w)
+    return q.astype(np.float64)
+
+
 def relative_arm_ee(pos, mat, grip, p0, R0) -> np.ndarray:
     """Pose relative to first frame (T0^{-1}·Tt): pos=R0^T(pt-p0), rot6d(R0^T·Rt), grip absolute."""
     R0t = R0.T
     p_rel = R0t @ (pos - p0)
     R_rel = R0t @ mat
     return np.concatenate([p_rel, mat_to_rot6d(R_rel), [grip]]).astype(np.float64)
+
+
+def relative_arm_ee_quat(pos, mat, grip, p0, R0) -> np.ndarray:
+    """Like relative_arm_ee but stores rotation as quaternion [x,y,z,w]. Returns 8-dim."""
+    R0t = R0.T
+    p_rel = R0t @ (pos - p0)
+    R_rel = R0t @ mat
+    return np.concatenate([p_rel, mat_to_quat_np(R_rel), [grip]]).astype(np.float64)
+
+
+def absolute_arm_ee_quat(pos, mat, grip) -> np.ndarray:
+    """Like absolute_arm_ee but stores rotation as quaternion [x,y,z,w]. Returns 8-dim."""
+    return np.concatenate([pos, mat_to_quat_np(mat), [grip]]).astype(np.float64)
 
 
 def fk_both(algo: Algo, vec16: np.ndarray, jidx: dict):
@@ -185,6 +228,23 @@ def to_absolute_ee(algo: Algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
     ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
     return np.concatenate(
         [absolute_arm_ee(rp, rm, rg), absolute_arm_ee(lp, lm, lg)]
+    ).astype(np.float32)
+
+
+def to_episode_quat(algo: Algo, vec16: np.ndarray, jidx: dict, baseline) -> np.ndarray:
+    """16-dim joints -> 16-dim relative-first-frame EE with quat rotation (right then left)."""
+    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
+    (Rp0, RR0), (Lp0, LR0) = baseline
+    return np.concatenate(
+        [relative_arm_ee_quat(rp, rm, rg, Rp0, RR0), relative_arm_ee_quat(lp, lm, lg, Lp0, LR0)]
+    ).astype(np.float32)
+
+
+def to_absolute_quat(algo: Algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
+    """16-dim joints -> 16-dim base-frame EE with quat rotation (right then left)."""
+    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
+    return np.concatenate(
+        [absolute_arm_ee_quat(rp, rm, rg), absolute_arm_ee_quat(lp, lm, lg)]
     ).astype(np.float32)
 
 
@@ -234,6 +294,19 @@ def compute_relative_ee_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
     return feature_stats(np.concatenate(rels))
 
 
+def compute_relative_quat_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
+    """Stats of the RELATIVE quat action ``S_t^{-1}·S_{t+k}`` (quat format, 16-dim for 2 arms)."""
+    rels = []
+    for d in per_ep.values():
+        S = torch.from_numpy(np.stack(d["s_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT)
+        L = S.shape[0]
+        for k in range(1, horizon + 1):
+            if L - k <= 0:
+                break
+            rels.append(ee_to_relative(S[: L - k], S[k:], n_arms=n_arms, rot_mode="quat").numpy())
+    return feature_stats(np.concatenate(rels))
+
+
 def feature_stats(arr: np.ndarray) -> dict:
     arr = np.asarray(arr, dtype=np.float64)
     return {
@@ -254,6 +327,12 @@ def _fsl_f32(arr2d: np.ndarray) -> pa.Array:
     """(N, EE_DIM) float32 -> pyarrow fixed_size_list<float>[EE_DIM] (matches existing action column)."""
     flat = pa.array(np.ascontiguousarray(arr2d, dtype=np.float32).reshape(-1), type=pa.float32())
     return pa.FixedSizeListArray.from_arrays(flat, EE_DIM)
+
+
+def _fsl_f32_quat(arr2d: np.ndarray) -> pa.Array:
+    """(N, EE_DIM_QUAT) float32 -> pyarrow fixed_size_list<float>[EE_DIM_QUAT]."""
+    flat = pa.array(np.ascontiguousarray(arr2d, dtype=np.float32).reshape(-1), type=pa.float32())
+    return pa.FixedSizeListArray.from_arrays(flat, EE_DIM_QUAT)
 
 
 def main():
@@ -294,6 +373,8 @@ def main():
     # accumulate global + per-episode stats
     all_state, all_action = [], []
     all_state_abs, all_action_abs = [], []
+    all_state_eq, all_action_eq = [], []
+    all_state_aq, all_action_aq = [], []
     per_ep: dict[int, dict[str, list]] = {}
 
     print("[2/4] converting data parquet (adding columns)")
@@ -306,6 +387,10 @@ def main():
         ac_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
         st_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
         ac_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
+        st_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        ac_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        st_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        ac_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
@@ -318,47 +403,75 @@ def main():
             # St^-1·S_{t+k} is anchor-independent, so action_absolute_ee mirrors state_absolute_ee.
             st_abs[i] = to_absolute_ee(algo, state_col[i], jidx)
             ac_abs[i] = st_abs[i]
-            per_ep.setdefault(ep, {"s": [], "a": [], "s_abs": [], "a_abs": []})
+            # quat variants
+            st_eq[i] = to_episode_quat(algo, state_col[i], jidx, base)
+            ac_eq[i] = st_eq[i]
+            st_aq[i] = to_absolute_quat(algo, state_col[i], jidx)
+            ac_aq[i] = st_aq[i]
+            per_ep.setdefault(ep, {"s": [], "a": [], "s_abs": [], "a_abs": [],
+                                   "s_quat": [], "a_quat": [], "s_abs_quat": [], "a_abs_quat": []})
             per_ep[ep]["s"].append(st_ee[i])
             per_ep[ep]["a"].append(ac_ee[i])
             per_ep[ep]["s_abs"].append(st_abs[i])
             per_ep[ep]["a_abs"].append(ac_abs[i])
+            per_ep[ep]["s_quat"].append(st_eq[i])
+            per_ep[ep]["a_quat"].append(ac_eq[i])
+            per_ep[ep]["s_abs_quat"].append(st_aq[i])
+            per_ep[ep]["a_abs_quat"].append(ac_aq[i])
         all_state.append(st_ee)
         all_action.append(ac_ee)
         all_state_abs.append(st_abs)
         all_action_abs.append(ac_abs)
+        all_state_eq.append(st_eq)
+        all_action_eq.append(ac_eq)
+        all_state_aq.append(st_aq)
+        all_action_aq.append(ac_aq)
 
         # drop pre-existing new columns (idempotent re-run), then append fresh
         for col in NEW_FEATURES:
             if col in tab.column_names:
                 tab = tab.drop([col])
-        tab = tab.append_column("observation.state_episode_ee", _fsl_f32(st_ee))
-        tab = tab.append_column("action_episode_ee", _fsl_f32(ac_ee))
-        tab = tab.append_column("observation.state_absolute_ee", _fsl_f32(st_abs))
-        tab = tab.append_column("action_absolute_ee", _fsl_f32(ac_abs))
+        tab = tab.append_column("observation.state_episode_ee",   _fsl_f32(st_ee))
+        tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee))
+        tab = tab.append_column("observation.state_absolute_ee",   _fsl_f32(st_abs))
+        tab = tab.append_column("action_absolute_ee",              _fsl_f32(ac_abs))
+        tab = tab.append_column("observation.state_episode_quat",  _fsl_f32_quat(st_eq))
+        tab = tab.append_column("action_episode_quat",             _fsl_f32_quat(ac_eq))
+        tab = tab.append_column("observation.state_absolute_quat", _fsl_f32_quat(st_aq))
+        tab = tab.append_column("action_absolute_quat",            _fsl_f32_quat(ac_aq))
         pq.write_table(tab, f)
         print(f"      {f.relative_to(root)}  ({len(df)} frames)")
 
     # ---- meta/info.json ----
     print("[3/4] meta/info.json + meta/stats.json")
+    out_names_quat = build_names_quat()
     template = dict(info["features"]["action"])
     for feat in NEW_FEATURES:
-        info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
+        if "quat" in feat:
+            info["features"][feat] = {**template, "shape": [EE_DIM_QUAT], "names": list(out_names_quat)}
+        else:
+            info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
     (root / "meta" / "info.json").write_text(json.dumps(info, indent=4, ensure_ascii=False))
 
     # ---- meta/stats.json (global) ----
     stats_path = root / "meta" / "stats.json"
     stats = json.loads(stats_path.read_text())
     # action_relative_ee: stats of the relativized action the model actually trains on.
-    rel_stats = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM // PER_ARM_DIM)
+    rel_stats      = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM // PER_ARM_DIM)
+    rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM_QUAT // PER_ARM_DIM_QUAT)
     stat_sources = (
-        ("observation.state_episode_ee", feature_stats(np.concatenate(all_state))),
-        ("action_episode_ee", feature_stats(np.concatenate(all_action))),
-        ("observation.state_absolute_ee", feature_stats(np.concatenate(all_state_abs))),
-        ("action_absolute_ee", feature_stats(np.concatenate(all_action_abs))),
-        # action_relative_ee is anchor-independent (St^-1·S_{t+k} cancels T0), so the episode_ee
-        # relative stats are reused unchanged for state_mode='absolute_ee' too.
-        ("action_relative_ee", rel_stats),
+        ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
+        ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
+        ("observation.state_absolute_ee",   feature_stats(np.concatenate(all_state_abs))),
+        ("action_absolute_ee",              feature_stats(np.concatenate(all_action_abs))),
+        # action_relative_ee is anchor-independent (St^-1·S_{t+k} cancels T0).
+        ("action_relative_ee",              rel_stats),
+        # quat variants
+        ("observation.state_episode_quat",  feature_stats(np.concatenate(all_state_eq))),
+        ("action_episode_quat",             feature_stats(np.concatenate(all_action_eq))),
+        ("observation.state_absolute_quat", feature_stats(np.concatenate(all_state_aq))),
+        ("action_absolute_quat",            feature_stats(np.concatenate(all_action_aq))),
+        ("action_relative_quat",            rel_quat_stats),
     )
     for feat, st in stat_sources:
         stats[feat] = {k: (v.astype(np.int64).tolist() if k == "count" else v.astype(np.float32).tolist())
@@ -369,11 +482,16 @@ def main():
 
     # ---- meta/episodes/*.parquet (per-episode stats) ----
     print("[4/4] meta/episodes per-episode stats")
-    ep_stats = {ep: {"observation.state_episode_ee": feature_stats(np.stack(d["s"])),
-                     "action_episode_ee": feature_stats(np.stack(d["a"])),
-                     "observation.state_absolute_ee": feature_stats(np.stack(d["s_abs"])),
-                     "action_absolute_ee": feature_stats(np.stack(d["a_abs"]))}
-                for ep, d in per_ep.items()}
+    ep_stats = {ep: {
+        "observation.state_episode_ee":   feature_stats(np.stack(d["s"])),
+        "action_episode_ee":               feature_stats(np.stack(d["a"])),
+        "observation.state_absolute_ee":   feature_stats(np.stack(d["s_abs"])),
+        "action_absolute_ee":              feature_stats(np.stack(d["a_abs"])),
+        "observation.state_episode_quat":  feature_stats(np.stack(d["s_quat"])),
+        "action_episode_quat":             feature_stats(np.stack(d["a_quat"])),
+        "observation.state_absolute_quat": feature_stats(np.stack(d["s_abs_quat"])),
+        "action_absolute_quat":            feature_stats(np.stack(d["a_abs_quat"])),
+    } for ep, d in per_ep.items()}
     ep_files = sorted(glob.glob(str(root / "meta" / "episodes" / "**" / "*.parquet"), recursive=True))
     for ef in ep_files:
         tab = pq.read_table(ef)
@@ -388,7 +506,11 @@ def main():
                 tab = tab.append_column(col, pa.array(vals, type=typ))
         pq.write_table(tab, ef)
 
-    print(f"\nDone ✅  added {NEW_FEATURES} ({EE_DIM}-dim) to {root}")
+    print(f"\nDone ✅  added rot6d and quat EE columns to {root}")
+    print(f"  rot6d features: observation.state_episode_ee, action_episode_ee, "
+          f"observation.state_absolute_ee, action_absolute_ee  ({EE_DIM}-dim)")
+    print(f"  quat  features: observation.state_episode_quat, action_episode_quat, "
+          f"observation.state_absolute_quat, action_absolute_quat  ({EE_DIM_QUAT}-dim)")
     print(f"  layout: {out_names}")
 
 

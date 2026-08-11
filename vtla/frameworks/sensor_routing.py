@@ -35,20 +35,55 @@ from vtla.engine.configs import FeatureType, PolicyFeature
 from vtla.engine.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 
 VALID_TACTILE_MODES = ("none", "as_image", "encode")
-# joint = joint angles; episode_ee = EE pose relative to each episode's FIRST frame (T0^-1·Tt);
-# absolute_ee = EE pose in the robot base frame (Tt, no T0) — keeps absolute workspace position.
-VALID_STATE_MODES = ("none", "joint", "episode_ee", "absolute_ee")
-# joint = joint targets; relative_ee = EE pose relative to the CURRENT observation (delta).
-VALID_ACTION_MODES = ("joint", "relative_ee")
+
+# state_mode choices:
+#   none           — no proprioceptive state fed to the model.
+#   joint          — raw joint angles (default).
+#   episode_rot6d  — EE pose relative to each episode's FIRST frame (T0^-1·Tt), rot6d rotation.
+#   absolute_rot6d — EE pose in the robot base frame (Tt, no T0), rot6d rotation.
+#   episode_quat   — same as episode_rot6d but rotation stored as quaternion [x,y,z,w].
+#   absolute_quat  — same as absolute_rot6d but rotation stored as quaternion [x,y,z,w].
+#
+# Backward-compat aliases (still accepted, normalised to the canonical name on validation):
+#   "episode_ee"  -> "episode_rot6d",  "absolute_ee" -> "absolute_rot6d"
+VALID_STATE_MODES = (
+    "none", "joint",
+    "episode_rot6d", "absolute_rot6d",
+    "episode_quat",  "absolute_quat",
+)
+# Accepted for backward compat; map to canonical names in _normalise_ee_modes().
+_STATE_MODE_ALIASES: dict[str, str] = {
+    "episode_ee":  "episode_rot6d",
+    "absolute_ee": "absolute_rot6d",
+}
+
+# action_mode choices:
+#   joint  — joint-space targets (default).
+#   rot6d  — EE pose relative to the CURRENT observation (delta), rot6d rotation.
+#   quat   — same as rot6d but rotation stored as quaternion [x,y,z,w].
+#
+# Backward-compat alias: "relative_ee" -> "rot6d"
+VALID_ACTION_MODES = ("joint", "rot6d", "quat")
+_ACTION_MODE_ALIASES: dict[str, str] = {
+    "relative_ee": "rot6d",
+}
+
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
 VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
 
 # Dataset columns / stats keys added offline by tools/convert_joints_to_eepose.py.
-OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"  # observation.state_episode_ee
-ACTION_EPISODE_EE = ACTION + "_episode_ee"  # action_episode_ee (per-frame absolute-in-episode)
-OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"  # observation.state_absolute_ee (base-frame Tt)
-ACTION_ABSOLUTE_EE = ACTION + "_absolute_ee"  # action_absolute_ee (per-frame base-frame copy)
-ACTION_RELATIVE_EE = ACTION + "_relative_ee"  # stats-only key: relative action St^-1·S_{t+k}
+# rot6d variants (original "_ee" suffix, kept for backward compat).
+OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"    # observation.state_episode_ee  (rot6d)
+ACTION_EPISODE_EE    = ACTION + "_episode_ee"        # action_episode_ee              (rot6d)
+OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"  # observation.state_absolute_ee (rot6d)
+ACTION_ABSOLUTE_EE   = ACTION + "_absolute_ee"       # action_absolute_ee             (rot6d)
+ACTION_RELATIVE_EE   = ACTION + "_relative_ee"       # stats-only: St^-1·S_{t+k}     (rot6d)
+# quat variants (new).
+OBS_STATE_EPISODE_QUAT  = OBS_STATE + "_episode_quat"   # observation.state_episode_quat
+ACTION_EPISODE_QUAT     = ACTION + "_episode_quat"       # action_episode_quat
+OBS_STATE_ABSOLUTE_QUAT = OBS_STATE + "_absolute_quat"  # observation.state_absolute_quat
+ACTION_ABSOLUTE_QUAT    = ACTION + "_absolute_quat"      # action_absolute_quat
+ACTION_RELATIVE_QUAT    = ACTION + "_relative_quat"      # stats-only (quat)
 
 
 @dataclass
@@ -115,9 +150,14 @@ class SensorRoutingMixin:
     freeze_tactile_encoder: bool = False
 
     # --- state / action routing ---
-    state_mode: str = "joint"  # none | joint | episode_ee
-    action_mode: str = "joint"  # joint | relative_ee
-    # Number of arms packed in the EE vectors (per arm = 3 pos + 6 rot6d + 1 gripper = 10 dims).
+    # none | joint | episode_rot6d | absolute_rot6d | episode_quat | absolute_quat
+    # (aliases accepted: episode_ee→episode_rot6d, absolute_ee→absolute_rot6d)
+    state_mode: str = "joint"
+    # joint | rot6d | quat   (alias: relative_ee→rot6d)
+    action_mode: str = "joint"
+    # Number of arms packed in the EE vectors.
+    # rot6d: per arm = pos(3) + rot6d(6) + gripper(1) = 10 dims.
+    # quat:  per arm = pos(3) + qx,qy,qz,qw(4) + gripper(1) = 8 dims.
     ee_num_arms: int = 2
     # Ordered names of the observation.state joints (populated by make_policy from ds_meta).
     # Required for EpisodeEEPreprocessorStep to locate joint/gripper indices at inference time.
@@ -244,6 +284,36 @@ class SensorRoutingMixin:
         return feats
 
     # ------------------------------------------------------------------
+    # EE mode helpers
+    # ------------------------------------------------------------------
+    def _normalise_ee_modes(self) -> None:
+        """Resolve backward-compat aliases for state_mode / action_mode (mutates in place)."""
+        self.state_mode  = _STATE_MODE_ALIASES.get(self.state_mode,  self.state_mode)
+        self.action_mode = _ACTION_MODE_ALIASES.get(self.action_mode, self.action_mode)
+
+    def ee_rot_mode(self) -> str:
+        """Return the rotation format implied by ``state_mode`` / ``action_mode``.
+
+        Returns ``"quat"`` when either mode uses quaternion EE; otherwise ``"rot6d"``.
+        """
+        if self.state_mode in ("episode_quat", "absolute_quat") or self.action_mode == "quat":
+            return "quat"
+        return "rot6d"
+
+    def ee_per_arm_dim(self) -> int:
+        """Return the packed dimension per arm based on the active EE rotation format."""
+        from vtla.engine.utils.ee_transforms import per_arm_dim
+        return per_arm_dim(self.ee_rot_mode())
+
+    def ee_total_dim(self) -> int:
+        """Return the total EE vector dimension (all arms)."""
+        return self.ee_num_arms * self.ee_per_arm_dim()
+
+    def is_ee_mode(self) -> bool:
+        """True when any EE state or action mode is active."""
+        return self.state_mode not in ("none", "joint") or self.action_mode in ("rot6d", "quat")
+
+    # ------------------------------------------------------------------
     # Validation building blocks (call these from each config)
     # ------------------------------------------------------------------
     def validate_sensor_modes(self) -> None:
@@ -252,15 +322,32 @@ class SensorRoutingMixin:
             raise ValueError(
                 f"Invalid tactile_mode '{self.tactile_mode}'. Expected one of {VALID_TACTILE_MODES}."
             )
+        # Normalise backward-compat aliases before checking.
+        self._normalise_ee_modes()
         if self.state_mode not in VALID_STATE_MODES:
-            raise ValueError(f"Invalid state_mode '{self.state_mode}'. Expected one of {VALID_STATE_MODES}.")
-        if self.action_mode not in VALID_ACTION_MODES:
-            raise ValueError(f"Invalid action_mode '{self.action_mode}'. Expected one of {VALID_ACTION_MODES}.")
-        if self.action_mode == "relative_ee" and self.state_mode not in ("episode_ee", "absolute_ee"):
             raise ValueError(
-                "action_mode='relative_ee' requires state_mode in {'episode_ee', 'absolute_ee'}: the "
-                "relative action is computed against the current EE observation (the relative target "
-                "St^-1·S_{t+k} is anchor-independent, so either EE state encoding works)."
+                f"Invalid state_mode '{self.state_mode}'. "
+                f"Expected one of {VALID_STATE_MODES} (aliases: {_STATE_MODE_ALIASES})."
+            )
+        if self.action_mode not in VALID_ACTION_MODES:
+            raise ValueError(
+                f"Invalid action_mode '{self.action_mode}'. "
+                f"Expected one of {VALID_ACTION_MODES} (aliases: {_ACTION_MODE_ALIASES})."
+            )
+        # EE action modes require an EE state mode.
+        _ee_state_modes = ("episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat")
+        if self.action_mode in ("rot6d", "quat") and self.state_mode not in _ee_state_modes:
+            raise ValueError(
+                f"action_mode='{self.action_mode}' requires state_mode in {_ee_state_modes}: the "
+                "relative action is computed against the current EE observation."
+            )
+        # Rotation format of state and action must match.
+        state_is_quat = self.state_mode in ("episode_quat", "absolute_quat")
+        action_is_quat = self.action_mode == "quat"
+        if self.action_mode in ("rot6d", "quat") and (state_is_quat != action_is_quat):
+            raise ValueError(
+                f"state_mode='{self.state_mode}' and action_mode='{self.action_mode}' use different "
+                "rotation formats. Use both rot6d variants together or both quat variants together."
             )
         if self.tactile_encoder_type not in VALID_TACTILE_ENCODERS:
             raise ValueError(
@@ -336,31 +423,46 @@ class SensorRoutingMixin:
         """Route the proprioceptive state according to ``state_mode``.
 
         The dataset carries the joint ``observation.state`` plus the EE variants
-        ``observation.state_episode_ee`` / ``observation.state_absolute_ee``. This selects one
-        as the canonical ``observation.state`` the model consumes and drops the unselected ones.
+        ``observation.state_episode_ee`` / ``observation.state_absolute_ee`` (rot6d) and
+        ``observation.state_episode_quat`` / ``observation.state_absolute_quat`` (quat).
+        This method selects one as the canonical ``observation.state`` the model consumes
+        and drops all unselected variants.
 
-        - ``none``: remove ``observation.state`` (all variants).
-        - ``joint``: keep joint ``observation.state``, drop the EE variants; if
-                     ``padded_state_dim`` is given and state is missing, materialise a
-                     padded state feature (pi05-style).
-        - ``episode_ee``: use ``observation.state_episode_ee`` as ``observation.state``.
-        - ``absolute_ee``: use ``observation.state_absolute_ee`` as ``observation.state``.
+        - ``none``:          remove ``observation.state`` (all variants).
+        - ``joint``:         keep joint ``observation.state``, drop the EE variants.
+        - ``episode_rot6d``: use ``observation.state_episode_ee``  (rot6d, existing).
+        - ``absolute_rot6d``:use ``observation.state_absolute_ee`` (rot6d, existing).
+        - ``episode_quat``:  use ``observation.state_episode_quat``  (quat, new).
+        - ``absolute_quat``: use ``observation.state_absolute_quat`` (quat, new).
         """
+        # All EE-variant column keys (drop whichever are not selected).
+        _all_ee_keys = (
+            OBS_STATE_EPISODE_EE, OBS_STATE_ABSOLUTE_EE,
+            OBS_STATE_EPISODE_QUAT, OBS_STATE_ABSOLUTE_QUAT,
+        )
         if self.state_mode == "none":
             self.input_features.pop(OBS_STATE, None)
-            self.input_features.pop(OBS_STATE_EPISODE_EE, None)
-            self.input_features.pop(OBS_STATE_ABSOLUTE_EE, None)
+            for k in _all_ee_keys:
+                self.input_features.pop(k, None)
         elif self.state_mode == "joint":
-            self.input_features.pop(OBS_STATE_EPISODE_EE, None)
-            self.input_features.pop(OBS_STATE_ABSOLUTE_EE, None)
+            for k in _all_ee_keys:
+                self.input_features.pop(k, None)
             if padded_state_dim is not None and OBS_STATE not in self.input_features:
                 self.input_features[OBS_STATE] = PolicyFeature(
                     type=FeatureType.STATE, shape=(padded_state_dim,)
                 )
-        elif self.state_mode in ("episode_ee", "absolute_ee"):
-            ee_key = OBS_STATE_ABSOLUTE_EE if self.state_mode == "absolute_ee" else OBS_STATE_EPISODE_EE
-            other_key = OBS_STATE_EPISODE_EE if self.state_mode == "absolute_ee" else OBS_STATE_ABSOLUTE_EE
-            self.input_features.pop(other_key, None)
+        else:
+            # EE mode: pick the canonical column for this (state_mode, rot_mode) pair.
+            _ee_key_map = {
+                "episode_rot6d":  OBS_STATE_EPISODE_EE,
+                "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
+                "episode_quat":   OBS_STATE_EPISODE_QUAT,
+                "absolute_quat":  OBS_STATE_ABSOLUTE_QUAT,
+            }
+            ee_key = _ee_key_map[self.state_mode]
+            for k in _all_ee_keys:
+                if k != ee_key:
+                    self.input_features.pop(k, None)
             ee_ft = self.input_features.pop(ee_key, None)
             if ee_ft is not None:
                 # Dataset has the pre-computed column; rename it to canonical OBS_STATE.
@@ -370,38 +472,49 @@ class SensorRoutingMixin:
                 raise ValueError(
                     f"state_mode='{self.state_mode}' requires either '{ee_key}' in the dataset "
                     "(run tools/convert_joints_to_eepose.py for offline datasets) or "
-                    f"'{OBS_STATE}' for real-time inference (an EpisodeEEPreprocessorStep converts "
+                    f"'{OBS_STATE}' for real-time inference (EpisodeEEPreprocessorStep converts "
                     "joint angles to EE pose at runtime)."
                 )
-            # else: OBS_STATE present but the EE column absent → inference mode.
-            # EpisodeEEPreprocessorStep converts observation.state joints → EE pose before the model.
+            # else: OBS_STATE present but EE column absent → inference mode.
 
     def apply_action_mode(self) -> None:
         """Route the action according to ``action_mode`` (mirrors :meth:`apply_state_mode`).
 
         The dataset carries the joint ``action`` plus the EE variants ``action_episode_ee`` /
-        ``action_absolute_ee``. This selects one as the canonical ``action`` output and drops the
-        unselected variants. For ``relative_ee`` the EE variant is chosen to match ``state_mode``
-        (episode→``action_episode_ee``, absolute→``action_absolute_ee``); the relative target is
-        anchor-independent so either yields the same trained action.
+        ``action_absolute_ee``/``action_absolute_quat``. This selects one as the canonical ``action``
+        output and drops the unselected variants. The rotation format (rot6d/quat) is determined by
+        ``action_mode``; the episode/absolute variant is determined by ``state_mode``.
         """
         if self.output_features is None:
             return
+
+        # All EE action column keys (drop whatever is not selected).
+        _all_action_ee = (
+            ACTION_EPISODE_EE, ACTION_ABSOLUTE_EE,
+            ACTION_EPISODE_QUAT, ACTION_ABSOLUTE_QUAT,
+        )
         if self.action_mode == "joint":
-            self.output_features.pop(ACTION_EPISODE_EE, None)
-            self.output_features.pop(ACTION_ABSOLUTE_EE, None)
-        elif self.action_mode == "relative_ee":
-            ee_key = ACTION_ABSOLUTE_EE if self.state_mode == "absolute_ee" else ACTION_EPISODE_EE
-            other_key = ACTION_EPISODE_EE if self.state_mode == "absolute_ee" else ACTION_ABSOLUTE_EE
-            self.output_features.pop(other_key, None)
+            for k in _all_action_ee:
+                self.output_features.pop(k, None)
+        elif self.action_mode in ("rot6d", "quat"):
+            # Choose episode vs. absolute to match state_mode.
+            _absolute_states = ("absolute_rot6d", "absolute_quat")
+            is_absolute = self.state_mode in _absolute_states
+            if self.action_mode == "rot6d":
+                ee_key = ACTION_ABSOLUTE_EE if is_absolute else ACTION_EPISODE_EE
+            else:  # quat
+                ee_key = ACTION_ABSOLUTE_QUAT if is_absolute else ACTION_EPISODE_QUAT
+            for k in _all_action_ee:
+                if k != ee_key:
+                    self.output_features.pop(k, None)
             ee_ft = self.output_features.pop(ee_key, None)
             if ee_ft is not None:
                 self.output_features.pop(ACTION, None)
                 self.output_features[ACTION] = ee_ft
             elif ACTION not in self.output_features:
                 raise ValueError(
-                    f"action_mode='relative_ee' (state_mode='{self.state_mode}') requires '{ee_key}' "
-                    "in the dataset. Run tools/convert_joints_to_eepose.py first."
+                    f"action_mode='{self.action_mode}' (state_mode='{self.state_mode}') requires "
+                    f"'{ee_key}' in the dataset. Run tools/convert_joints_to_eepose.py first."
                 )
 
     def add_empty_cameras(self, num: int, image_resolution: tuple[int, int]) -> list[str]:

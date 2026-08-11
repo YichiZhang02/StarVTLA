@@ -58,9 +58,14 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
-        # action_episode_ee / action_absolute_ee carry the EE action and must be chunked over the
-        # same horizon as `action` (they are not literally the "action" key, so handle explicitly).
-        if key in (ACTION, ACTION + "_episode_ee", ACTION + "_absolute_ee") and cfg.action_delta_indices is not None:
+        # All EE action columns must be chunked over the same horizon as `action`.
+        # Covers: action_episode_ee, action_absolute_ee (rot6d) and
+        #         action_episode_quat, action_absolute_quat (quat).
+        _ee_action_keys = {
+            ACTION + "_episode_ee", ACTION + "_absolute_ee",
+            ACTION + "_episode_quat", ACTION + "_absolute_quat",
+        }
+        if key in ({ACTION} | _ee_action_keys) and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith(OBS_PREFIX):
             # Tactile keys override the shared observation window with their own tactile window.

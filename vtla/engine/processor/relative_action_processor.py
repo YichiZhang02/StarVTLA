@@ -24,22 +24,31 @@ from vtla.engine.types import EnvTransition, TransitionKey
 from vtla.engine.utils.constants import ACTION, OBS_STATE
 from vtla.engine.utils.ee_transforms import ee_to_absolute, ee_to_relative
 
-OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"
-ACTION_EPISODE_EE = ACTION + "_episode_ee"
-OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"
-ACTION_ABSOLUTE_EE = ACTION + "_absolute_ee"
+OBS_STATE_EPISODE_EE    = OBS_STATE + "_episode_ee"
+ACTION_EPISODE_EE       = ACTION + "_episode_ee"
+OBS_STATE_ABSOLUTE_EE   = OBS_STATE + "_absolute_ee"
+ACTION_ABSOLUTE_EE      = ACTION + "_absolute_ee"
+# quat variants (new)
+OBS_STATE_EPISODE_QUAT  = OBS_STATE + "_episode_quat"
+ACTION_EPISODE_QUAT     = ACTION + "_episode_quat"
+OBS_STATE_ABSOLUTE_QUAT = OBS_STATE + "_absolute_quat"
+ACTION_ABSOLUTE_QUAT    = ACTION + "_absolute_quat"
+
+# Backward-compat aliases (same as in sensor_routing.py).
+_STATE_ALIASES  = {"episode_ee": "episode_rot6d", "absolute_ee": "absolute_rot6d"}
+_ACTION_ALIASES = {"relative_ee": "rot6d"}
 
 
 def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
     """Select EE columns as the canonical ``observation.state`` / ``action`` (in place).
 
-    The dataset carries both joint and EE columns; ``state_mode`` / ``action_mode`` pick which the
-    model consumes. Done at the batch level (before the processor) because the EE columns are not the
-    literal ``action`` key and would otherwise be dropped by ``batch_to_transition``. The action EE
-    column is chosen to match ``state_mode`` (episode→``action_episode_ee``, absolute→
-    ``action_absolute_ee``); the relative training target is anchor-independent so either matches.
-    Mutates and returns ``batch``.
+    Supports the current naming (``episode_rot6d`` / ``absolute_rot6d`` / ``episode_quat`` /
+    ``absolute_quat`` for state; ``rot6d`` / ``quat`` for action) as well as the legacy names
+    (``episode_ee`` / ``absolute_ee`` / ``relative_ee``). Mutates and returns ``batch``.
     """
+    # Normalise legacy aliases.
+    state_mode  = _STATE_ALIASES.get(state_mode,  state_mode)
+    action_mode = _ACTION_ALIASES.get(action_mode, action_mode)
 
     def _route(dst: str, src: str) -> None:
         if src in batch:
@@ -47,13 +56,26 @@ def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
             if src + "_is_pad" in batch:
                 batch[dst + "_is_pad"] = batch.pop(src + "_is_pad")
 
-    if state_mode == "episode_ee":
+    # State routing.
+    if state_mode == "episode_rot6d":
         _route(OBS_STATE, OBS_STATE_EPISODE_EE)
-    elif state_mode == "absolute_ee":
+    elif state_mode == "absolute_rot6d":
         _route(OBS_STATE, OBS_STATE_ABSOLUTE_EE)
-    if action_mode == "relative_ee":
-        src = ACTION_ABSOLUTE_EE if state_mode == "absolute_ee" else ACTION_EPISODE_EE
+    elif state_mode == "episode_quat":
+        _route(OBS_STATE, OBS_STATE_EPISODE_QUAT)
+    elif state_mode == "absolute_quat":
+        _route(OBS_STATE, OBS_STATE_ABSOLUTE_QUAT)
+
+    # Action routing.
+    _absolute_states = ("absolute_rot6d", "absolute_quat")
+    is_absolute = state_mode in _absolute_states
+    if action_mode == "rot6d":
+        src = ACTION_ABSOLUTE_EE if is_absolute else ACTION_EPISODE_EE
         _route(ACTION, src)
+    elif action_mode == "quat":
+        src = ACTION_ABSOLUTE_QUAT if is_absolute else ACTION_EPISODE_QUAT
+        _route(ACTION, src)
+
     return batch
 
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep
@@ -136,9 +158,11 @@ class RelativeActionsProcessorStep(ProcessorStep):
     action_names: list[str] | None = None
     # mode="joint": element-wise action-=state (exclude_joints masked).
     # mode="pose":  SE(3) per-arm relative EE (St^-1 . action), gripper kept absolute. Used by
-    #               action_mode="relative_ee"; exclude_joints is ignored (gripper handled internally).
+    #               action_mode="rot6d"/"quat"; exclude_joints is ignored (gripper handled internally).
     mode: str = "joint"
     n_arms: int = 2
+    # Rotation format for pose mode: "rot6d" (default) or "quat".
+    rot_mode: str = "rot6d"
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
@@ -185,7 +209,9 @@ class RelativeActionsProcessorStep(ProcessorStep):
         if self.mode == "pose":
             if state.device != action.device or state.dtype != action.dtype:
                 state = state.to(device=action.device, dtype=action.dtype)
-            new_transition[TransitionKey.ACTION] = ee_to_relative(state, action, n_arms=self.n_arms)
+            new_transition[TransitionKey.ACTION] = ee_to_relative(
+                state, action, n_arms=self.n_arms, rot_mode=self.rot_mode
+            )
         else:
             mask = self._build_mask(action.shape[-1])
             new_transition[TransitionKey.ACTION] = to_relative_actions(action, state, mask)
@@ -202,6 +228,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "action_names": self.action_names,
             "mode": self.mode,
             "n_arms": self.n_arms,
+            "rot_mode": self.rot_mode,
         }
 
     def transform_features(
@@ -256,7 +283,9 @@ class AbsoluteActionsProcessorStep(ProcessorStep):
             if cached_state.device != action.device or cached_state.dtype != action.dtype:
                 cached_state = cached_state.to(device=action.device, dtype=action.dtype)
             new_transition[TransitionKey.ACTION] = ee_to_absolute(
-                cached_state, action, n_arms=self.relative_step.n_arms
+                cached_state, action,
+                n_arms=self.relative_step.n_arms,
+                rot_mode=self.relative_step.rot_mode,
             )
         else:
             mask = self.relative_step._build_mask(action.shape[-1])

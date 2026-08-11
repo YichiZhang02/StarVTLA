@@ -109,16 +109,35 @@ def mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
     return np.concatenate([mat[:, 0], mat[:, 1]]).astype(np.float64)
 
 
-def relative_arm_ee(pos, mat, grip, p0, R0) -> np.ndarray:
+def mat_to_rot(mat: np.ndarray, rot_mode: str) -> np.ndarray:
+    """3×3 rotation matrix → rotation representation in ``rot_mode`` format.
+
+    Args:
+        mat: (3, 3) rotation matrix.
+        rot_mode: ``"rot6d"`` (6-dim first-two-columns) or ``"quat"`` (4-dim [x, y, z, w]).
+
+    Returns:
+        1D numpy array of length 6 (rot6d) or 4 (quat).
+    """
+    if rot_mode == "rot6d":
+        return mat_to_rot6d(mat)
+    elif rot_mode == "quat":
+        q = R.from_matrix(mat).as_quat()  # (x, y, z, w)
+        return q.astype(np.float64)
+    else:
+        raise ValueError(f"Unknown rot_mode '{rot_mode}'. Expected 'rot6d' or 'quat'.")
+
+
+def relative_arm_ee(pos, mat, grip, p0, R0, rot_mode: str = "rot6d") -> np.ndarray:
     """Single-arm: absolute EE → pose relative to episode-start frame T0.
 
     pos_rel = R0^T (pt - p0),  R_rel = R0^T · Rt,  gripper kept absolute.
-    Returns a 10-dim vector [pos(3), rot6d(6), gripper(1)].
+    Returns a vector [pos(3), rot(rot_dim), gripper(1)] where rot_dim is 6 for rot6d or 4 for quat.
     """
     R0t = R0.T
     p_rel = R0t @ (pos - p0)
     R_rel = R0t @ mat
-    return np.concatenate([p_rel, mat_to_rot6d(R_rel), [grip]]).astype(np.float64)
+    return np.concatenate([p_rel, mat_to_rot(R_rel, rot_mode), [grip]]).astype(np.float64)
 
 
 def fk_both(algo, vec16: np.ndarray, jidx: dict):
@@ -127,43 +146,47 @@ def fk_both(algo, vec16: np.ndarray, jidx: dict):
     return (fk(algo, rj), rg), (fk(algo, lj), lg)
 
 
-def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline) -> np.ndarray:
-    """Convert 16-dim joint vector to 20-dim EE pose relative to episode-start frame.
+def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline, rot_mode: str = "rot6d") -> np.ndarray:
+    """Convert 16-dim joint vector to EE pose relative to episode-start frame.
 
     Args:
         algo: Realman Algo instance (from make_realman_algo()).
         vec16: 16-dim joint state (right-arm joints+gripper, then left-arm).
         jidx: Index dict from joint_indices().
         baseline: ((R_p0, R_R0), (L_p0, L_R0)) from the episode's first frame.
+        rot_mode: Rotation storage format — ``"rot6d"`` (default, 10 dims/arm) or ``"quat"`` (8 dims/arm).
 
     Returns:
-        20-dim float32 array [right_arm(10), left_arm(10)].
+        float32 array of shape (n_arms * per_arm_dim,).
     """
     ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
     (Rp0, RR0), (Lp0, LR0) = baseline
     return np.concatenate(
-        [relative_arm_ee(rp, rm, rg, Rp0, RR0), relative_arm_ee(lp, lm, lg, Lp0, LR0)]
+        [
+            relative_arm_ee(rp, rm, rg, Rp0, RR0, rot_mode),
+            relative_arm_ee(lp, lm, lg, Lp0, LR0, rot_mode),
+        ]
     ).astype(np.float32)
 
 
-def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
-    """Single-arm: absolute EE in the robot base frame (no T0). 10-dim [pos(3), rot6d(6), gripper(1)]."""
-    return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
+def absolute_arm_ee(pos, mat, grip, rot_mode: str = "rot6d") -> np.ndarray:
+    """Single-arm: absolute EE in the robot base frame (no T0). [pos(3), rot(rot_dim), gripper(1)]."""
+    return np.concatenate([pos, mat_to_rot(mat, rot_mode), [grip]]).astype(np.float64)
 
 
-def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
-    """Convert 16-dim joint vector to 20-dim base-frame EE pose (Tt, no episode baseline).
+def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict, rot_mode: str = "rot6d") -> np.ndarray:
+    """Convert 16-dim joint vector to base-frame EE pose (Tt, no episode baseline).
 
     Same packing/layout as :func:`to_episode_ee` (RIGHT arm first then LEFT, per arm
-    ``[pos(3), rot6d(6), gripper(1)]``) but expressed in the robot base frame directly, so it keeps
-    the absolute workspace position. Used by state_mode='absolute_ee'.
+    ``[pos(3), rot(rot_dim), gripper(1)]``) but expressed in the robot base frame directly.
+    Used by state_mode='absolute_rot6d' or 'absolute_quat'.
 
     Returns:
-        20-dim float32 array [right_arm(10), left_arm(10)].
+        float32 array of shape (n_arms * per_arm_dim,).
     """
     ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
     return np.concatenate(
-        [absolute_arm_ee(rp, rm, rg), absolute_arm_ee(lp, lm, lg)]
+        [absolute_arm_ee(rp, rm, rg, rot_mode), absolute_arm_ee(lp, lm, lg, rot_mode)]
     ).astype(np.float32)
 
 

@@ -17,8 +17,8 @@ log_freq=100
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
-state_mode=${8:-joint}  # none | joint | episode_ee | absolute_ee
-action_mode=${9:-joint}  # joint | relative_ee
+state_mode=${8:-joint}  # none | joint | episode_rot6d | absolute_rot6d | episode_quat | absolute_quat
+action_mode=${9:-joint}  # joint | rot6d | quat
 
 # 数据增强
 augmentation_mode=${10:-strong}  # none | mild | strong

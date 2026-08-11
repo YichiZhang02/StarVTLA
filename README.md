@@ -131,8 +131,8 @@ bash train.sh rm_umi_dual_pen_open diffusion
 | 5 | `steps` | `10_000` | |
 | 6 | `wrist_only` | `false` | `true` 只用 wrist 相机; `false` 用 top + wrist |
 | 7 | `tactile_mode` | `none` | `none`(触觉不进模型) / `as_image`(触觉当图像输入) / `encode`(触觉 encoder) |
-| 8 | `state_mode` | `joint` | `none` / `joint`(关节角) / `episode_ee`(末端位姿, 相对每个 episode 首帧) |
-| 9 | `action_mode` | `joint` | `joint`(关节角) / `relative_ee`(末端位姿, 相对当前观测) |
+| 8 | `state_mode` | `joint` | `none` / `joint`(关节角) / `episode_rot6d` / `absolute_rot6d` / `episode_quat` / `absolute_quat` |
+| 9 | `action_mode` | `joint` | `joint`(关节角) / `rot6d`(EE 相对动作, rot6d) / `quat`(EE 相对动作, 四元数) |
 
 触觉 encoder (仅 `tactile_mode=encode`): 通过 `TACTILE_ENCODER_PATH`(默认 `playground/pretrained_models/AnyTouch-ViT-L-16`)指定 tactile-MAE 权重作为 encoder 初始化, `arch`/`sensor_id`/`image_size` 从 checkpoint 自动读取。`encode` 模式下 encoder + query token 会**随 policy 一起训练**(非冻结)。
 
@@ -188,24 +188,70 @@ bash train.sh rm_umi_dual_pen_open diffusion 4 32 20000 false as_image joint
 
 ### 末端位姿 (EE) 模式
 
-除关节角外, state / action 还支持末端位姿 (end-effector), 与 UMI 数据对齐:
+除关节角外，state / action 还支持末端位姿 (end-effector)，同时兼容两种旋转表达：
 
-- `state_mode=episode_ee`: state 是**相对每个 episode 首帧**的末端位姿 `T0⁻¹·Tt` (rot6d 表示)。
-- `action_mode=relative_ee`: action 是**相对当前观测**的末端位姿 `St⁻¹·S_{t+k}` (数据集存绝对的 episode_ee, 训练时在线转相对)。
-- 布局 20 维 (双臂, **right 在前**): 每臂 `[xyz(3), rot6d(6), gripper(1)]`; gripper 始终保持绝对值。
-- 约束: `action_mode=relative_ee` 必须搭配 `state_mode=episode_ee`。四个 policy (act/diffusion/pi05/starvla_groot) 均支持。
+#### 旋转格式
 
-**前置 (一次性)**: 先把关节数据集离线转出 EE 列 (正运动学 FK, 用睿尔曼算法库, 无需连机械臂)。会给原数据集**新增** `observation.state_episode_ee` / `action_episode_ee` 两列及 `action_relative_ee` 归一化统计, 原关节列保持不变 (joint 模式照常可用):
+| 格式 | 每臂维度 | 双臂总维度 | 旋转部分 |
+|---|---|---|---|
+| `rot6d` (默认) | 10 | 20 | 旋转矩阵前两列 (Zhou 2019), 连续且唯一 |
+| `quat` | 8 | 16 | 四元数 `[x, y, z, w]` (scalar-last/ROS 惯例) |
+
+#### 坐标系 × 旋转格式 → `state_mode` 可选值
+
+| state_mode | 坐标系 | 旋转格式 | 说明 |
+|---|---|---|---|
+| `episode_rot6d` | episode 相对 | rot6d | 相对每个 episode 首帧 T0⁻¹·Tt |
+| `absolute_rot6d` | 机器人 base | rot6d | 直接 FK 结果 Tt，保留绝对工作空间位置 |
+| `episode_quat` | episode 相对 | quat | 同上，旋转用四元数 |
+| `absolute_quat` | 机器人 base | quat | 同上，旋转用四元数 |
+
+旧名称 `episode_ee` / `absolute_ee` 作为别名仍然被接受（等同于 `episode_rot6d` / `absolute_rot6d`）。
+
+#### `action_mode` 可选值
+
+| action_mode | 旋转格式 | 说明 |
+|---|---|---|
+| `rot6d` | rot6d | 动作是相对当前观测的 EE 位姿 St⁻¹·S_{t+k}，rot6d 表示 |
+| `quat` | quat | 同上，旋转用四元数 |
+
+旧名称 `relative_ee` 等同于 `rot6d`。
+
+**约束**：`state_mode` 与 `action_mode` 的旋转格式必须一致（同为 rot6d 或同为 quat）。
+
+**前置（一次性）**：先把关节数据集离线转出 EE 列（FK + 四元数转换，无需连机械臂）。  
+`convert_joints_to_eepose.py` 会**同时生成** rot6d 和 quat 两套列及各自的归一化统计，原关节列保持不变：
 
 ```bash
 python tools/convert_joints_to_eepose.py --root playground/data/rm_umi_dual_pen_open
-#   --horizon 32   # action_relative_ee 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
+#   --horizon 32   # relative action 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
 ```
 
-EE 模式训练示例 (pi05, 双臂):
+生成的列：
+
+| 列名 | 维度 | 说明 |
+|---|---|---|
+| `observation.state_episode_ee` | 20 | rot6d, episode 相对 |
+| `action_episode_ee` | 20 | rot6d, episode 相对（state 的未来轨迹） |
+| `observation.state_absolute_ee` | 20 | rot6d, base 坐标系 |
+| `action_absolute_ee` | 20 | rot6d, base 坐标系 |
+| `observation.state_episode_quat` | 16 | quat, episode 相对 |
+| `action_episode_quat` | 16 | quat, episode 相对 |
+| `observation.state_absolute_quat` | 16 | quat, base 坐标系 |
+| `action_absolute_quat` | 16 | quat, base 坐标系 |
+| `action_relative_ee` | 20 | stats-only，rot6d 相对动作归一化统计 |
+| `action_relative_quat` | 16 | stats-only，quat 相对动作归一化统计 |
+
+EE 模式训练示例（rot6d，pi05）：
 
 ```bash
-bash train.sh rm_umi_dual_pen_open pi05 1 32 10000 false none episode_ee relative_ee
+bash train.sh rm_umi_dual_pen_open pi05 1 32 10000 false none episode_rot6d rot6d
+```
+
+EE 模式训练示例（quat，diffusion）：
+
+```bash
+bash train.sh rm_umi_dual_pen_open diffusion 4 32 20000 false none episode_quat quat
 ```
 
 > 推理 (EE 模式) 的硬件下发链路 (FK 读 state + IK/`rm_movep_canfd` 发 action + 首帧绝对位姿缓存) 仍在接入中, 见 `TODO`。训练侧已全部可用。
