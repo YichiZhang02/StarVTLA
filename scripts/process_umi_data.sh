@@ -10,7 +10,7 @@
 #   -> <id>_undist_<size> 降到 size×size (默认 256)  <-- 训练用这个
 #   最后在 <id>_undist_<size> 上就地 convert_umi_to_eepose (加 EE 列)。
 set -e
-cd "$(dirname "$0")" || exit 1   # 切到仓库根, 服务器/本地通用
+cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
 
 # =================== 配置 (只有 dataset_id 必填) ===================

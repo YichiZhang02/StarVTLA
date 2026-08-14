@@ -108,7 +108,11 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
 
         if self._baseline is None:
             self._baseline = compute_baseline(self._algo, vec16, self._jidx)
-            self._a0_packed = self._pack_baseline(self._baseline, rot_mode="rot6d", n_arms=self.n_arms)
+            self._a0_packed = self._pack_baseline(
+                self._baseline,
+                rot_mode=self.rot_mode,
+                n_arms=self.n_arms,
+            )
 
         ee_vec = to_episode_ee(self._algo, vec16, self._jidx, self._baseline, rot_mode=self.rot_mode)
         observation[OBS_STATE] = torch.from_numpy(ee_vec)
@@ -118,21 +122,22 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
     def _pack_baseline(baseline: tuple, rot_mode: str = "rot6d", n_arms: int = 2) -> torch.Tensor:
         """Pack the episode-start FK baseline into a ``(1, ee_dim)`` world-flange EE vector.
 
-        Always packed in **rot6d** format regardless of ``rot_mode`` because the paired
-        ``EpisodeEEToWorldStep`` calls ``ee_to_absolute`` with the baseline as the reference — it
-        must share the same format as the action, which is also always expressed in rot6d inside the
-        relative/absolute processor machinery. The format conversion to ``rot_mode`` happens in the
-        normalization pipeline, NOT here.
+        The baseline uses the same rotation format as the trained action so the paired
+        ``EpisodeEEToWorldStep`` can compose it directly with episode-relative outputs.
 
         The gripper slot is filled with 0.0 (absolute-pose composition carries the gripper from the
         action side, never from the reference baseline).
         """
-        (Rp0, RR0), (Lp0, LR0) = baseline
-        vec = np.concatenate([
-            Rp0, mat_to_rot(RR0, "rot6d"), [0.0],
-            Lp0, mat_to_rot(LR0, "rot6d"), [0.0],
-        ]).astype(np.float32)
-        return torch.from_numpy(vec).unsqueeze(0)  # (1, 20) — always rot6d for the world-lift step
+        arm_baselines = list(baseline)[:n_arms]
+        if len(arm_baselines) != n_arms:
+            raise ValueError(f"Requested {n_arms} EE arms but FK returned {len(arm_baselines)}.")
+        vec = np.concatenate(
+            [
+                np.concatenate([position, mat_to_rot(rotation, rot_mode), [0.0]])
+                for position, rotation in arm_baselines
+            ]
+        ).astype(np.float32)
+        return torch.from_numpy(vec).unsqueeze(0)
 
     def get_baseline_ee(self) -> torch.Tensor | None:
         """Return the cached ``(1, ee_dim)`` world-frame EE pose of the episode's FIRST frame (A0).

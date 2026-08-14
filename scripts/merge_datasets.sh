@@ -10,7 +10,7 @@
 # 注: 默认按 10MB 分片视频 (--video-files-size-in-mb), 保持与源数据集一致的小 mp4 布局;
 #     大 mp4 会让训练随机取帧变慢 (pyav 每个 __getitem__ 都重新解析整个文件索引)。
 set -e
-cd "$(dirname "$0")" || exit 1   # 切到仓库根, 服务器/本地通用
+cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
 
 dataset_root=playground/data

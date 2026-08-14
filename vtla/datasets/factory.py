@@ -54,6 +54,13 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
         tactile_keys = set(cfg.tactile_windowed_keys())
         tactile_delta = [i / ds_meta.fps for i in cfg.tactile_delta_indices()]
 
+    windowed_observation_keys = None
+    if hasattr(cfg, "windowed_observation_keys"):
+        windowed_observation_keys = set(cfg.windowed_observation_keys())
+    windowed_action_keys = None
+    if hasattr(cfg, "windowed_action_keys"):
+        windowed_action_keys = set(cfg.windowed_action_keys())
+
     delta_timestamps = {}
     for key in ds_meta.features:
         if key == REWARD and cfg.reward_delta_indices is not None:
@@ -65,13 +72,19 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
             ACTION + "_episode_ee", ACTION + "_absolute_ee",
             ACTION + "_episode_quat", ACTION + "_absolute_quat",
         }
-        if key in ({ACTION} | _ee_action_keys) and cfg.action_delta_indices is not None:
+        if (
+            key in ({ACTION} | _ee_action_keys)
+            and cfg.action_delta_indices is not None
+            and (windowed_action_keys is None or key in windowed_action_keys)
+        ):
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith(OBS_PREFIX):
             # Tactile keys override the shared observation window with their own tactile window.
             if key in tactile_keys and tactile_delta is not None:
                 delta_timestamps[key] = list(tactile_delta)
-            elif cfg.observation_delta_indices is not None:
+            elif cfg.observation_delta_indices is not None and (
+                windowed_observation_keys is None or key in windowed_observation_keys
+            ):
                 delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
 
     if len(delta_timestamps) == 0:

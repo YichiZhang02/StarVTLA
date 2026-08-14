@@ -47,6 +47,7 @@ from vtla.engine.utils.feature_utils import dataset_to_policy_features
 
 from .act.configuration_act import ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig
+from .fastwam.configuration_fastwam import FastWAMConfig
 from .pi05.configuration_pi05 import PI05Config
 from .pretrained import PreTrainedPolicy
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig
@@ -95,6 +96,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .diffusion.modeling_diffusion import DiffusionPolicy
 
         return DiffusionPolicy
+    elif name == "fastwam":
+        from .fastwam.modeling_fastwam import FastWAMPolicy
+
+        return FastWAMPolicy
     elif name == "pi05":
         from .pi05.modeling_pi05 import PI05Policy
 
@@ -133,6 +138,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return ACTConfig(**kwargs)
     elif policy_type == "diffusion":
         return DiffusionConfig(**kwargs)
+    elif policy_type == "fastwam":
+        return FastWAMConfig(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
     elif policy_type == "starvla_groot":
@@ -198,6 +205,13 @@ def make_pre_post_processors(
             policy configuration type.
     """
     if pretrained_path:
+        preprocessor_overrides = {
+            key: dict(value) for key, value in (kwargs.get("preprocessor_overrides") or {}).items()
+        }
+        if isinstance(policy_cfg, FastWAMConfig) and policy_cfg.load_text_encoder:
+            fastwam_overrides = preprocessor_overrides.setdefault("fastwam_prepare_batch", {})
+            fastwam_overrides["use_text_cache"] = False
+
         # Custom ProcessorStep subclasses register themselves via
         # @ProcessorStepRegistry.register as an import side-effect. When loading from a
         # pretrained path we return early below (never reaching the make_*_pre_post_processors
@@ -207,6 +221,8 @@ def make_pre_post_processors(
             from .act import processor_act  # noqa: F401
         elif isinstance(policy_cfg, DiffusionConfig):
             from .diffusion import processor_diffusion  # noqa: F401
+        elif isinstance(policy_cfg, FastWAMConfig):
+            from .fastwam import processor_fastwam  # noqa: F401
         elif isinstance(policy_cfg, PI05Config):
             from .pi05 import processor_pi05  # noqa: F401
         elif isinstance(policy_cfg, StarvlaGrootConfig):
@@ -217,7 +233,7 @@ def make_pre_post_processors(
             config_filename=kwargs.get(
                 "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
             ),
-            overrides=kwargs.get("preprocessor_overrides", {}),
+            overrides=preprocessor_overrides,
             to_transition=batch_to_transition,
             to_output=transition_to_batch,
         )
@@ -237,14 +253,20 @@ def make_pre_post_processors(
         # the right input. episode_ee -> pose relative to the episode first frame; absolute_ee ->
         # raw base-frame FK (no baseline).
         state_mode = getattr(policy_cfg, "state_mode", None)
-        if state_mode in ("episode_ee", "absolute_ee"):
+        episode_modes = ("episode_rot6d", "episode_quat", "episode_ee")
+        absolute_modes = ("absolute_rot6d", "absolute_quat", "absolute_ee")
+        if state_mode in (*episode_modes, *absolute_modes):
             from .episode_ee_processor import EpisodeEEPreprocessorStep
 
             state_names = getattr(policy_cfg, "state_feature_names", None) or []
-            relative = state_mode == "episode_ee"
+            relative = state_mode in episode_modes
+            rot_mode = "quat" if state_mode in ("episode_quat", "absolute_quat") else "rot6d"
+            n_arms = getattr(policy_cfg, "ee_num_arms", 2)
             ee_step = EpisodeEEPreprocessorStep(
                 state_feature_names=state_names,
                 relative_to_baseline=relative,
+                rot_mode=rot_mode,
+                n_arms=n_arms,
             )
             preprocessor.steps = [ee_step, *preprocessor.steps]
 
@@ -253,11 +275,12 @@ def make_pre_post_processors(
             # that lifts it to the world frame (A_{t+k} = A0 · S_{t+k}) using A0 cached by ee_step.
             # absolute_ee needs NO such lift: the relative step's cached anchor is the absolute pose
             # Tt, so ee_to_absolute(Tt, a_rel) = T_{t+k} is already the world flange pose.
-            if relative and getattr(policy_cfg, "action_mode", None) == "relative_ee":
+            if relative and getattr(policy_cfg, "action_mode", None) in ("rot6d", "quat", "relative_ee"):
                 from vtla.engine.processor import EpisodeEEToWorldStep
 
                 world_step = EpisodeEEToWorldStep(
-                    n_arms=getattr(policy_cfg, "ee_num_arms", 2),
+                    n_arms=n_arms,
+                    rot_mode=rot_mode,
                     ee_step=ee_step,
                 )
                 postprocessor.steps = [*postprocessor.steps, world_step]
@@ -277,6 +300,14 @@ def make_pre_post_processors(
         from .diffusion.processor_diffusion import make_diffusion_pre_post_processors
 
         processors = make_diffusion_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, FastWAMConfig):
+        from .fastwam.processor_fastwam import make_fastwam_pre_post_processors
+
+        processors = make_fastwam_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )
@@ -313,6 +344,7 @@ def make_policy(
     cfg: PreTrainedConfig,
     ds_meta: LeRobotDatasetMetadata | None = None,
     rename_map: dict[str, str] | None = None,
+    for_training: bool = False,
 ) -> PreTrainedPolicy:
     """
     Instantiate a policy model.
@@ -331,6 +363,8 @@ def make_policy(
                  One of `ds_meta` or `env_cfg` must be provided.
         rename_map: Optional mapping of dataset or environment feature keys to match
                  expected policy feature names (e.g., `"left"` → `"camera1"`).
+        for_training: Whether the policy is being constructed by the training entrypoint.
+            FastWAM uses cached text contexts during training and online T5 encoding otherwise.
 
     Returns:
         An instantiated and device-placed policy model.
@@ -344,6 +378,8 @@ def make_policy(
         raise ValueError("VTLA SFT policy training requires dataset metadata.")
 
     policy_cls = get_policy_class(cfg.type)
+    if isinstance(cfg, FastWAMConfig):
+        cfg.load_text_encoder = not for_training
 
     kwargs = {}
     features = dataset_to_policy_features(ds_meta.features)

@@ -4,13 +4,14 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
-dataset_id=${1:-waic_final}  # 数据集名
-policy_type=${2:-starvla_groot}          # act | diffusion | pi05 | starvla_groot
+dataset_id=${1:-rm_umi_dual_260708_pen_in_case_notac_undist_256}  # 数据集名
+policy_type=${2:-fastwam}          # act | diffusion | pi05 | starvla_groot | fastwam
+
 
 # 训练配置
-num_processes=${3:-8}
+num_processes=${3:-4}
 batch_size=${4:-16}
-steps=${5:-50_000}
+steps=${5:-10_000}
 save_freq=10_000
 log_freq=100
 
@@ -21,10 +22,11 @@ state_mode=${8:-joint}  # none | joint | episode_rot6d | absolute_rot6d | episod
 action_mode=${9:-joint}  # joint | rot6d | quat
 
 # 数据增强
-augmentation_mode=${10:-strong}  # none | mild | strong
+augmentation_mode=${10:-none}  # none | mild | strong
 # 色温(白平衡)增强范围, 格式 "[min,max]" (逗号后不要空格). 例: "[0,0.6]" 偏暖, 覆盖偏黄的部署环境.
 # 留空则关闭色温增强. 与 augmentation_mode 正交: augmentation_mode=none 时只做色温, 否则色温加入采样池.
-color_temp_range=${COLOR_TEMP_RANGE:-'[-0.3,0.3]'}
+# Use the default only when the variable is unset; an explicitly empty value disables it.
+color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
 tactile_encoder_path=${TACTILE_ENCODER_PATH:-${11:-playground/pretrained_models/AnyTouch-ViT-L-16}}
@@ -41,7 +43,6 @@ top_cam=${TOP_CAM:-'[observation.images.cam_top]'}
 wrist_cam=${WRIST_CAM:-'[observation.images.left_cam_wrist,observation.images.right_cam_wrist]'}
 tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
 
-
 # =================== 不是很需要改动的配置 ===================
 # 保存的模型/日志名拼接规则
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_aug_${augmentation_mode}"
@@ -55,7 +56,11 @@ output_root=playground/results/models
 output_dir=${output_root}/${run_name}
 log_file="${output_dir}/${run_name}.log"
 tmp_log="$(mktemp "${TMPDIR:-/tmp}/${run_name}.XXXXXX.log")"  # 训练期间先把日志写到系统临时目录(不污染 tac_infra), 跑完再搬到 output_dir 下
+tmp_status="${tmp_log}.status"  # POSIX sh 没有 PIPESTATUS，管道左侧通过文件传出真实退出码
 
+
+# FastWAM 训练图片可视化。其余频率/sample 数/采样步数/seed 固定在 FastWAMConfig。
+visualization_enabled=${VISUALIZATION_ENABLED:-true}
 
 # =================== 完全不需要改动的配置 ===================
 # 预训练模型路径和基础 VLM 配置
@@ -64,9 +69,10 @@ base_vlm=
 case "${policy_type}" in
   pi05)          pretrained_path=playground/pretrained_models/pi05_base ;;
   starvla_groot) base_vlm=playground/pretrained_models/Qwen3.5-0.8B ;;
-  act|diffusion) : ;;  # 这两个从零训练
-  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot)"; exit 1 ;;
+  act|diffusion|fastwam) : ;;  # 从底座或随机初始化，不加载 VTLA policy checkpoint
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|fastwam)"; exit 1 ;;
 esac
+
 
 # 额外参数自动配置
 extra_args=""
@@ -77,11 +83,15 @@ case "${policy_type}" in
   starvla_groot)
     extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
     ;;
+  fastwam)
+    extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"
+    extra_args="${extra_args} --policy.visualization_enabled=${visualization_enabled}"
+    ;;
   act|diffusion)
     : # 这两个没有 VLM/dtype 相关字段
     ;;
   *)
-    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot)"; exit 1
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|fastwam)"; exit 1
     ;;
 esac
 
@@ -105,19 +115,18 @@ if [ "${tactile_mode}" = "encode" ]; then
     echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 9 个位置参数）指向 tactile-MAE 权重"; exit 1
   fi
   extra_args="${extra_args} --policy.tactile_encoder_path=${tactile_encoder_path}"
-  extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
   extra_args="${extra_args} --policy.tactile_num_tokens=${tactile_num_tokens}"
 fi
 
 # 触觉时序窗口（encode 和 as_image 均生效；F=1 时完全向后兼容）
 if [ "${tactile_mode}" != "none" ]; then
+  extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
   extra_args="${extra_args} --policy.tactile_num_frames=${tactile_num_frames}"
   extra_args="${extra_args} --policy.tactile_frame_offset=${tactile_frame_offset}"
 fi
 
 
 # 用花括号组把「参数打印 + 训练」整体管道给 tee，这样日志里既有配置也有训练过程。
-# 注：dash 不支持 set -o pipefail，脚本退出码会是 tee 的(0)；这是训练启动器，可接受。
 {
 echo "Log file: $log_file"
 echo "Training with dataset: $dataset_id"
@@ -130,13 +139,30 @@ echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
 echo "Tactile keys:   ${tactile_keys}"
 if [ "${tactile_mode}" = "encode" ]; then
-  echo "Tactile encoder path: ${tactile_encoder_path} | Insert: ${tactile_insert_location} | Num tokens: ${tactile_num_tokens} (encoder trained jointly)"
+  echo "Tactile encoder path: ${tactile_encoder_path} | Num tokens: ${tactile_num_tokens} (encoder trained jointly)"
 fi
 if [ "${tactile_mode}" != "none" ]; then
-  echo "Tactile temporal window: num_frames=${tactile_num_frames} | frame_offset=${tactile_frame_offset}"
+  echo "Tactile context: insert=${tactile_insert_location} | num_frames=${tactile_num_frames} | frame_offset=${tactile_frame_offset}"
 fi
 echo "Output dir: $output_dir"
 echo "Extra args: ${extra_args}"
+
+# wam相关
+WM_List="fastwam"
+case " ${WM_List} " in
+  *" ${policy_type} "*)
+    echo "Video visualization: ${visualization_enabled}"
+    text_embedding_dir="${dataset_root}/${dataset_id}/text_embeddings/wan22"
+    if [ -f "${text_embedding_dir}/manifest.json" ] && [ -f "${text_embedding_dir}/embeddings.safetensors" ]; then
+      echo "Reusing precomputed text embeddings: ${text_embedding_dir}"
+    else
+      echo "Precomputing text embeddings for ${policy_type}..."
+      PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/precompute_world_model_text_embeddings.py \
+        --dataset-root "${dataset_root}/${dataset_id}" \
+        --world-model wan22 || exit 1
+    fi
+    ;;
+esac
 
 PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --num_processes=$num_processes \
@@ -163,8 +189,16 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --log_freq=${log_freq} \
     --tolerance_s=0.04 \
     --wandb.enable=false
+train_status=$?
+printf '%s\n' "$train_status" > "$tmp_status"
+exit "$train_status"
 } 2>&1 | tee "$tmp_log"
-train_status=${PIPESTATUS[0]}   # 取管道第一段(训练进程)的真实退出码, tee 的退出码不可靠
+if [ -r "$tmp_status" ]; then
+  IFS= read -r train_status < "$tmp_status"
+else
+  train_status=1
+fi
+rm -f "$tmp_status"
 
 # 正常跑完才把临时日志搬到 output_dir 下的最终位置; 否则直接删除临时日志
 if [ "$train_status" -eq 0 ]; then

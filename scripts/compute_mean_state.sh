@@ -9,7 +9,7 @@
 # 输出: stdout 是 --robot.home_joints='...' (仅 14 关节, 不含 gripper);
 #       stderr 是逐关节 mean/std/min/max 表 + gripper 均值 (供核对)。
 set -e
-cd "$(dirname "$0")" || exit 1   # 切到仓库根, 服务器/本地通用
+cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
 
 dataset_id=${1:-rm_umi_dual_260708_pen_in_case_merged_3_notac_undist_256}

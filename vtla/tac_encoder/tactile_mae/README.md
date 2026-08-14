@@ -141,7 +141,7 @@ only **contact** frames and subsamples the rest:
 - otherwise kept with probability `--noncontact_keep_ratio` (default `0.05`).
 
 Scores are computed once and cached at `<dataset>/meta/contact_std.npz`. In
-`train_enc.sh` this is on by default; tune via env:
+`scripts/train_enc.sh` enables this by default; tune via env:
 `CONTACT_FILTER=0` (off), `CONTACT_STD_THRESHOLD`, `NONCONTACT_KEEP_RATIO`.
 
 ## Notes

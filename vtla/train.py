@@ -19,6 +19,7 @@ import dataclasses
 import logging
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,36 @@ from vtla.engine.utils.utils import (
 from vtla.engine.processor.relative_action_processor import route_ee_batch
 from vtla.frameworks.factory import make_policy, make_pre_post_processors
 from vtla.frameworks.pretrained import PreTrainedPolicy
+
+
+def _scalar_metric(value: Any) -> float | None:
+    if isinstance(value, torch.Tensor):
+        return float(value.detach().item()) if value.numel() == 1 else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _component_losses(loss: torch.Tensor, output_dict: dict | None) -> tuple[float, float | None]:
+    """Normalize policy-specific loss dictionaries for console training metrics."""
+    outputs = output_dict or {}
+    action_loss = next(
+        (
+            value
+            for key in ("loss_action", "action_loss")
+            if (value := _scalar_metric(outputs.get(key))) is not None
+        ),
+        float(loss.detach().item()),
+    )
+    video_loss = next(
+        (
+            value
+            for key in ("loss_video", "video_loss")
+            if (value := _scalar_metric(outputs.get(key))) is not None
+        ),
+        None,
+    )
+    return action_loss, video_loss
 
 
 def update_policy(
@@ -120,7 +151,22 @@ def update_policy(
     if has_method(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "update"):
         accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
 
-    train_metrics.loss = loss.item()
+    action_loss, video_loss = _component_losses(loss, output_dict)
+    train_metrics.action_loss = action_loss
+    if video_loss is not None:
+        if "video_loss" not in train_metrics.metrics:
+            action_meter = train_metrics.metrics["action_loss"]
+            remaining_meters = {
+                key: meter
+                for key, meter in train_metrics.metrics.items()
+                if key != "action_loss"
+            }
+            train_metrics.metrics = {
+                "action_loss": action_meter,
+                "video_loss": AverageMeter("video_loss", ":.3f"),
+                **remaining_meters,
+            }
+        train_metrics.video_loss = video_loss
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
@@ -207,10 +253,33 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     if is_main_process:
         logging.info("Creating policy")
+    active_cfg = cfg.trainable_config
+    if getattr(active_cfg, "type", None) == "fastwam":
+        if active_cfg.load_text_encoder and is_main_process:
+            logging.warning(
+                "Ignoring load_text_encoder=True for FastWAM training; training always uses cached text contexts."
+            )
+        active_cfg.load_text_encoder = False
+        if not cfg.resume:
+            active_cfg.text_embedding_cache_dir = Path(dataset.root) / "text_embeddings" / "wan22"
+            required_text_assets = [
+                active_cfg.text_embedding_cache_dir / "manifest.json",
+                active_cfg.text_embedding_cache_dir / "embeddings.safetensors",
+            ]
+            missing_text_assets = [path for path in required_text_assets if not path.is_file()]
+            if missing_text_assets:
+                raise FileNotFoundError(
+                    "Missing dataset-local Wan2.2 text embeddings: "
+                    f"{missing_text_assets}. Run `python tools/precompute_world_model_text_embeddings.py "
+                    f"--dataset-root {dataset.root} --world-model wan22`."
+                )
+            if is_main_process:
+                logging.info("Using dataset-local FastWAM text cache: %s", active_cfg.text_embedding_cache_dir)
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
         rename_map=cfg.rename_map,
+        for_training=True,
     )
 
     # 把训练集任务文字写进 policy config, 使 checkpoint 自包含 (inference --match-policy 直接
@@ -242,7 +311,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     active_cfg = cfg.trainable_config
     processor_pretrained_path = active_cfg.pretrained_path
-    # EE modes (episode_ee / absolute_ee / relative_ee) and joint relative actions change the
+    # EE modes (episode_ee / absolute_ee / relative_ee), joint relative actions, and FastWAM
+    # dataset-local text contexts change the
     # processor's feature dims and steps, so the pretrained/checkpoint processor must NOT be reused —
     # rebuild it from the current policy config (with the EE stats remap + pose relative/absolute
     # steps). This applies when resuming too: loading the saved processor would additionally prepend
@@ -256,12 +326,12 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         getattr(active_cfg, "use_relative_actions", False)
         or getattr(active_cfg, "state_mode", "joint") in _ee_state_modes
         or getattr(active_cfg, "action_mode", "joint") in _ee_action_modes
+        or (getattr(active_cfg, "type", None) == "fastwam" and not cfg.resume)
     )
     if _needs_rebuilt_processor and processor_pretrained_path is not None:
         logging.warning(
-            "Relative/EE action or EE state mode is set: building processors from the current policy "
-            "config instead of the pretrained/checkpoint processor (different dims/steps; avoids the "
-            "inference-only EE preprocessing step during training)."
+            "Building processors from the current policy config instead of the pretrained processor "
+            "because the active data contract requires dataset-specific state/action/text processing."
         )
         # The rebuilt-from-scratch processor would otherwise fall back to the HF hub tokenizer name
         # (the local path carried by the pretrained processor json is discarded here). For pi05, pull
@@ -373,9 +443,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     dl_iter = cycle(dataloader)
 
     policy.train()
+    fastwam_visualization_samples = []
 
     train_metrics = {
-        "loss": AverageMeter("loss", ":.3f"),
+        "action_loss": AverageMeter("action_loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -419,6 +490,23 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:
                 batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
         batch = preprocessor(batch)
+        if (
+            getattr(active_cfg, "type", None) == "fastwam"
+            and active_cfg.visualization_enabled
+            and len(fastwam_visualization_samples) < active_cfg.visualization_num_samples
+        ):
+            from vtla.frameworks.fastwam.visualization import capture_samples
+
+            fastwam_visualization_samples.extend(
+                capture_samples(
+                    batch,
+                    tactile_keys=active_cfg.tactile_windowed_keys(),
+                    num_samples=(
+                        active_cfg.visualization_num_samples
+                        - len(fastwam_visualization_samples)
+                    ),
+                )
+            )
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(
@@ -436,13 +524,22 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         step += 1
         if is_main_process:
             progbar.update(1)
-            progbar.set_postfix(
-                loss=f"{train_tracker.loss.val:.3f}",
-                lr=f"{train_tracker.lr.val:.1e}",
-            )
+            progress_metrics = {
+                "action_loss": f"{train_tracker.action_loss.val:.3f}",
+            }
+            if "video_loss" in train_tracker.metrics:
+                progress_metrics["video_loss"] = f"{train_tracker.video_loss.val:.3f}"
+            progress_metrics["lr"] = f"{train_tracker.lr.val:.1e}"
+            progbar.set_postfix(progress_metrics)
         train_tracker.step()
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+        is_fastwam_visualization_step = (
+            getattr(active_cfg, "type", None) == "fastwam"
+            and active_cfg.visualization_enabled
+            and len(fastwam_visualization_samples) >= active_cfg.visualization_num_samples
+            and step % active_cfg.visualization_freq == 0
+        )
 
         if is_log_step:
             logging.info(train_tracker)
@@ -452,6 +549,40 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     wandb_log_dict.update(output_dict)
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
+
+        if is_fastwam_visualization_step:
+            accelerator.wait_for_everyone()
+            if is_main_process:
+                if not fastwam_visualization_samples:
+                    logging.warning("FastWAM visualization skipped because no sample was captured.")
+                else:
+                    try:
+                        unwrapped_policy = accelerator.unwrap_model(policy)
+                        visualization_summary = unwrapped_policy.generate_training_visualizations(
+                            fastwam_visualization_samples,
+                            output_dir=cfg.output_dir,
+                            step=step,
+                        )
+                        for sample_metrics in visualization_summary["samples"]:
+                            logging.info(
+                                "FastWAM visualization sample %d saved to %s",
+                                sample_metrics["sample_index"],
+                                sample_metrics["image_path"],
+                            )
+                        logging.info(
+                            "FastWAM visualization metrics saved to %s",
+                            visualization_summary["metrics_path"],
+                        )
+                        if wandb_logger:
+                            wandb_logger.log_dict(
+                                visualization_summary["aggregate"], step=step, mode="eval"
+                            )
+                    except Exception:
+                        logging.exception(
+                            "FastWAM visualization failed at step %d; training will continue.",
+                            step,
+                        )
+            accelerator.wait_for_everyone()
 
         if cfg.save_checkpoint and is_saving_step:
             if is_main_process:

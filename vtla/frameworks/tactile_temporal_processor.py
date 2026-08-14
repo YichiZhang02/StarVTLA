@@ -38,6 +38,7 @@ from torch import Tensor
 
 from vtla.engine.configs import PipelineFeatureType, PolicyFeature
 from vtla.engine.processor.pipeline import ProcessorStep, ProcessorStepRegistry
+from vtla.engine.types import TransitionKey
 
 
 @dataclass
@@ -96,8 +97,11 @@ class TactileTemporalWindowStep(ProcessorStep):
         Modifies the observation dict in-place (shallow copy guard applied).
         """
         self._current_transition = transition
-        # Support dict-of-tensors (training batch) or EnvTransition wrappers.
-        if isinstance(transition, dict):
+        # Support flat dict-of-tensors and the dict-backed EnvTransition representation.
+        is_env_transition = isinstance(transition, dict) and TransitionKey.OBSERVATION in transition
+        if is_env_transition:
+            obs = dict(transition.get(TransitionKey.OBSERVATION) or {})
+        elif isinstance(transition, dict):
             obs = transition
         else:
             obs = transition.observation
@@ -144,7 +148,9 @@ class TactileTemporalWindowStep(ProcessorStep):
         if not updated:
             return transition
 
-        if isinstance(transition, dict):
+        if is_env_transition:
+            transition = {**transition, TransitionKey.OBSERVATION: {**obs, **updated}}
+        elif isinstance(transition, dict):
             transition = {**transition, **updated}
         else:
             transition = transition._replace(observation={**obs, **updated})
