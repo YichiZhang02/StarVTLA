@@ -10,6 +10,7 @@
 | `diffusion` | 随机初始化 | Conditional diffusion policy |
 | `pi05` | `pi05_base` 完整 checkpoint | VLM prefix 加 flow matching action expert |
 | `starvla_groot` | `Qwen3.5-0.8B` 基础 VLM | Qwen VLM 加 GR00T action head |
+| `starvla_groot_dinoalign` | `Qwen3.5-0.8B` + DINOv3 ViT-B/16 | 冻结 DINO teacher 对齐 Qwen 视觉 backbone；推理不加载 DINO |
 | `fastwam` | Wan2.2 组件和插值 DiT | 联合视频与动作生成的 world-action model |
 
 预训练权重的目录约定见 [playground/README.md](../playground/README.md#预训练权重)。
@@ -28,7 +29,7 @@ bash train.sh \
 | 位置 | 参数 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | 1 | `dataset_id` | `rm_umi_dual_260708_pen_in_case_notac_undist_256` | `playground/data/` 下的数据集 |
-| 2 | `policy_type` | `fastwam` | `act`、`diffusion`、`pi05`、`starvla_groot` 或 `fastwam` |
+| 2 | `policy_type` | `fastwam` | `act`、`diffusion`、`pi05`、`starvla_groot`、`starvla_groot_dinoalign` 或 `fastwam` |
 | 3 | `num_processes` | `4` | Accelerate 进程数 |
 | 4 | `batch_size` | `16` | 每进程 batch size |
 | 5 | `steps` | `10_000` | 训练步数 |
@@ -82,6 +83,10 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | `TACTILE_NUM_FRAMES` | `1` | 每个观测使用的触觉历史帧数 |
 | `TACTILE_FRAME_OFFSET` | `1` | 相邻触觉历史帧的间隔 |
 | `COLOR_TEMP_RANGE` | `[0,0]` | 色温增强采样范围；显式空值可关闭 |
+| `DINOV3_CHECKPOINT` | `playground/pretrained_models/vit_base_patch16_dinov3.lvd1689m` | DINOAlign 训练期 ViT-B/16 teacher 权重文件或目录 |
+
+`starvla_groot_dinoalign` 强制要求 `augmentation_mode=none` 且
+`COLOR_TEMP_RANGE=[0,0]`；其 Qwen student 光照增强由 policy 内部单独完成。
 
 ## 触觉时序窗口
 
@@ -98,6 +103,7 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | ACT | 展平为额外 token | 每帧作为独立相机 |
 | pi05 | 展平为额外 prefix token | 每帧作为独立相机 |
 | starvla_groot | 拼接到 hidden states | 每帧作为独立相机 |
+| starvla_groot_dinoalign | 拼接到 hidden states | 每帧作为独立图像并参与 DINO 对齐 |
 | diffusion | 加入 global conditioning | 不支持 |
 | fastwam | 注入 Video DiT 或动作 DiT context | 不支持 |
 
@@ -173,3 +179,4 @@ CUDA_VISIBLE_DEVICES=0 \
 
 - [Tactile MAE](tac_encoder/tactile_mae/README.md)
 - [StarVLA-GR00T](frameworks/starvla_groot/README.md)
+- [StarVLA-GR00T DINOAlign](frameworks/starvla_groot_dinoalign/README.md)

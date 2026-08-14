@@ -527,6 +527,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             progress_metrics = {
                 "action_loss": f"{train_tracker.action_loss.val:.3f}",
             }
+            if output_dict and "dino_alignment_loss" in output_dict:
+                progress_metrics["dino_loss"] = f"{output_dict['dino_alignment_loss']:.3f}"
             if "video_loss" in train_tracker.metrics:
                 progress_metrics["video_loss"] = f"{train_tracker.video_loss.val:.3f}"
             progress_metrics["lr"] = f"{train_tracker.lr.val:.1e}"

@@ -5,13 +5,13 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
 dataset_id=${1:-rm_umi_dual_260708_pen_in_case_notac_undist_256}  # 数据集名
-policy_type=${2:-fastwam}          # act | diffusion | pi05 | starvla_groot | fastwam
+policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam
 
 
 # 训练配置
 num_processes=${3:-4}
-batch_size=${4:-16}
-steps=${5:-10_000}
+batch_size=${4:-4}
+steps=${5:-40_000}
 save_freq=10_000
 log_freq=100
 
@@ -32,6 +32,7 @@ color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}
 tactile_encoder_path=${TACTILE_ENCODER_PATH:-${11:-playground/pretrained_models/AnyTouch-ViT-L-16}}
 tactile_insert_location=${TACTILE_INSERT_LOCATION:-${12:-encoder}}  # 触觉插入位置 encoder | decoder
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-16}  # 触觉 tokens / per image
+dinov3_checkpoint=${DINOV3_CHECKPOINT:-}  # starvla_groot_dinoalign 训练期 teacher 权重文件
 # 触觉时序窗口（encode 和 as_image 两种模式均生效）
 # tactile_num_frames: 每步输入的触觉帧数（含当前帧）。1 = 单帧（默认，完全向后兼容）。
 # tactile_frame_offset: 相邻两个触觉帧的采样间隔（帧数）。1 = 相邻帧；k = 更宽的时间感受野。
@@ -68,9 +69,9 @@ pretrained_path=
 base_vlm=
 case "${policy_type}" in
   pi05)          pretrained_path=playground/pretrained_models/pi05_base ;;
-  starvla_groot) base_vlm=playground/pretrained_models/Qwen3.5-0.8B ;;
+  starvla_groot|starvla_groot_dinoalign) base_vlm=playground/pretrained_models/Qwen3.5-0.8B ;;
   act|diffusion|fastwam) : ;;  # 从底座或随机初始化，不加载 VTLA policy checkpoint
-  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|fastwam)"; exit 1 ;;
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam)"; exit 1 ;;
 esac
 
 
@@ -83,6 +84,12 @@ case "${policy_type}" in
   starvla_groot)
     extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
     ;;
+  starvla_groot_dinoalign)
+    extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
+    if [ -n "${dinov3_checkpoint}" ]; then
+      extra_args="${extra_args} --policy.dinov3_checkpoint=${dinov3_checkpoint}"
+    fi
+    ;;
   fastwam)
     extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"
     extra_args="${extra_args} --policy.visualization_enabled=${visualization_enabled}"
@@ -91,7 +98,7 @@ case "${policy_type}" in
     : # 这两个没有 VLM/dtype 相关字段
     ;;
   *)
-    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|fastwam)"; exit 1
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam)"; exit 1
     ;;
 esac
 

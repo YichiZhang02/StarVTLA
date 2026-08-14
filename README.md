@@ -1,6 +1,6 @@
 # StarVTLA
 
-VTLA 训练与部署基础设施，覆盖触觉 backbone 预训练、机器人数据处理、ACT/Diffusion/pi05/StarVLA-GR00T/FastWAM 策略训练，以及真机采集和推理。
+VTLA 训练与部署基础设施，覆盖触觉 backbone 预训练、机器人数据处理、ACT/Diffusion/pi05/StarVLA-GR00T/DINOAlign/FastWAM 策略训练，以及真机采集和推理。
 
 ## Repository Layout
 

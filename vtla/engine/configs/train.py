@@ -110,6 +110,20 @@ class TrainPipelineConfig(HubMixin):
             raise ValueError("No policy is configured. Please specify one with `--policy.path`.")
 
         active_cfg = self.trainable_config
+        if active_cfg.type == "starvla_groot_dinoalign":
+            image_transforms = self.dataset.image_transforms
+            color_temp = (
+                tuple(image_transforms.color_temp)
+                if image_transforms.color_temp is not None
+                else None
+            )
+            if image_transforms.preset != "none" or color_temp != (0, 0):
+                raise ValueError(
+                    "starvla_groot_dinoalign requires augmentation_mode=none and "
+                    "COLOR_TEMP_RANGE='[0,0]' so the DINO teacher receives an unaugmented "
+                    "reference image. Got "
+                    f"preset={image_transforms.preset!r}, color_temp={color_temp!r}."
+                )
         if not self.job_name:
             self.job_name = f"{active_cfg.type}"
 

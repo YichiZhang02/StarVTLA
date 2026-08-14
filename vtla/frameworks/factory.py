@@ -51,6 +51,9 @@ from .fastwam.configuration_fastwam import FastWAMConfig
 from .pi05.configuration_pi05 import PI05Config
 from .pretrained import PreTrainedPolicy
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig
+from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
+    StarvlaGrootDinoAlignConfig,
+)
 from .utils import validate_visual_features_consistency
 
 
@@ -108,6 +111,12 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .starvla_groot.modeling_starvla_groot import StarvlaGrootPolicy
 
         return StarvlaGrootPolicy
+    elif name == "starvla_groot_dinoalign":
+        from .starvla_groot_dinoalign.modeling_starvla_groot_dinoalign import (
+            StarvlaGrootDinoAlignPolicy,
+        )
+
+        return StarvlaGrootDinoAlignPolicy
     else:
         try:
             return _get_policy_cls_from_policy_name(name=name)
@@ -144,6 +153,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI05Config(**kwargs)
     elif policy_type == "starvla_groot":
         return StarvlaGrootConfig(**kwargs)
+    elif policy_type == "starvla_groot_dinoalign":
+        return StarvlaGrootDinoAlignConfig(**kwargs)
     else:
         try:
             config_cls = PreTrainedConfig.get_choice_class(policy_type)
@@ -227,6 +238,8 @@ def make_pre_post_processors(
             from .pi05 import processor_pi05  # noqa: F401
         elif isinstance(policy_cfg, StarvlaGrootConfig):
             from .starvla_groot import processor_starvla_groot  # noqa: F401
+        elif isinstance(policy_cfg, StarvlaGrootDinoAlignConfig):
+            from .starvla_groot_dinoalign import processor_starvla_groot_dinoalign  # noqa: F401
 
         preprocessor = PolicyProcessorPipeline.from_pretrained(
             pretrained_model_name_or_path=pretrained_path,
@@ -328,6 +341,16 @@ def make_pre_post_processors(
             dataset_stats=kwargs.get("dataset_stats"),
         )
 
+    elif isinstance(policy_cfg, StarvlaGrootDinoAlignConfig):
+        from .starvla_groot_dinoalign.processor_starvla_groot_dinoalign import (
+            make_starvla_groot_dinoalign_pre_post_processors,
+        )
+
+        processors = make_starvla_groot_dinoalign_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
     else:
         try:
             processors = _make_processors_from_policy_config(
@@ -382,6 +405,10 @@ def make_policy(
         cfg.load_text_encoder = not for_training
 
     kwargs = {}
+    if isinstance(cfg, StarvlaGrootDinoAlignConfig):
+        # Runtime-only: the frozen teacher is excluded from saved config/state and
+        # never loaded by inference policy construction.
+        kwargs["load_dino_teacher"] = for_training
     features = dataset_to_policy_features(ds_meta.features)
 
     # Build input/output features from the dataset meta. Visual (camera) features ALWAYS come from

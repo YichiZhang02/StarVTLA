@@ -20,6 +20,9 @@ from .factory import get_policy_class, make_policy, make_policy_config, make_pre
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .pretrained import PreTrainedPolicy as PreTrainedPolicy
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig as StarvlaGrootConfig
+from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
+    StarvlaGrootDinoAlignConfig as StarvlaGrootDinoAlignConfig,
+)
 
 # NOTE: Policy modeling classes (e.g., GaussianActorPolicy) are intentionally NOT re-exported here.
 # They have heavy optional dependencies and are loaded lazily via get_policy_class().
@@ -32,6 +35,7 @@ __all__ = [
     "FastWAMConfig",
     "PI05Config",
     "StarvlaGrootConfig",
+    "StarvlaGrootDinoAlignConfig",
     # Base class
     "PreTrainedPolicy",
     # Factory functions

@@ -52,7 +52,8 @@ playground/data/
 | `CLIP-ViT-B-16-DataComp.XL-s13B-b90K` | 触觉 MAE 的 ViT-B 初始化，要求 HF 格式 | [laion/CLIP-ViT-B-16-DataComp.XL-s13B-b90K](https://huggingface.co/laion/CLIP-ViT-B-16-DataComp.XL-s13B-b90K) |
 | `AnyTouch-ViT-L-16` | AnyTouch 初始化和 VTLA 触觉 encoder | [AnyTouch](https://github.com/GeWu-Lab/AnyTouch) |
 | `pi05_base` | pi05 完整 policy checkpoint | [lerobot/pi05_base](https://huggingface.co/lerobot/pi05_base) |
-| `Qwen3.5-0.8B` | `starvla_groot` 底座 VLM | [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) |
+| `Qwen3.5-0.8B` | `starvla_groot` / `starvla_groot_dinoalign` 底座 VLM | [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) |
+| `vit_base_patch16_dinov3.lvd1689m` | `starvla_groot_dinoalign` 训练期冻结 teacher | [timm/vit_base_patch16_dinov3.lvd1689m](https://huggingface.co/timm/vit_base_patch16_dinov3.lvd1689m) |
 | `Wan2.2-TI2V-5B` | FastWAM 的 Video DiT、VAE、T5、tokenizer 与插值 DiT | [Wan-AI/Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B) |
 
 推荐下载形式：
