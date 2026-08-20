@@ -403,6 +403,62 @@ def decode_video_frames_torchcodec(
     return closest_frames
 
 
+def decode_tactile_video_frames_pyav(
+    video_path: Path | str,
+    timestamps: list[float],
+    tolerance_s: float,
+    return_uint8: bool = False,
+) -> torch.Tensor:
+    """Decode lossless uint16/uint8 tactile MKV into its standard uint8 view."""
+    from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
+
+    first_ts = min(timestamps)
+    last_ts = max(timestamps)
+    loaded_frames: list[torch.Tensor] = []
+    loaded_ts: list[float] = []
+
+    with av.open(str(video_path)) as container:
+        stream = container.streams.video[0]
+        pixel_format = stream.codec_context.format.name
+        decode_format = "rgb48le" if "16" in pixel_format else "rgb24"
+        container.seek(int(first_ts * av.time_base), backward=True)
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                continue
+            current_ts = float(frame.pts * stream.time_base)
+            tactile_frame = frame.to_ndarray(format=decode_format)
+            encoded = tactile_uint16_to_uint8(tactile_frame)
+            loaded_frames.append(torch.from_numpy(encoded).permute(2, 0, 1).contiguous())
+            loaded_ts.append(current_ts)
+            if current_ts >= last_ts:
+                break
+
+    if not loaded_frames:
+        raise FrameTimestampError(
+            f"No tactile frames could be decoded from {video_path} in "
+            f"the timestamp range [{first_ts}, {last_ts}]."
+        )
+
+    query_ts = torch.tensor(timestamps)
+    loaded_ts_t = torch.tensor(loaded_ts)
+    distances = torch.cdist(query_ts[:, None], loaded_ts_t[:, None], p=1)
+    minimum, argmin = distances.min(1)
+    # Matroska commonly stores timestamps on a 1 ms time base. At 30 Hz this
+    # rounds 33.333 ms frame intervals by up to 0.333 ms.
+    effective_tolerance_s = max(tolerance_s, 0.00051)
+    if not (minimum < effective_tolerance_s).all():
+        raise FrameTimestampError(
+            f"Tactile frame timestamps violate tolerance "
+            f"({minimum} > {effective_tolerance_s=}). "
+            f"queried={query_ts}, loaded={loaded_ts_t}, video={video_path}"
+        )
+
+    closest_frames = torch.stack([loaded_frames[index] for index in argmin])
+    if return_uint8:
+        return closest_frames
+    return (closest_frames / 255.0).type(torch.float32)
+
+
 def encode_video_frames(
     imgs_dir: Path | str,
     video_path: Path | str,
@@ -545,12 +601,14 @@ def concatenate_video_files(
         tmp_concatenate_path, mode="r", format="concat", options={"safe": "0"}
     )  # safe = 0 allows absolute paths as well as relative paths
 
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_named_file:
+    # Matroska is required for external lossless streams such as FFV1 tactile data.
+    # Keep the destination suffix so PyAV selects the correct output container.
+    suffix = output_video_path.suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_named_file:
         tmp_output_video_path = tmp_named_file.name
 
-    output_container = av.open(
-        tmp_output_video_path, mode="w", options={"movflags": "faststart"}
-    )  # faststart is to move the metadata to the beginning of the file to speed up loading
+    output_options = {"movflags": "faststart"} if suffix.lower() in {".mp4", ".mov"} else None
+    output_container = av.open(tmp_output_video_path, mode="w", options=output_options)
 
     # Replicate input streams in output container
     stream_map = {}
@@ -1033,7 +1091,7 @@ def get_video_pixel_channels(pix_fmt: str) -> int:
         return 1
     elif "rgba" in pix_fmt or "yuva" in pix_fmt:
         return 4
-    elif "rgb" in pix_fmt or "yuv" in pix_fmt:
+    elif "rgb" in pix_fmt or "gbr" in pix_fmt or "yuv" in pix_fmt:
         return 3
     else:
         raise ValueError("Unknown format")

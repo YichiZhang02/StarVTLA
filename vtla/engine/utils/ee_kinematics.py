@@ -57,7 +57,7 @@ def make_realman_algo():
 
 
 def joint_indices(names: list[str]) -> dict:
-    """Derive per-arm joint/gripper indices from observation.state feature names.
+    """Derive one or two complete arm layouts from observation.state feature names.
 
     Args:
         names: Ordered list of feature names for each dimension of observation.state.
@@ -75,22 +75,31 @@ def joint_indices(names: list[str]) -> dict:
             idx[f"{side}_grip"] = i
         elif "joint" in low:
             idx[f"{side}_joints"].append(i)
-    for k in ("left_joints", "right_joints"):
-        if len(idx[k]) != DOF:
-            raise ValueError(f"Expected {DOF} {k}, found {len(idx[k])} in names={names}")
-    if idx["left_grip"] is None or idx["right_grip"] is None:
-        raise ValueError(f"Missing gripper index in names={names}")
+    sides: list[str] = []
+    for side in ("right", "left"):
+        joints = idx[f"{side}_joints"]
+        grip = idx[f"{side}_grip"]
+        if not joints and grip is None:
+            continue
+        if len(joints) != DOF:
+            raise ValueError(
+                f"Expected {DOF} {side}_joints, found {len(joints)} in names={names}"
+            )
+        if grip is None:
+            raise ValueError(f"Missing {side} gripper index in names={names}")
+        sides.append(side)
+    if not sides:
+        raise ValueError(f"No complete left/right arm found in names={names}")
+    idx["sides"] = tuple(sides)
     return idx
 
 
 def split_arms(vec: np.ndarray, jidx: dict):
-    """Split a 16-dim joint vector into (right_joints, right_grip, left_joints, left_grip)."""
+    """Split a joint vector into per-arm tuples in canonical arm order."""
     vec = np.asarray(vec, dtype=np.float64)
-    return (
-        vec[jidx["right_joints"]],
-        float(vec[jidx["right_grip"]]),
-        vec[jidx["left_joints"]],
-        float(vec[jidx["left_grip"]]),
+    return tuple(
+        (vec[jidx[f"{side}_joints"]], float(vec[jidx[f"{side}_grip"]]))
+        for side in jidx["sides"]
     )
 
 
@@ -140,10 +149,9 @@ def relative_arm_ee(pos, mat, grip, p0, R0, rot_mode: str = "rot6d") -> np.ndarr
     return np.concatenate([p_rel, mat_to_rot(R_rel, rot_mode), [grip]]).astype(np.float64)
 
 
-def fk_both(algo, vec16: np.ndarray, jidx: dict):
-    """FK for both arms from a 16-dim joint vector."""
-    rj, rg, lj, lg = split_arms(vec16, jidx)
-    return (fk(algo, rj), rg), (fk(algo, lj), lg)
+def fk_both(algo, joint_vector: np.ndarray, jidx: dict):
+    """FK for every arm present in ``jidx`` (one or two arms)."""
+    return tuple((fk(algo, joints), grip) for joints, grip in split_arms(joint_vector, jidx))
 
 
 def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline, rot_mode: str = "rot6d") -> np.ndarray:
@@ -159,14 +167,11 @@ def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline, rot_mode: str =
     Returns:
         float32 array of shape (n_arms * per_arm_dim,).
     """
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    (Rp0, RR0), (Lp0, LR0) = baseline
-    return np.concatenate(
-        [
-            relative_arm_ee(rp, rm, rg, Rp0, RR0, rot_mode),
-            relative_arm_ee(lp, lm, lg, Lp0, LR0, rot_mode),
-        ]
-    ).astype(np.float32)
+    arms = fk_both(algo, vec16, jidx)
+    return np.concatenate([
+        relative_arm_ee(pos, mat, grip, pos0, mat0, rot_mode)
+        for ((pos, mat), grip), (pos0, mat0) in zip(arms, baseline, strict=True)
+    ]).astype(np.float32)
 
 
 def absolute_arm_ee(pos, mat, grip, rot_mode: str = "rot6d") -> np.ndarray:
@@ -184,10 +189,10 @@ def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict, rot_mode: str = "rot6d")
     Returns:
         float32 array of shape (n_arms * per_arm_dim,).
     """
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    return np.concatenate(
-        [absolute_arm_ee(rp, rm, rg, rot_mode), absolute_arm_ee(lp, lm, lg, rot_mode)]
-    ).astype(np.float32)
+    return np.concatenate([
+        absolute_arm_ee(pos, mat, grip, rot_mode)
+        for (pos, mat), grip in fk_both(algo, vec16, jidx)
+    ]).astype(np.float32)
 
 
 def compute_baseline(algo, vec16: np.ndarray, jidx: dict) -> tuple:
@@ -196,5 +201,4 @@ def compute_baseline(algo, vec16: np.ndarray, jidx: dict) -> tuple:
     Returns:
         ((R_p0, R_R0), (L_p0, L_R0))
     """
-    ((rp, rm), _), ((lp, lm), _) = fk_both(algo, vec16, jidx)
-    return (rp, rm), (lp, lm)
+    return tuple(pose for pose, _grip in fk_both(algo, vec16, jidx))

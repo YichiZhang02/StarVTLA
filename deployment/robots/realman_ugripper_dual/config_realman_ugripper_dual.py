@@ -21,7 +21,7 @@
     - 从臂 (Follower): TCP/IP 网线  (左 192.168.1.200 / 右 192.168.1.201, 端口 8080)
     - 领控电爪 (Gripper): gRPC/CAN  (左 192.168.1.10:55551 / 右 192.168.1.11:55551)
     - 手腕鱼眼相机: fish_camera gRPC(50088) + UDP, 原生 1920x1080
-    - 触觉传感器 x2: dmrobotics Flux gRPC(50051/50052), 输出 (240,320,3) uint16
+    - 触觉传感器 x2: dmrobotics Flux gRPC(50051/50052), 输出 (288,384,3) uint16
 
 主臂 (Leader) 不在本机器人内, 由 bi_realman_ugripper_leader 遥操作器负责。
 
@@ -110,13 +110,10 @@ class RealmanUGripperDualConfig(RobotConfig):
     # 实测这批 Flux 传感器输出 384x288 (见 record 日志首帧 shape=(288,384,3))
     tactile_width: int = 384
     tactile_height: int = 288
-    # 触觉 uint8 归一化编码 (float32 -> uint8): 每通道按 [min,max] 线性映射到 [0,255]。
-    # 通道: B=depth, G=deform_x, R=deform_y (见 _tactile_worker)。
-    # ⚠️ 以下范围需与传感器实测量级 / 训练时一致, 否则会饱和或丢失动态范围。
-    tactile_depth_min: float = 0.0
-    tactile_depth_max: float = 4.0
-    tactile_deform_min: float = -1.0
-    tactile_deform_max: float = 1.0
+    # 独立控制触觉源端推送率；不要与鱼眼 stream_max_fps 共用。
+    tactile_max_fps: int = 30
+    # 输出遵循 tactile_u16_fixed_v1: [depth*1000, dx*1000+30000, dy*1000+30000]。
+    # 权威帧由采集引擎以 FFV1/gbrp16le 无损 MKV video feature 保存。
 
     # ============ 数据流首帧等待超时 ============
     stream_first_frame_timeout: float = 5.0
@@ -125,7 +122,7 @@ class RealmanUGripperDualConfig(RobotConfig):
     # ⚠️ 跳帧式限速的"量化陷阱": 从 ~50fps 的鱼眼源按 N 限速, 会被量化成源帧率的整数
     # 分之一。设 30~49 之间任意值都会变成"每隔一帧"= ~25fps (< 30Hz 消费) -> 手腕重复帧
     # 卡顿。实测 (analyze 鱼眼视频): 设 45 时唯一帧只有 25fps。
-    # 因此只能取: 0 = 不限速(鱼眼跑满 ~50-59fps, 触觉 ~110fps), 或 >= 源帧率(>=60)。
+    # 因此鱼眼只能取: 0 = 不限速(约 50-59fps), 或 >= 源帧率(>=60)。
     # 保证产出 > 录制 30fps, 主循环每帧都有新帧。28 核机器满速 CPU 仅 ~24%, 充裕。
     # 若想省 CPU 又不卡, 用 640x360/480 鱼眼(满速也很轻), 别回到 30~49 的限速。
     stream_max_fps: float = 0.0

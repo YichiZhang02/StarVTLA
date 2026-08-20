@@ -382,8 +382,15 @@ def main() -> int:
     ap.add_argument("--dst", type=Path, default=None, help="Destination dataset root (created).")
     ap.add_argument("--calib", nargs="+", default=None,
                     help="unset = bundled tools/calib; or single calib.json; or repeated cam=calib.json.")
-    ap.add_argument("--cameras", nargs="*", default=list(DEFAULT_CALIB),
-                    help="Wrist camera keys to undistort (others copied verbatim).")
+    ap.add_argument(
+        "--cameras",
+        nargs="*",
+        default=None,
+        help=(
+            "Wrist camera keys to undistort (others copied verbatim). "
+            "Unset = use whichever bundled-default wrist cameras exist in the dataset."
+        ),
+    )
     ap.add_argument("--crop", type=int, default=896, help="Center-crop square size (default 896).")
     ap.add_argument("--gop", type=int, default=4, help="Keyframe interval; small = fast seeks (default 4).")
     ap.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better/larger (default 18).")
@@ -407,9 +414,14 @@ def main() -> int:
         ap.error("ffmpeg/ffprobe not found on PATH.")
 
     info = json.loads((src / "meta" / "info.json").read_text())
-    targets = [c for c in args.cameras if info.get("features", {}).get(c, {}).get("dtype") == "video"]
-    missing = [c for c in args.cameras if c not in targets]
-    if missing:
+    requested_cameras = args.cameras if args.cameras is not None else list(DEFAULT_CALIB)
+    targets = [
+        camera
+        for camera in requested_cameras
+        if info.get("features", {}).get(camera, {}).get("dtype") == "video"
+    ]
+    missing = [camera for camera in requested_cameras if camera not in targets]
+    if args.cameras is not None and missing:
         ap.error(f"--cameras not present as video features in dataset: {missing}")
     calib_map = _resolve_calib(args.calib, targets)
     for cam in targets:

@@ -304,7 +304,9 @@ class LeRobotDatasetMetadata:
         ep = self.episodes[ep_index]
         chunk_idx = ep[f"videos/{vid_key}/chunk_index"]
         file_idx = ep[f"videos/{vid_key}/file_index"]
-        fpath = self.video_path.format(video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx)
+        fpath = self.get_video_path_template(vid_key).format(
+            video_key=vid_key, chunk_index=chunk_idx, file_index=file_idx
+        )
         fpath = Path(fpath)
         # If the file doesn't exist with the template extension, try common video extensions.
         if self.root is not None and not (self.root / fpath).exists():
@@ -313,6 +315,13 @@ class LeRobotDatasetMetadata:
                 if (self.root / candidate).exists():
                     return candidate
         return fpath
+
+    def get_video_path_template(self, vid_key: str) -> str:
+        """Return a feature-specific video path template when one is configured."""
+        template = self.features.get(vid_key, {}).get("video_path", self.video_path)
+        if template is None:
+            raise ValueError(f"Dataset has no video path template for '{vid_key}'")
+        return template
 
     @property
     def data_path(self) -> str:
@@ -562,7 +571,9 @@ class LeRobotDatasetMetadata:
         video_keys = [video_key] if video_key is not None else self.video_keys
         for key in video_keys:
             if not self.features[key].get("info", None):
-                video_path = self.root / self.video_path.format(video_key=key, chunk_index=0, file_index=0)
+                video_path = self.root / self.get_video_path_template(key).format(
+                    video_key=key, chunk_index=0, file_index=0
+                )
                 self.info.features[key]["info"] = get_video_info(video_path)
 
     def update_chunk_settings(

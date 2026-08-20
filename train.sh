@@ -39,11 +39,6 @@ dinov3_checkpoint=${DINOV3_CHECKPOINT:-}  # starvla_groot_dinoalign 训练期 te
 tactile_num_frames=${TACTILE_NUM_FRAMES:-1}
 tactile_frame_offset=${TACTILE_FRAME_OFFSET:-1}
 
-# 相机/触觉 key 配置
-top_cam=${TOP_CAM:-'[observation.images.cam_top]'}
-wrist_cam=${WRIST_CAM:-'[observation.images.left_cam_wrist,observation.images.right_cam_wrist]'}
-tactile_keys=${TACTILE_KEYS:-'[observation.images.left_cam_finger0,observation.images.left_cam_finger1,observation.images.right_cam_finger0,observation.images.right_cam_finger1]'}
-
 # =================== 不是很需要改动的配置 ===================
 # 保存的模型/日志名拼接规则
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_aug_${augmentation_mode}"
@@ -53,6 +48,33 @@ run_name="$(date +%Y%m%d_%H%M%S)_${dataset_id}_${policy_type}_${policy_suffix}"
 # 路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)
 dataset_root=playground/data
 output_root=playground/results/models
+
+# 默认直接从数据集 video features 读取相机/触觉 key。环境变量可显式覆盖。
+dataset_info=${dataset_root}/${dataset_id}/meta/info.json
+if [ ! -f "${dataset_info}" ]; then
+  echo "Dataset metadata not found: ${dataset_info}"; exit 1
+fi
+mapfile -t auto_video_keys < <(
+  python -c '
+import json
+import sys
+
+features = json.load(open(sys.argv[1], encoding="utf-8")).get("features", {})
+videos = [(key, value) for key, value in features.items() if value.get("dtype") == "video"]
+is_tactile = lambda key, value: bool(value.get("tactile_encoding")) or "finger" in key.lower()
+tactile = [key for key, value in videos if is_tactile(key, value)]
+wrist = [key for key, value in videos if not is_tactile(key, value) and "wrist" in key.lower()]
+top = [key for key, value in videos if not is_tactile(key, value) and key not in wrist]
+for keys in (top, wrist, tactile):
+    print("[" + ",".join(keys) + "]")
+' "${dataset_info}"
+)
+if [ "${#auto_video_keys[@]}" -ne 3 ]; then
+  echo "Failed to infer video keys from ${dataset_info}"; exit 1
+fi
+top_cam=${TOP_CAM:-${auto_video_keys[0]}}
+wrist_cam=${WRIST_CAM:-${auto_video_keys[1]}}
+tactile_keys=${TACTILE_KEYS:-${auto_video_keys[2]}}
 
 output_dir=${output_root}/${run_name}
 log_file="${output_dir}/${run_name}.log"

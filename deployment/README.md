@@ -53,6 +53,9 @@ deployment/robots/<robot_type>/config_<robot_type>.py
 - 触觉图像尺寸、深度和形变编码范围。
 - 启用的机械臂、顶部相机、腕部相机和触觉开关。
 
+触觉 `uint16` 采集、精确字节平面和线性 `uint8` 派生格式统一遵循
+[Flux 触觉数据编码与转换标准](TACTILE_ENCODING_STANDARD.md)。
+
 配置字段可以通过命令行覆盖：
 
 ```bash
@@ -60,7 +63,48 @@ deployment/robots/<robot_type>/config_<robot_type>.py
 --robot.left_follower_ip=192.168.1.200
 ```
 
-`--robot.id` 用于区分同型号的不同机器人，并影响标定文件目录。
+机器人标定文件按 `robot.type` 隔离，默认位于
+`$HF_LEROBOT_CALIBRATION/robots/<robot_type>/calibration.json`。
+
+单左臂新硬件使用 `realman_ugripper_left`：
+
+```bash
+--robot.type=realman_ugripper_left
+```
+
+该类型固定启用逻辑左臂，默认连接从臂 `192.168.1.201:8080` 和末端板
+`192.168.1.10`，且默认不连接额外的顶部 USB 相机。
+
+单左臂配置使用独立字段，不接受 dual 的 `arms`、`left_*_ip` 或 `right_*_ip` 参数：
+
+```bash
+--robot.follower_ip=192.168.1.201
+--robot.board_ip=192.168.1.10
+--robot.pc_host=192.168.1.102
+```
+
+安全检查：
+
+```bash
+python -m deployment.tools.hardware_check \
+  --robot-type realman_ugripper_left \
+  --stage existence
+```
+
+采集时使用独立的左主臂类型，使动作字段与机器人 `left_*` 特征一致：
+
+该主臂默认串口为 `/dev/ttyRealmanUGripperLeftLeader`，通过 USB 设备序列号绑定，
+不会占用旧双臂 rig 的 `/dev/ttyLeaderL`。
+
+```bash
+python -m deployment.collect \
+  --robot.type=realman_ugripper_left \
+  --teleop.type=left_realman_ugripper_leader \
+  --dataset.repo_id=local/left_test \
+  --dataset.single_task="hardware validation" \
+  --dataset.num_episodes=1 \
+  --dataset.push_to_hub=false
+```
 
 ## 硬件自检
 
@@ -102,12 +146,70 @@ bash collect.sh rm_tactile_demo "抓笔" 30
 playground/data/<timestamp>_<name>/
 ```
 
+启用触觉时，触觉会和 wrist camera 一样注册为数据集 video feature。权威
+`uint16` 帧使用无损 FFV1 Matroska，保存在同一个 `videos/` 层级：
+
+```text
+playground/data/<timestamp>_<name>/
+├── videos/
+│   ├── observation.images.left_cam_wrist/chunk-000/file-000.mp4
+│   ├── observation.images.left_cam_finger0/chunk-000/file-000.mkv
+│   ├── observation.images.left_cam_finger1/chunk-000/file-000.mkv
+│   ├── observation.images.right_cam_finger0/chunk-000/file-000.mkv
+│   └── observation.images.right_cam_finger1/chunk-000/file-000.mkv
+└── meta/
+    ├── info.json
+    ├── tactile_encoding.json
+    └── episodes/...
+```
+
+### 触觉采集编码
+
+dmrobotics Flux SDK 的 `getDepth()` 和 `getDeformation2D()` 返回 `float32`。采集进程按
+固定比例和偏置编码成 HWC `uint16`，不根据单个数据集动态计算 min/max：
+
+```python
+U16[..., 0] = clip(rint(depth    * 1000),         0, 65535)
+U16[..., 1] = clip(rint(deform_x * 1000 + 30000), 0, 65535)
+U16[..., 2] = clip(rint(deform_y * 1000 + 30000), 0, 65535)
+```
+
+通道索引固定为 `0=depth`、`1=deform_x`、`2=deform_y`。物理值解码为：
+
+```python
+depth    = U16[..., 0] / 1000
+deform_x = (U16[..., 1] - 30000) / 1000
+deform_y = (U16[..., 2] - 30000) / 1000
+```
+
+权威视频格式固定为：
+
+```text
+container: Matroska (.mkv)
+codec: FFV1
+pixel format: gbrp16le
+decode format: rgb48le
+dtype/layout: uint16 / HWC
+encoding: tactile_u16_fixed_v1
+```
+
+FFV1 MKV 是后续审计、重新量化和转换的权威数据。解码为 `rgb48le` 后的三个数组通道
+才是上述语义顺序；不要按播放器显示颜色推断通道。`meta/info.json` 会记录触觉 feature、
+codec、pixel format、storage dtype 和视频路径，`meta/tactile_encoding.json` 记录固定比例、
+偏置及通道定义；episode parquet 会像 wrist video 一样记录文件编号和时间范围。
+
+训练前通过 `scripts/process_joint_data.sh` 将权威 MKV 转换成线性 `uint8` MP4，完整步骤、
+量化公式和最终 YUV420 存储约定见 [Workflow Scripts](../scripts/README.md#触觉处理流程)。
+
+重录时尚未提交的触觉 MKV 会一起删除。
+触觉源端推送率由独立的 `--robot.tactile_max_fps` 控制，默认与采集频率一致为 30，
+不会再受鱼眼 `stream_max_fps` 的限速策略影响。
+
 也可以直接调用 Python 入口：
 
 ```bash
 python -m deployment.collect \
   --robot.type=realman_ugripper_dual \
-  --robot.id=realman_dual \
   --teleop.type=bi_realman_ugripper_leader \
   --dataset.repo_id=local/$(date +%Y%m%d_%H%M%S)_grab_pen \
   --dataset.single_task="抓笔" \

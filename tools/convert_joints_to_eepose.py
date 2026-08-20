@@ -16,33 +16,33 @@
 
 """Offline: add EE-pose columns to a joint LeRobot v3.0 dataset (in place).
 
-Reads the joint ``observation.state`` / ``action`` (16-dim, dual-arm) and, via Realman forward
-kinematics, ADDS eight columns to the SAME dataset (joint columns are left untouched, so joint-mode
-training is unaffected):
+Reads the joint ``observation.state`` names, automatically detects one or two complete Realman
+arms, and via forward kinematics ADDS eight columns to the SAME dataset. Joint columns are left
+untouched, so joint-mode training is unaffected. EE dimensions are 10/8 per arm for rot6d/quat.
 
-    observation.state_episode_ee : 20-dim, EE pose of the STATE joints relative to each episode's
-                                   FIRST frame (T0^{-1}·Tt), expressed in the first-frame frame.
-                                   Rotation as rot6d (first two columns of the rotation matrix).
-    action_episode_ee            : 20-dim, IDENTICAL to observation.state_episode_ee (the state's own
+    observation.state_episode_ee : 10 dims/arm, EE pose of the STATE joints relative to each
+                                   episode's FIRST frame (T0^{-1}·Tt), expressed in that frame.
+                                   Rotation uses rot6d (first two rotation-matrix columns).
+    action_episode_ee            : IDENTICAL to observation.state_episode_ee (the state's own
                                    trajectory). Kept as a separate column so it can carry the action
                                    horizon (delta_indices) independently of the state window.
-    observation.state_absolute_ee: 20-dim, EE pose of the STATE joints in the robot base frame (Tt,
+    observation.state_absolute_ee: 10 dims/arm, EE pose in the robot base frame (Tt,
                                    NO T0 subtraction) — keeps absolute workspace position. rot6d.
-    action_absolute_ee           : 20-dim, IDENTICAL to observation.state_absolute_ee (separate column
+    action_absolute_ee           : IDENTICAL to observation.state_absolute_ee (separate column
                                    only so it can carry the action horizon independently). rot6d.
 
-    observation.state_episode_quat : 16-dim, same as state_episode_ee but rotation as quaternion
-                                     [x, y, z, w] (per arm: xyz(3) + quat(4) + gripper(1) = 8).
-    action_episode_quat            : 16-dim, IDENTICAL to observation.state_episode_quat.
-    observation.state_absolute_quat: 16-dim, same as state_absolute_ee but quat rotation.
-    action_absolute_quat           : 16-dim, IDENTICAL to observation.state_absolute_quat.
+    observation.state_episode_quat : 8 dims/arm, same as state_episode_ee but rotation as quaternion
+                                     [x, y, z, w].
+    action_episode_quat            : IDENTICAL to observation.state_episode_quat.
+    observation.state_absolute_quat: same as state_absolute_ee but quaternion rotation.
+    action_absolute_quat           : IDENTICAL to observation.state_absolute_quat.
 
 ``action_relative_ee`` / ``action_relative_quat`` stats (the relativized targets the model trains on)
 are anchor-independent (T0 cancels in St^-1·S_{t+k}), so they are computed once and reused by both
 episode and absolute state modes.
 
 rot6d columns use per arm ``[xyz(3), rot6d(6), gripper(1)]``, ordered RIGHT arm first then LEFT
-(20 = 2 * 10). quat columns use per arm ``[xyz(3), quat_xyzw(4), gripper(1)]`` (16 = 2 * 8).
+when both exist. quat columns use per arm ``[xyz(3), quat_xyzw(4), gripper(1)]``.
 Gripper is kept absolute in both representations.
 
 The action is the STATE's own future trajectory: at train time the action chunk (future
@@ -110,20 +110,20 @@ NEW_FEATURES = (
 
 # ----------------------------------------------------------------------------
 # Layout helpers
-def build_names() -> list[str]:
-    """20-dim output feature names, RIGHT arm first then LEFT."""
+def build_names(sides: tuple[str, ...] = ("right", "left")) -> list[str]:
+    """Rot6d output names in canonical arm order (right before left when both exist)."""
     names: list[str] = []
-    for side in ("right", "left"):
+    for side in sides:
         names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
         names += [f"{side}_ee_rot6d_{i}" for i in range(6)]
         names += [f"{side}_gripper"]
     return names
 
 
-def build_names_quat() -> list[str]:
-    """16-dim quat output feature names, RIGHT arm first then LEFT."""
+def build_names_quat(sides: tuple[str, ...] = ("right", "left")) -> list[str]:
+    """Quaternion output names in canonical arm order."""
     names: list[str] = []
-    for side in ("right", "left"):
+    for side in sides:
         names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
         names += [f"{side}_ee_qx", f"{side}_ee_qy", f"{side}_ee_qz", f"{side}_ee_qw"]
         names += [f"{side}_gripper"]
@@ -131,7 +131,7 @@ def build_names_quat() -> list[str]:
 
 
 def joint_indices(names: list[str]) -> dict:
-    """Derive per-arm joint/gripper indices from the input feature names (robust to ordering)."""
+    """Derive one or two complete arm layouts from input feature names."""
     idx = {"left_joints": [], "right_joints": [], "left_grip": None, "right_grip": None}
     for i, n in enumerate(names):
         low = n.lower()
@@ -142,22 +142,31 @@ def joint_indices(names: list[str]) -> dict:
             idx[f"{side}_grip"] = i
         elif "joint" in low:
             idx[f"{side}_joints"].append(i)
-    for k in ("left_joints", "right_joints"):
-        if len(idx[k]) != DOF:
-            raise ValueError(f"Expected {DOF} {k}, found {len(idx[k])} in names={names}")
-    if idx["left_grip"] is None or idx["right_grip"] is None:
-        raise ValueError(f"Missing gripper index in names={names}")
+    sides: list[str] = []
+    for side in ("right", "left"):
+        joints = idx[f"{side}_joints"]
+        grip = idx[f"{side}_grip"]
+        if not joints and grip is None:
+            continue
+        if len(joints) != DOF:
+            raise ValueError(
+                f"Expected {DOF} {side}_joints, found {len(joints)} in names={names}"
+            )
+        if grip is None:
+            raise ValueError(f"Missing {side} gripper index in names={names}")
+        sides.append(side)
+    if not sides:
+        raise ValueError(f"No complete left/right arm found in names={names}")
+    idx["sides"] = tuple(sides)
     return idx
 
 
 def split_arms(vec: np.ndarray, jidx: dict):
-    """16-dim joint vector -> (right_joints, right_grip, left_joints, left_grip)."""
+    """Joint vector -> per-arm ``(joints, gripper)`` tuples in canonical arm order."""
     vec = np.asarray(vec, dtype=np.float64)
-    return (
-        vec[jidx["right_joints"]],
-        float(vec[jidx["right_grip"]]),
-        vec[jidx["left_joints"]],
-        float(vec[jidx["left_grip"]]),
+    return tuple(
+        (vec[jidx[f"{side}_joints"]], float(vec[jidx[f"{side}_grip"]]))
+        for side in jidx["sides"]
     )
 
 
@@ -204,18 +213,18 @@ def absolute_arm_ee_quat(pos, mat, grip) -> np.ndarray:
     return np.concatenate([pos, mat_to_quat_np(mat), [grip]]).astype(np.float64)
 
 
-def fk_both(algo: Algo, vec16: np.ndarray, jidx: dict):
-    rj, rg, lj, lg = split_arms(vec16, jidx)
-    return (fk(algo, rj), rg), (fk(algo, lj), lg)
+def fk_both(algo: Algo, joint_vector: np.ndarray, jidx: dict):
+    """Run FK for every arm present in ``jidx`` (one or two arms)."""
+    return tuple((fk(algo, joints), grip) for joints, grip in split_arms(joint_vector, jidx))
 
 
-def to_episode_ee(algo: Algo, vec16: np.ndarray, jidx: dict, baseline) -> np.ndarray:
-    """16-dim joints -> 20-dim relative-first-frame EE (right then left), using ``baseline`` T0."""
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    (Rp0, RR0), (Lp0, LR0) = baseline
-    return np.concatenate(
-        [relative_arm_ee(rp, rm, rg, Rp0, RR0), relative_arm_ee(lp, lm, lg, Lp0, LR0)]
-    ).astype(np.float32)
+def to_episode_ee(algo: Algo, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
+    """Joints -> per-arm relative-first-frame rot6d EE using ``baseline`` T0."""
+    arms = fk_both(algo, joint_vector, jidx)
+    return np.concatenate([
+        relative_arm_ee(pos, mat, grip, pos0, mat0)
+        for ((pos, mat), grip), (pos0, mat0) in zip(arms, baseline, strict=True)
+    ]).astype(np.float32)
 
 
 def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
@@ -223,29 +232,29 @@ def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
     return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
 
 
-def to_absolute_ee(algo: Algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
-    """16-dim joints -> 20-dim base-frame EE (right then left), NO episode baseline (one step less)."""
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    return np.concatenate(
-        [absolute_arm_ee(rp, rm, rg), absolute_arm_ee(lp, lm, lg)]
-    ).astype(np.float32)
+def to_absolute_ee(algo: Algo, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
+    """Joints -> per-arm base-frame rot6d EE, without an episode baseline."""
+    return np.concatenate([
+        absolute_arm_ee(pos, mat, grip)
+        for (pos, mat), grip in fk_both(algo, joint_vector, jidx)
+    ]).astype(np.float32)
 
 
-def to_episode_quat(algo: Algo, vec16: np.ndarray, jidx: dict, baseline) -> np.ndarray:
-    """16-dim joints -> 16-dim relative-first-frame EE with quat rotation (right then left)."""
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    (Rp0, RR0), (Lp0, LR0) = baseline
-    return np.concatenate(
-        [relative_arm_ee_quat(rp, rm, rg, Rp0, RR0), relative_arm_ee_quat(lp, lm, lg, Lp0, LR0)]
-    ).astype(np.float32)
+def to_episode_quat(algo: Algo, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
+    """Joints -> per-arm relative-first-frame quaternion EE."""
+    arms = fk_both(algo, joint_vector, jidx)
+    return np.concatenate([
+        relative_arm_ee_quat(pos, mat, grip, pos0, mat0)
+        for ((pos, mat), grip), (pos0, mat0) in zip(arms, baseline, strict=True)
+    ]).astype(np.float32)
 
 
-def to_absolute_quat(algo: Algo, vec16: np.ndarray, jidx: dict) -> np.ndarray:
-    """16-dim joints -> 16-dim base-frame EE with quat rotation (right then left)."""
-    ((rp, rm), rg), ((lp, lm), lg) = fk_both(algo, vec16, jidx)
-    return np.concatenate(
-        [absolute_arm_ee_quat(rp, rm, rg), absolute_arm_ee_quat(lp, lm, lg)]
-    ).astype(np.float32)
+def to_absolute_quat(algo: Algo, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
+    """Joints -> per-arm base-frame quaternion EE."""
+    return np.concatenate([
+        absolute_arm_ee_quat(pos, mat, grip)
+        for (pos, mat), grip in fk_both(algo, joint_vector, jidx)
+    ]).astype(np.float32)
 
 
 # ----------------------------------------------------------------------------
@@ -261,7 +270,7 @@ def sorted_data_files(root: Path) -> list[Path]:
 
 
 def compute_baselines(algo: Algo, data_files: list[Path], jidx: dict) -> dict[int, tuple]:
-    """episode_index -> ((R_p0,R_R0),(L_p0,L_R0)) from each episode's frame_index==0 STATE."""
+    """Map episode index to each present arm's first-frame ``(position, rotation)``."""
     baselines: dict[int, tuple] = {}
     for f in data_files:
         df = pq.read_table(f, columns=["episode_index", "frame_index", "observation.state"]).to_pandas()
@@ -270,8 +279,8 @@ def compute_baselines(algo: Algo, data_files: list[Path], jidx: dict) -> dict[in
             ep = int(row["episode_index"])
             if ep in baselines:
                 continue
-            ((rp, rm), _), ((lp, lm), _) = fk_both(algo, row["observation.state"], jidx)
-            baselines[ep] = ((rp, rm), (lp, lm))
+            arms = fk_both(algo, row["observation.state"], jidx)
+            baselines[ep] = tuple(pose for pose, _grip in arms)
     return baselines
 
 
@@ -323,16 +332,10 @@ def feature_stats(arr: np.ndarray) -> dict:
     }
 
 
-def _fsl_f32(arr2d: np.ndarray) -> pa.Array:
-    """(N, EE_DIM) float32 -> pyarrow fixed_size_list<float>[EE_DIM] (matches existing action column)."""
+def _fsl_f32(arr2d: np.ndarray, dim: int) -> pa.Array:
+    """Convert a 2D float32 array to a PyArrow fixed-size-list column."""
     flat = pa.array(np.ascontiguousarray(arr2d, dtype=np.float32).reshape(-1), type=pa.float32())
-    return pa.FixedSizeListArray.from_arrays(flat, EE_DIM)
-
-
-def _fsl_f32_quat(arr2d: np.ndarray) -> pa.Array:
-    """(N, EE_DIM_QUAT) float32 -> pyarrow fixed_size_list<float>[EE_DIM_QUAT]."""
-    flat = pa.array(np.ascontiguousarray(arr2d, dtype=np.float32).reshape(-1), type=pa.float32())
-    return pa.FixedSizeListArray.from_arrays(flat, EE_DIM_QUAT)
+    return pa.FixedSizeListArray.from_arrays(flat, dim)
 
 
 def main():
@@ -362,7 +365,11 @@ def main():
     info = json.loads((root / "meta" / "info.json").read_text())
     in_names = info["features"]["observation.state"]["names"]
     jidx = joint_indices(in_names)
-    out_names = build_names()
+    sides = jidx["sides"]
+    n_arms = len(sides)
+    ee_dim = n_arms * PER_ARM_DIM
+    ee_dim_quat = n_arms * PER_ARM_DIM_QUAT
+    out_names = build_names(sides)
 
     algo = Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
     data_files = sorted_data_files(root)
@@ -383,14 +390,14 @@ def main():
         df = tab.to_pandas()
         ep_col = df["episode_index"].to_numpy()
         state_col = df["observation.state"].to_numpy()
-        st_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        ac_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        st_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        ac_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        st_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
-        ac_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
-        st_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
-        ac_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        st_ee = np.zeros((len(df), ee_dim), dtype=np.float32)
+        ac_ee = np.zeros((len(df), ee_dim), dtype=np.float32)
+        st_abs = np.zeros((len(df), ee_dim), dtype=np.float32)
+        ac_abs = np.zeros((len(df), ee_dim), dtype=np.float32)
+        st_eq = np.zeros((len(df), ee_dim_quat), dtype=np.float32)
+        ac_eq = np.zeros((len(df), ee_dim_quat), dtype=np.float32)
+        st_aq = np.zeros((len(df), ee_dim_quat), dtype=np.float32)
+        ac_aq = np.zeros((len(df), ee_dim_quat), dtype=np.float32)
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
@@ -431,34 +438,36 @@ def main():
         for col in NEW_FEATURES:
             if col in tab.column_names:
                 tab = tab.drop([col])
-        tab = tab.append_column("observation.state_episode_ee",   _fsl_f32(st_ee))
-        tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee))
-        tab = tab.append_column("observation.state_absolute_ee",   _fsl_f32(st_abs))
-        tab = tab.append_column("action_absolute_ee",              _fsl_f32(ac_abs))
-        tab = tab.append_column("observation.state_episode_quat",  _fsl_f32_quat(st_eq))
-        tab = tab.append_column("action_episode_quat",             _fsl_f32_quat(ac_eq))
-        tab = tab.append_column("observation.state_absolute_quat", _fsl_f32_quat(st_aq))
-        tab = tab.append_column("action_absolute_quat",            _fsl_f32_quat(ac_aq))
+        tab = tab.append_column("observation.state_episode_ee",   _fsl_f32(st_ee, ee_dim))
+        tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee, ee_dim))
+        tab = tab.append_column("observation.state_absolute_ee",   _fsl_f32(st_abs, ee_dim))
+        tab = tab.append_column("action_absolute_ee",              _fsl_f32(ac_abs, ee_dim))
+        tab = tab.append_column("observation.state_episode_quat",  _fsl_f32(st_eq, ee_dim_quat))
+        tab = tab.append_column("action_episode_quat",             _fsl_f32(ac_eq, ee_dim_quat))
+        tab = tab.append_column("observation.state_absolute_quat", _fsl_f32(st_aq, ee_dim_quat))
+        tab = tab.append_column("action_absolute_quat",            _fsl_f32(ac_aq, ee_dim_quat))
         pq.write_table(tab, f)
         print(f"      {f.relative_to(root)}  ({len(df)} frames)")
 
     # ---- meta/info.json ----
     print("[3/4] meta/info.json + meta/stats.json")
-    out_names_quat = build_names_quat()
+    out_names_quat = build_names_quat(sides)
     template = dict(info["features"]["action"])
     for feat in NEW_FEATURES:
         if "quat" in feat:
-            info["features"][feat] = {**template, "shape": [EE_DIM_QUAT], "names": list(out_names_quat)}
+            info["features"][feat] = {**template, "shape": [ee_dim_quat], "names": list(out_names_quat)}
         else:
-            info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
+            info["features"][feat] = {**template, "shape": [ee_dim], "names": list(out_names)}
+    info["ee_num_arms"] = n_arms
+    info["ee_arm_sides"] = list(sides)
     (root / "meta" / "info.json").write_text(json.dumps(info, indent=4, ensure_ascii=False))
 
     # ---- meta/stats.json (global) ----
     stats_path = root / "meta" / "stats.json"
     stats = json.loads(stats_path.read_text())
     # action_relative_ee: stats of the relativized action the model actually trains on.
-    rel_stats      = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM // PER_ARM_DIM)
-    rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM_QUAT // PER_ARM_DIM_QUAT)
+    rel_stats = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
+    rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
     stat_sources = (
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
         ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
@@ -508,9 +517,10 @@ def main():
 
     print(f"\nDone ✅  added rot6d and quat EE columns to {root}")
     print(f"  rot6d features: observation.state_episode_ee, action_episode_ee, "
-          f"observation.state_absolute_ee, action_absolute_ee  ({EE_DIM}-dim)")
+          f"observation.state_absolute_ee, action_absolute_ee  ({ee_dim}-dim)")
     print(f"  quat  features: observation.state_episode_quat, action_episode_quat, "
-          f"observation.state_absolute_quat, action_absolute_quat  ({EE_DIM_QUAT}-dim)")
+          f"observation.state_absolute_quat, action_absolute_quat  ({ee_dim_quat}-dim)")
+    print(f"  arms: {list(sides)}")
     print(f"  layout: {out_names}")
 
 

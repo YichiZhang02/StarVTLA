@@ -19,5 +19,5 @@ tac_infra 部署层 (deployment)
 但与之完全独立：
 - 硬件层 (robots / teleoperators / cameras / motors / sdk) 全部内置于本目录；
 - 策略 / 数据集 / 处理管线复用本仓库的 `vtla` 包；
-- 触觉传感器以 uint8 (TactileSensorFeat) 保存。
+- 触觉传感器以 tactile_u16_fixed_v1 采集，并作为无损 FFV1 MKV video feature 保存。
 """

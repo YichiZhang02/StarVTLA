@@ -17,15 +17,15 @@
 """
 dmrobotics Flux 触觉传感器 (gRPC + UDP)。
 
-板子上 dmrobotics Flux gRPC 服务 getDepth + getDeformation2D -> 归一化拼成 (H, W, 3)
-uint8 RGB: 通道 B=depth, G=deform_x, R=deform_y。
+板子上 dmrobotics Flux gRPC 服务 getDepth + getDeformation2D -> 定点编码为 (H, W, 3)
+uint16。通道索引: 0=depth, 1=deform_x, 2=deform_y。
 
 收流跑在独立进程 (spawn): dmrobotics 多传感器/多 gRPC 流在单进程多线程里会互相饿死 GIL,
 故每路一个进程, 通过 mp.Queue(maxsize=1) 只回传最新帧。本模块自包含 (不与鱼眼共享收流代码)。
 
-归一化: SDK 输出 float32, 各通道按 [min,max] 线性映射到 [0,255]:
-    depth  -> clip((depth  - depth_min)  / (depth_max  - depth_min),  0, 1) * 255
-    deform -> clip((deform - deform_min) / (deform_max - deform_min), 0, 1) * 255
+编码遵循 tactile_u16_fixed_v1:
+    depth  -> round(depth * 1000)
+    deform -> round(deform * 1000 + 30000)
 """
 
 import logging
@@ -38,6 +38,7 @@ from numpy.typing import NDArray
 
 from .._sdk_paths import ensure_dmrobotics_sdk
 from .base import TactileSensorBase
+from .encoding import encode_tactile_u16
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,11 @@ def _put_latest(q, item) -> None:
 def _tactile_worker(
     dev_id, remote_addr, pc_host, pc_port,
     max_fps, debug,
-    depth_min, depth_max, deform_min, deform_max,
     q, stop,
 ):
-    """触觉工作进程: dmrobotics Flux getDepth+getDeformation2D -> (H,W,3) uint8 RGB。
+    """触觉工作进程: dmrobotics Flux -> (H,W,3) uint16。
 
-    通道: B=depth, G=deform_x, R=deform_y。debug=True 时每 ~2s 打印产出fps / 取数+处理耗时。
+    通道索引: 0=depth, 1=deform_x, 2=deform_y。
     """
     ensure_dmrobotics_sdk()
 
@@ -76,6 +76,7 @@ def _tactile_worker(
                 enable_raw=False, enable_deformation=True, enable_depth=True,
                 enable_shear=False, enable_force=False,
                 remote_addr=remote_addr, pc_host=pc_host, pc_port=pc_port,
+                max_fps=int(max_fps) if max_fps and max_fps > 0 else 120,
             )
             sensor = Sensor(opt)
             last = -1
@@ -102,16 +103,11 @@ def _tactile_worker(
                 if depth is None or deform is None:
                     continue
 
-                depth = np.asarray(depth, dtype=np.float32)
-                deform = np.asarray(deform, dtype=np.float32)
-                nd = np.clip((depth - depth_min) / (depth_max - depth_min), 0.0, 1.0)     # (H, W)
-                ng = np.clip((deform - deform_min) / (deform_max - deform_min), 0.0, 1.0)  # (H, W, 2)
-                rgb = np.concatenate([nd[..., np.newaxis], ng], axis=-1)       # (H, W, 3)
-                rgb8 = np.clip(np.round(rgb * 255.0), 0, 255).astype(np.uint8)
+                packed = encode_tactile_u16(depth, deform)
 
                 proc_ms += (time.perf_counter() - _s) * 1000
                 n_fr += 1
-                _put_latest(q, rgb8)
+                _put_latest(q, packed)
 
                 if debug and time.time() - t_stat >= 2.0:
                     dt = time.time() - t_stat
@@ -145,10 +141,6 @@ class DmroboticsFlux(TactileSensorBase):
         height: int,
         max_fps: float = 0.0,
         debug: bool = False,
-        depth_min: float = 0.0,
-        depth_max: float = 4.0,
-        deform_min: float = -1.0,
-        deform_max: float = 1.0,
         first_frame_timeout: float = 15.0,
         name: str = "cam_finger",
     ):
@@ -159,13 +151,9 @@ class DmroboticsFlux(TactileSensorBase):
         self._pc_port = pc_port
         self._max_fps = max_fps
         self._debug = debug
-        self._depth_min = depth_min
-        self._depth_max = depth_max
-        self._deform_min = deform_min
-        self._deform_max = deform_max
         self._first_frame_timeout = first_frame_timeout
 
-        self._empty_frame = np.zeros((height, width, 3), dtype=np.uint8)
+        self._empty_frame = np.zeros((height, width, 3), dtype=np.uint16)
 
         self._ctx = mp.get_context("spawn")
         self._q = None
@@ -184,7 +172,6 @@ class DmroboticsFlux(TactileSensorBase):
             target=_tactile_worker,
             args=(self._dev_id, self._remote_addr, self._pc_host, self._pc_port,
                   self._max_fps, self._debug,
-                  self._depth_min, self._depth_max, self._deform_min, self._deform_max,
                   self._q, self._stop),
             daemon=True,
             name=f"stream-{self.name}",

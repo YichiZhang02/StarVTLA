@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Create a downscaled copy of a LeRobot (v3.0) dataset to speed up training data loading.
+"""Resize LeRobot (v3.0) dataset videos to speed up training data loading.
 
 Why: training decodes camera frames on the CPU every step. The RGB cameras here are large
 (e.g. 1920x1080 / 1440x1080), but the policies resize every frame to ~224x224 anyway
@@ -9,7 +9,7 @@ stalls 3-4s whenever the prefetch buffer drains. Pre-scaling the RGB videos to ~
 per-frame decode cost several-fold and removes the stall. (256 keeps headroom above the model's
 224 crop; native->256->224 differs from native->224 by only ~2/255 mean pixels, PSNR ~33dB.)
 
-What it does (non-destructive — writes a new dataset copy):
+Copy mode (``--src/--dst``) preserves the legacy non-destructive behavior:
   - copies meta/ and data/ verbatim (parquet, stats, episodes, tasks, etc.)
   - re-encodes only the large 8-bit RGB camera videos, scaled to SIZE x SIZE, preserving the
     exact frame count / fps / timestamps (only spatial resolution changes), with a dense keyframe
@@ -33,16 +33,26 @@ Usage:
         --size 256
 
 Then train against --dataset.root=<dst> (same repo_id works).
+
+In-place mode resizes every MP4 video feature, including linear uint8 tactile streams. Visual
+videos use H.264/YUV420 with the requested CRF. Tactile videos use H.264/YUV420 at CRF 0 so they
+play in standard video players; they are approximate derived data because YUV conversion and
+4:2:0 chroma subsampling are not numerically reversible. Canonical uint16 tactile MKV must be
+converted first::
+
+    python tools/downscale_dataset_videos.py --root <dataset> --size 256
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from fractions import Fraction
 from pathlib import Path
 
 # ffmpeg encoder name -> the codec tag stored in info.json (matches LeRobot's convention).
@@ -227,10 +237,208 @@ def patch_info_json(dst: Path, targets: set[str], size: int, codec: str) -> int:
     return n
 
 
+def _resize_video_in_place(args: tuple) -> tuple[str, str, int]:
+    """Encode one resized MP4 to a sibling temporary file without replacing the source."""
+    src_str, size, gop, crf, scale_flags, tactile = args
+    del scale_flags  # OpenCV uses a fixed high-quality Lanczos kernel in in-place mode.
+
+    import av
+    import cv2
+
+    src = Path(src_str)
+    partial = src.with_name(f".{src.stem}.resize.partial.mp4")
+    frame_count = 0
+    try:
+        with av.open(str(src), mode="r") as input_container:
+            input_stream = input_container.streams.video[0]
+            rate = input_stream.average_rate or input_stream.base_rate
+            if rate is None:
+                raise ValueError(f"Video has no frame rate: {src}")
+
+            with av.open(str(partial), mode="w", format="mp4") as output_container:
+                output_crf = 0 if tactile else crf
+                options = {"crf": str(output_crf), "preset": "medium", "g": str(gop)}
+                output_stream = output_container.add_stream(
+                    "libx264", rate=rate, options=options
+                )
+                output_stream.pix_fmt = "yuv420p"
+                output_stream.width = size
+                output_stream.height = size
+
+                time_base = Fraction(rate.denominator, rate.numerator)
+                for frame_count, input_frame in enumerate(
+                    input_container.decode(input_stream), start=1
+                ):
+                    rgb = input_frame.to_ndarray(format="rgb24")
+                    resized = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LANCZOS4)
+                    output_frame = av.VideoFrame.from_ndarray(resized, format="rgb24")
+                    output_frame.pts = frame_count - 1
+                    output_frame.time_base = time_base
+                    for packet in output_stream.encode(output_frame):
+                        output_container.mux(packet)
+                for packet in output_stream.encode():
+                    output_container.mux(packet)
+
+        if frame_count == 0:
+            raise ValueError(f"Video has no decodable frames: {src}")
+        return str(src), str(partial), frame_count
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+
+
+def _patch_in_place_info(root: Path, info: dict, targets: set[str], size: int) -> None:
+    resized_tactile = False
+    for key in targets:
+        feature = info["features"][key]
+        channels = feature.get("shape", [size, size, 3])[-1]
+        feature["shape"] = [size, size, channels]
+        video_info = feature.setdefault("info", {})
+        video_info["video.height"] = size
+        video_info["video.width"] = size
+        video_info["video.codec"] = "h264"
+        video_info["video.pix_fmt"] = "yuv420p"
+        video_info["video.channels"] = 3
+        resized_tactile |= feature.get("tactile_encoding") == "tactile_u8_linear_v1"
+    (root / "meta" / "info.json").write_text(
+        json.dumps(info, indent=4) + "\n", encoding="utf-8"
+    )
+    if resized_tactile:
+        manifest_path = root / "meta" / "tactile_encoding.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Missing tactile encoding manifest for resized tactile video: {manifest_path}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.update(
+            {
+                "container": "mp4",
+                "codec": "h264",
+                "encoder": "libx264",
+                "pixel_format": "yuv420p",
+                "input_pixel_format": "rgb24",
+                "crf": 0,
+                "lossless": False,
+                "reversible": False,
+                "conversion_note": (
+                    "Derived uint8 display/training video; RGB-to-YUV conversion and 4:2:0 "
+                    "chroma subsampling introduce bounded numeric error."
+                ),
+            }
+        )
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
+
+def downscale_videos_in_place(
+    root: Path, size: int, gop: int, crf: int, scale_flags: str, jobs: int
+) -> int:
+    """Resize every MP4 video feature in place; tactile output is approximate YUV420."""
+    root = root.resolve()
+    if size <= 0:
+        raise ValueError(f"Size must be positive, got {size}")
+    if jobs <= 0:
+        raise ValueError(f"Jobs must be positive, got {jobs}")
+    info_path = root / "meta" / "info.json"
+    if not info_path.is_file():
+        raise FileNotFoundError(info_path)
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    video_features = {
+        key: feature
+        for key, feature in info.get("features", {}).items()
+        if feature.get("dtype") == "video"
+    }
+    raw_tactile = [
+        key
+        for key, feature in video_features.items()
+        if feature.get("tactile_encoding") == "tactile_u16_fixed_v1"
+    ]
+    if raw_tactile:
+        raise ValueError(
+            f"Convert uint16 tactile to uint8 before resizing: {sorted(raw_tactile)}"
+        )
+
+    video_root = root / "videos"
+    if not video_root.is_dir():
+        raise FileNotFoundError(video_root)
+    tasks: list[tuple] = []
+    targets: set[str] = set()
+    for path in sorted(video_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name.startswith(".") and path.name.endswith(".partial.mp4"):
+            path.unlink()
+            continue
+        key = path.relative_to(video_root).parts[0]
+        if key not in video_features:
+            continue
+        if path.suffix.lower() != ".mp4":
+            raise ValueError(f"In-place resize requires MP4 inputs, got {path}")
+        feature = video_features[key]
+        tactile = feature.get("tactile_encoding") == "tactile_u8_linear_v1"
+        shape = feature.get("shape", [])
+        pixel_format = feature.get("info", {}).get("video.pix_fmt")
+        already_final = not tactile or pixel_format == "yuv420p"
+        if (
+            len(shape) == 3
+            and shape[0] == size
+            and shape[1] == size
+            and already_final
+        ):
+            continue
+        tasks.append((str(path), size, gop, crf, scale_flags, tactile))
+        targets.add(key)
+
+    if not tasks:
+        print(f"All MP4 videos are already {size}x{size}; nothing to resize.")
+        return 0
+
+    if any(task[-1] for task in tasks):
+        manifest_path = root / "meta" / "tactile_encoding.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Missing tactile encoding manifest for resized tactile video: {manifest_path}"
+            )
+
+    expected_partials = [
+        Path(task[0]).with_name(f".{Path(task[0]).stem}.resize.partial.mp4")
+        for task in tasks
+    ]
+    partials: list[tuple[Path, Path]] = []
+    try:
+        if jobs <= 1:
+            results = (_resize_video_in_place(task) for task in tasks)
+            for source, partial, frames in results:
+                partials.append((Path(source), Path(partial)))
+                print(f"[resize] {source}: {frames} frames", flush=True)
+        else:
+            with ProcessPoolExecutor(max_workers=jobs) as pool:
+                futures = [pool.submit(_resize_video_in_place, task) for task in tasks]
+                for future in as_completed(futures):
+                    source, partial, frames = future.result()
+                    partials.append((Path(source), Path(partial)))
+                    print(f"[resize] {source}: {frames} frames", flush=True)
+    except BaseException:
+        for partial in expected_partials:
+            partial.unlink(missing_ok=True)
+        raise
+
+    for source, partial in partials:
+        os.replace(partial, source)
+    _patch_in_place_info(root, info, targets, size)
+    shutil.rmtree(root / "frames_cache", ignore_errors=True)
+    (root / "meta" / "contact_std.npz").unlink(missing_ok=True)
+    print(f"Resized {len(tasks)} MP4 file(s) in place under {root}")
+    return len(tasks)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--src", type=Path, required=True, help="Source dataset root (unchanged).")
-    ap.add_argument("--dst", type=Path, required=True, help="Destination dataset root (created).")
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--root", type=Path, help="Dataset root to resize in place.")
+    mode.add_argument("--src", type=Path, help="Source dataset root (unchanged).")
+    ap.add_argument("--dst", type=Path, help="Destination dataset root (copy mode).")
     ap.add_argument("--size", type=int, default=256, help="Output square resolution (default 256).")
     ap.add_argument("--gop", type=int, default=4, help="Keyframe interval; small = fast seeks (default 4).")
     ap.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better/larger (default 18).")
@@ -248,6 +456,20 @@ def main() -> int:
                     help="ffprobe-check that each re-encoded frame count matches the source "
                          "(fast: demux-only packet count).")
     args = ap.parse_args()
+
+    if args.root is not None:
+        if args.dst is not None:
+            ap.error("--dst cannot be used with --root.")
+        try:
+            downscale_videos_in_place(
+                args.root, args.size, args.gop, args.crf, args.scale_flags, args.jobs
+            )
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            ap.error(str(exc))
+        return 0
+
+    if args.dst is None:
+        ap.error("--dst is required with --src.")
 
     src, dst = args.src.resolve(), args.dst.resolve()
     if not (src / "meta" / "info.json").is_file():

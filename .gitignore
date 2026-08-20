@@ -40,6 +40,9 @@ __pycache__/
 # Vendored hardware SDKs (large binaries, kept locally only)
 deployment/sdk/
 
+# Local reference repositories.
+/ref_repo/
+
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/
 /logs_pc_flux/

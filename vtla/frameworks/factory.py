@@ -404,6 +404,19 @@ def make_policy(
     if isinstance(cfg, FastWAMConfig):
         cfg.load_text_encoder = not for_training
 
+    # The joint feature names are the authoritative robot layout. Infer one-vs-two-arm EE packing
+    # from the dataset so single-arm datasets do not need a manual ``ee_num_arms=1`` override.
+    state_names = ds_meta.features.get(OBS_STATE, {}).get("names") or []
+    detected_sides = []
+    for side in ("right", "left"):
+        side_names = [str(name).lower() for name in state_names if str(name).lower().startswith(side)]
+        joint_count = sum("joint" in name and "gripper" not in name for name in side_names)
+        has_gripper = any("gripper" in name for name in side_names)
+        if joint_count == 7 and has_gripper:
+            detected_sides.append(side)
+    if detected_sides and hasattr(cfg, "ee_num_arms"):
+        cfg.ee_num_arms = len(detected_sides)
+
     kwargs = {}
     if isinstance(cfg, StarvlaGrootDinoAlignConfig):
         # Runtime-only: the frozen teacher is excluded from saved config/state and

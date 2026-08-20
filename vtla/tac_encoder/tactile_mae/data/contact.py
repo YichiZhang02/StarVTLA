@@ -24,7 +24,7 @@ import numpy as np
 import torch
 
 from vtla.datasets.lerobot_dataset import LeRobotDataset
-from vtla.datasets.video_utils import decode_video_frames
+from vtla.datasets.video_utils import decode_tactile_video_frames_pyav, decode_video_frames
 
 
 def contact_score(img):
@@ -106,8 +106,14 @@ def load_or_compute_contact_std(dataset_root, dataset_id, camera_keys,
             video_path = root / meta.get_video_file_path(ep_idx, cam)
             query_ts = [from_ts + i / fps for i in sel]
             # One batched (sequential) decode for the whole episode segment.
-            frames = decode_video_frames(video_path, query_ts, tolerance_s,
-                                         video_backend, return_uint8=True)
+            if meta.features[cam].get("tactile_encoding") == "tactile_u16_fixed_v1":
+                frames = decode_tactile_video_frames_pyav(
+                    video_path, query_ts, tolerance_s, return_uint8=True
+                )
+            else:
+                frames = decode_video_frames(
+                    video_path, query_ts, tolerance_s, video_backend, return_uint8=True
+                )
             scores = _std_per_channel_max(frames).numpy()
             arrays[cam][from_abs:from_abs + length] = _nearest_fill(sel, scores, length)
 

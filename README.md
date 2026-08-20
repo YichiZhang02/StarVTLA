@@ -36,11 +36,23 @@ pip install -r requirements.txt
 
 将数据和预训练权重放入 `playground/`。完整目录和文件约定见 [playground/README.md](playground/README.md)。
 
+## Tactile Data
+
+Flux 触觉采集首先将 SDK 的 `float32` depth/deformation 固定编码为 HWC `uint16`：depth
+乘 `1000`，两路 deformation 乘 `1000` 后加 `30000`。权威数据使用无损
+`FFV1/gbrp16le` MKV，与 wrist camera 一样保存在数据集 `videos/` 下。
+
+训练前运行 `scripts/process_joint_data.sh`：它将 depth `0..1000` 和 deformation
+`30000 ± 1000` 线性量化到 uint8，先生成无损 RGB 中间 MP4，再与视觉视频一起 resize，
+最终保存为便于训练和播放的 H.264/YUV420 MP4。最终 uint8 是近似派生数据，不替代原始
+uint16 MKV。采集格式见 [Deployment](deployment/README.md#触觉采集编码)，处理细节见
+[Workflow Scripts](scripts/README.md#触觉处理流程)。
+
 
 ## Training
 预处理数据：
 ```bash
-# 关节数据：去畸变、缩放、生成 EE 列
+# 关节数据：去畸变、触觉 uint8、缩放所有视频、生成 EE 列
 bash scripts/process_joint_data.sh <dataset_id>
 
 # UMI 数据：去畸变、缩放、生成 EE 列

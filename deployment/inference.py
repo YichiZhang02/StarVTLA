@@ -204,7 +204,7 @@ def _resolve_action_space(cfg: InferenceConfig) -> None:
             raise ValueError(
                 f"checkpoint 的 action_mode=relative_ee 需要 EE 动作空间, 但机器人 "
                 f"'{getattr(cfg.robot, 'type', cfg.robot)}' 不支持 action_space 字段。"
-                "请使用支持 EE 的机器人 (如 realman_ugripper_dual)。"
+                "请使用支持 EE 的机器人 (如 realman_ugripper_dual/realman_ugripper_left)。"
             )
         return
     cfg.robot.action_space = "ee" if needs_ee else "joint"

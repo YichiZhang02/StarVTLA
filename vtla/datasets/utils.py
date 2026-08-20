@@ -130,6 +130,10 @@ class DatasetInfo:
     # Optional metadata
     robot_type: str | None = None
     splits: dict[str, str] = field(default_factory=dict)
+    # Populated by the joint-to-EE converter. ``None`` keeps legacy datasets compatible.
+    ee_num_arms: int | None = None
+    ee_arm_sides: list[str] = field(default_factory=list)
+    undistort: dict | None = None
 
     def __post_init__(self) -> None:
         # Coerce feature shapes from list to tuple — JSON deserialisation
@@ -146,6 +150,18 @@ class DatasetInfo:
             raise ValueError(f"data_files_size_in_mb must be positive, got {self.data_files_size_in_mb}")
         if self.video_files_size_in_mb <= 0:
             raise ValueError(f"video_files_size_in_mb must be positive, got {self.video_files_size_in_mb}")
+        if self.ee_arm_sides:
+            invalid_sides = sorted(set(self.ee_arm_sides) - {"left", "right"})
+            if invalid_sides:
+                raise ValueError(f"Unknown ee_arm_sides: {invalid_sides}")
+            if self.ee_num_arms is None:
+                self.ee_num_arms = len(self.ee_arm_sides)
+        if self.ee_num_arms is not None and self.ee_num_arms not in (1, 2):
+            raise ValueError(f"ee_num_arms must be 1 or 2, got {self.ee_num_arms}")
+        if self.ee_arm_sides and len(self.ee_arm_sides) != self.ee_num_arms:
+            raise ValueError(
+                f"ee_arm_sides={self.ee_arm_sides} does not match ee_num_arms={self.ee_num_arms}"
+            )
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dict.

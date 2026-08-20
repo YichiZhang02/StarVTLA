@@ -32,7 +32,7 @@ from .io_utils import (
     hf_transform_to_torch,
     load_nested_dataset,
 )
-from .video_utils import decode_video_frames
+from .video_utils import decode_tactile_video_frames_pyav, decode_video_frames
 
 
 class DatasetReader:
@@ -252,13 +252,25 @@ class DatasetReader:
             from_timestamp = ep[f"videos/{vid_key}/from_timestamp"]
             shifted_query_ts = [from_timestamp + ts for ts in query_ts]
             video_path = self.root / self._meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames(
-                video_path,
-                shifted_query_ts,
-                self._tolerance_s,
-                self._video_backend,
-                return_uint8=self._return_uint8,
-            )
+            feature = self._meta.features[vid_key]
+            if feature.get("tactile_encoding") in {
+                "tactile_u16_fixed_v1",
+                "tactile_u8_linear_v1",
+            }:
+                frames = decode_tactile_video_frames_pyav(
+                    video_path,
+                    shifted_query_ts,
+                    self._tolerance_s,
+                    return_uint8=self._return_uint8,
+                )
+            else:
+                frames = decode_video_frames(
+                    video_path,
+                    shifted_query_ts,
+                    self._tolerance_s,
+                    self._video_backend,
+                    return_uint8=self._return_uint8,
+                )
             # Keep the leading time dim for delta-windowed keys so they stay consistent with the
             # non-video keys (which keep (T, ...) via torch.stack). Only squeeze the plain single-frame
             # convention (no delta window for this key); otherwise n_obs_steps=1 would silently drop the

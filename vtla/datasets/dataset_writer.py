@@ -124,7 +124,32 @@ class DatasetWriter:
         self._current_file_start_frame: int | None = None
         self._episodes_since_last_encoding: int = 0
         self._recorded_frames: int = initial_frames
+        self._external_episode_videos: dict[str, Path] = {}
         self._finalized = False
+
+    @property
+    def _external_video_keys(self) -> list[str]:
+        return [
+            key
+            for key in self._meta.video_keys
+            if self._meta.features[key].get("external_video", False)
+        ]
+
+    @property
+    def _managed_video_keys(self) -> list[str]:
+        external = set(self._external_video_keys)
+        return [key for key in self._meta.video_keys if key not in external]
+
+    def register_external_video(self, video_key: str, path: Path | str) -> None:
+        """Attach an already encoded episode video to the active episode."""
+        if video_key not in self._external_video_keys:
+            raise ValueError(f"'{video_key}' is not configured as an external video feature")
+        video_path = Path(path)
+        if not video_path.is_file():
+            raise FileNotFoundError(video_path)
+        if video_key in self._external_episode_videos:
+            raise RuntimeError(f"External video already registered for '{video_key}'")
+        self._external_episode_videos[video_key] = video_path
 
     def _create_episode_buffer(self, episode_index: int | None = None) -> dict:
         current_ep_idx = self._meta.total_episodes if episode_index is None else episode_index
@@ -183,9 +208,9 @@ class DatasetWriter:
         self.episode_buffer["task"].append(frame.pop("task"))
 
         # Start streaming encoder on first frame of episode
-        if frame_index == 0 and self._streaming_encoder is not None:
+        if frame_index == 0 and self._streaming_encoder is not None and self._managed_video_keys:
             self._streaming_encoder.start_episode(
-                video_keys=list(self._meta.video_keys),
+                video_keys=self._managed_video_keys,
                 temp_dir=self._root,
             )
 
@@ -196,7 +221,9 @@ class DatasetWriter:
                     f"An element of the frame is not in the features. '{key}' not in '{self._meta.features.keys()}'."
                 )
 
-            if self._meta.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
+            if key in self._external_video_keys:
+                self.episode_buffer[key].append(None)
+            elif self._meta.features[key]["dtype"] == "video" and self._streaming_encoder is not None:
                 self._streaming_encoder.feed_frame(key, frame[key])
                 self.episode_buffer[key].append(None)
             elif self._meta.features[key]["dtype"] in ["image", "video"]:
@@ -222,6 +249,9 @@ class DatasetWriter:
         episode_buffer = episode_data if episode_data is not None else self.episode_buffer
 
         validate_episode_buffer(episode_buffer, self._meta.total_episodes, self._meta.features)
+        missing_external = set(self._external_video_keys) - set(self._external_episode_videos)
+        if missing_external:
+            raise RuntimeError(f"Missing external episode videos: {sorted(missing_external)}")
 
         # size and task are special cases that won't be added to hf_dataset
         episode_length = episode_buffer.pop("size")
@@ -246,18 +276,23 @@ class DatasetWriter:
         # Wait for image writer to end, so that episode stats over images can be computed
         self._wait_image_writer()
 
-        has_video_keys = len(self._meta.video_keys) > 0
-        use_streaming = self._streaming_encoder is not None and has_video_keys
+        managed_video_keys = self._managed_video_keys
+        use_streaming = self._streaming_encoder is not None and bool(managed_video_keys)
         use_batched_encoding = self._batch_encoding_size > 1
 
+        excluded_stats_keys = set(self._external_video_keys)
         if use_streaming:
-            non_video_buffer = {
+            excluded_stats_keys.update(managed_video_keys)
+        if excluded_stats_keys:
+            stats_buffer = {
                 k: v
                 for k, v in episode_buffer.items()
-                if self._meta.features.get(k, {}).get("dtype") not in ("video",)
+                if k not in excluded_stats_keys
             }
-            non_video_features = {k: v for k, v in self._meta.features.items() if v["dtype"] != "video"}
-            ep_stats = compute_episode_stats(non_video_buffer, non_video_features)
+            stats_features = {
+                k: v for k, v in self._meta.features.items() if k not in excluded_stats_keys
+            }
+            ep_stats = compute_episode_stats(stats_buffer, stats_features)
         else:
             ep_stats = compute_episode_stats(episode_buffer, self._meta.features)
 
@@ -265,7 +300,7 @@ class DatasetWriter:
 
         if use_streaming:
             streaming_results = self._streaming_encoder.finish_episode()
-            for video_key in self._meta.video_keys:
+            for video_key in managed_video_keys:
                 temp_path, video_stats = streaming_results[video_key]
                 if video_stats is not None:
                     ep_stats[video_key] = {
@@ -273,8 +308,8 @@ class DatasetWriter:
                         for k, v in video_stats.items()
                     }
                 ep_metadata.update(self._save_episode_video(video_key, episode_index, temp_path=temp_path))
-        elif has_video_keys and not use_batched_encoding:
-            num_cameras = len(self._meta.video_keys)
+        elif managed_video_keys and not use_batched_encoding:
+            num_cameras = len(managed_video_keys)
             if parallel_encoding and num_cameras > 1:
                 with concurrent.futures.ProcessPoolExecutor(max_workers=num_cameras) as executor:
                     future_to_key = {
@@ -287,7 +322,7 @@ class DatasetWriter:
                             self._vcodec,
                             self._encoder_threads,
                         ): video_key
-                        for video_key in self._meta.video_keys
+                        for video_key in managed_video_keys
                     }
 
                     results = {}
@@ -300,19 +335,28 @@ class DatasetWriter:
                             logger.error(f"Video encoding failed for {video_key}: {exc}")
                             raise exc
 
-                for video_key in self._meta.video_keys:
+                for video_key in managed_video_keys:
                     temp_path = results[video_key]
                     ep_metadata.update(
                         self._save_episode_video(video_key, episode_index, temp_path=temp_path)
                     )
             else:
-                for video_key in self._meta.video_keys:
+                for video_key in managed_video_keys:
                     ep_metadata.update(self._save_episode_video(video_key, episode_index))
+
+        for video_key in self._external_video_keys:
+            ep_metadata.update(
+                self._save_episode_video(
+                    video_key,
+                    episode_index,
+                    temp_path=self._external_episode_videos[video_key],
+                )
+            )
 
         # `meta.save_episode` need to be executed after encoding the videos
         self._meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
 
-        if has_video_keys and use_batched_encoding:
+        if managed_video_keys and use_batched_encoding:
             self._episodes_since_last_encoding += 1
             if self._episodes_since_last_encoding == self._batch_encoding_size:
                 start_ep = self._meta.total_episodes - self._batch_encoding_size
@@ -357,7 +401,7 @@ class DatasetWriter:
                 episode_df = pd.read_parquet(episode_df_path)
 
             video_ep_metadata = {}
-            for video_key in self._meta.video_keys:
+            for video_key in self._managed_video_keys:
                 video_ep_metadata.update(self._save_episode_video(video_key, ep_idx))
             video_ep_metadata.pop("episode_index")
             video_ep_df = pd.DataFrame(video_ep_metadata, index=[ep_idx]).convert_dtypes(
@@ -460,7 +504,7 @@ class DatasetWriter:
                     old_chunk_idx, old_file_idx, self._meta.chunks_size
                 )
             latest_duration_in_s = 0.0
-            new_path = self._root / self._meta.video_path.format(
+            new_path = self._root / self._meta.get_video_path_template(video_key).format(
                 video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
             )
             new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -470,7 +514,7 @@ class DatasetWriter:
             chunk_idx = latest_ep[f"videos/{video_key}/chunk_index"][0]
             file_idx = latest_ep[f"videos/{video_key}/file_index"][0]
 
-            latest_path = self._root / self._meta.video_path.format(
+            latest_path = self._root / self._meta.get_video_path_template(video_key).format(
                 video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
             )
             latest_size_in_mb = get_file_size_in_mb(latest_path)
@@ -478,7 +522,7 @@ class DatasetWriter:
 
             if latest_size_in_mb + ep_size_in_mb >= self._meta.video_files_size_in_mb:
                 chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, self._meta.chunks_size)
-                new_path = self._root / self._meta.video_path.format(
+                new_path = self._root / self._meta.get_video_path_template(video_key).format(
                     video_key=video_key, chunk_index=chunk_idx, file_index=file_idx
                 )
                 new_path.parent.mkdir(parents=True, exist_ok=True)
@@ -491,7 +535,11 @@ class DatasetWriter:
                 )
 
         # Remove temporary directory
-        shutil.rmtree(str(ep_path.parent))
+        # Standard encoders use one temporary directory per file. External encoders may
+        # stage several sibling streams together, so only remove the directory when empty.
+        ep_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            ep_path.parent.rmdir()
 
         # Update video info (only needed when first episode is encoded)
         if episode_index == 0:
@@ -531,7 +579,12 @@ class DatasetWriter:
                 if img_dir.is_dir():
                     shutil.rmtree(img_dir)
 
+        for video_path in self._external_episode_videos.values():
+            video_path.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                video_path.parent.rmdir()
         self.episode_buffer = self._create_episode_buffer()
+        self._external_episode_videos.clear()
 
     def start_image_writer(self, num_processes: int = 0, num_threads: int = 4) -> None:
         """Start an :class:`AsyncImageWriter` for background image persistence.

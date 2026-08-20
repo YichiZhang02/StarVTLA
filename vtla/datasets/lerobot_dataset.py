@@ -414,6 +414,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._require_writer("save_episode")
         self.writer.save_episode(episode_data, parallel_encoding)
 
+    def register_external_video(self, video_key: str, path: Path | str) -> None:
+        """Register an already encoded video for the episode currently being recorded."""
+        self._require_writer("register_external_video")
+        self.writer.register_external_video(video_key, path)
+
     def clear_episode_buffer(self, delete_images: bool = True) -> None:
         """Discard the current episode buffer without saving.
 

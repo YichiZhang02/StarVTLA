@@ -15,7 +15,7 @@
 # limitations under the License.
 
 """
-睿尔曼双臂硬件自检工具。分三个阶段, 从安全到危险:
+睿尔曼 ugripper 硬件自检工具。分三个阶段, 从安全到危险:
 
   1. existence  存在性: ping 从臂/板子 IP, 检查主臂串口、顶相机 /dev/video* (不连任何硬件, 最安全)
   2. camera     图像:   实际连接顶相机/手腕鱼眼/触觉, 抓一帧, 报告 shape 和是否全黑 (--save 存图)
@@ -44,7 +44,9 @@ import time
 import tty
 
 from deployment.robots.realman_ugripper_dual import RealmanUGripperDualConfig
+from deployment.robots.realman_ugripper_left import RealmanUGripperLeftConfig
 from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
+from deployment.teleoperators.left_realman_ugripper_leader import LeftRealmanUGripperLeaderConfig
 
 # ---------------- 终端着色 ----------------
 _G, _R, _Y, _0 = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
@@ -68,24 +70,40 @@ def header(title):
 
 # ---------------- 按臂取配置 ----------------
 def follower_ip(cfg, side):
+    if isinstance(cfg, RealmanUGripperLeftConfig):
+        return cfg.follower_ip
     return cfg.left_follower_ip if side == "left" else cfg.right_follower_ip
 
 
 def board_ip(cfg, side):
+    if isinstance(cfg, RealmanUGripperLeftConfig):
+        return cfg.board_ip
     return cfg.left_board_ip if side == "left" else cfg.right_board_ip
 
 
 def fisheye_udp_port(cfg, side):
+    if isinstance(cfg, RealmanUGripperLeftConfig):
+        return cfg.fisheye_udp_port
     return cfg.left_fisheye_udp_port if side == "left" else cfg.right_fisheye_udp_port
 
 
 def tactile_pc_ports(cfg, side):
+    if isinstance(cfg, RealmanUGripperLeftConfig):
+        return cfg.tactile0_pc_port, cfg.tactile1_pc_port
     if side == "left":
         return cfg.left_tactile0_pc_port, cfg.left_tactile1_pc_port
     return cfg.right_tactile0_pc_port, cfg.right_tactile1_pc_port
 
 
+def gripper_itinerary(cfg, side):
+    if isinstance(cfg, RealmanUGripperLeftConfig):
+        return cfg.gripper_itinerary
+    return cfg.left_gripper_itinerary if side == "left" else cfg.right_gripper_itinerary
+
+
 def leader_port(tcfg, side):
+    if isinstance(tcfg, LeftRealmanUGripperLeaderConfig):
+        return tcfg.port
     return tcfg.left_port if side == "left" else tcfg.right_port
 
 
@@ -130,23 +148,37 @@ def _poll_key():
     return None
 
 
+def _to_preview_uint8(frame):
+    """Convert canonical uint16 tactile to uint8; keep processed uint8 unchanged."""
+    import numpy as np
+
+    if isinstance(frame, np.ndarray) and frame.dtype in (np.uint16, np.uint8):
+        from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
+
+        return tactile_uint16_to_uint8(frame)
+    return frame
+
+
 def _show_live(name, dev, save_name, out_dir):
     """实时显示某个相机, 直到按 q/ESC/n; 's' 存当前帧。帧为 RGB, 显示需转 BGR。"""
     import cv2
+
     win = f"{name}  (q/ESC/n=下一个, s=存图)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     saw_image = False
+    preview = None
     while True:
         img = dev.async_read()
         if not frame_is_black(img):
             saw_image = True
-            cv2.imshow(win, img[..., ::-1])  # RGB -> BGR
+            preview = _to_preview_uint8(img)
+            cv2.imshow(win, preview[..., ::-1])  # RGB -> BGR
         key = cv2.waitKey(20) & 0xFF
         if key in (ord("q"), 27, ord("n")):  # q / ESC / n
             break
-        if key == ord("s") and saw_image:
+        if key == ord("s") and saw_image and preview is not None:
             os.makedirs(out_dir, exist_ok=True)
-            cv2.imwrite(os.path.join(out_dir, f"{save_name}.png"), img[..., ::-1])
+            cv2.imwrite(os.path.join(out_dir, f"{save_name}.png"), preview[..., ::-1])
             print(f"    已存 {save_name}.png")
     cv2.destroyWindow(win)
     (ok if saw_image else warn)(f"{name:18s} " + ("显示正常" if saw_image else "整段未拿到非空帧"))
@@ -231,9 +263,13 @@ def stage_camera(cfg, arms, use_tactile, save: bool, show: bool) -> bool:
                     warn(f"{name:18s} 连上了但首帧全黑/空 (shape={shape}) — 可能还没出帧或源异常")
                 else:
                     ok(f"{name:18s} 拿到图像 shape={shape}")
+                    preview = _to_preview_uint8(img)
                     if save:
                         import cv2
-                        cv2.imwrite(os.path.join(out_dir, f"{save_name}.png"), img[..., ::-1])
+
+                        cv2.imwrite(
+                            os.path.join(out_dir, f"{save_name}.png"), preview[..., ::-1]
+                        )
         except Exception as e:
             fail(f"{name:18s} 失败: {e}")
             all_ok = False
@@ -268,9 +304,7 @@ def stage_camera(cfg, arms, use_tactile, save: bool, show: bool) -> bool:
                     dev_id=dev_id, remote_addr=f"{board_ip(cfg, side)}:{gport}",
                     pc_host=cfg.pc_host, pc_port=pc_port,
                     width=cfg.tactile_width, height=cfg.tactile_height,
-                    max_fps=cfg.stream_max_fps,
-                    depth_min=cfg.tactile_depth_min, depth_max=cfg.tactile_depth_max,
-                    deform_min=cfg.tactile_deform_min, deform_max=cfg.tactile_deform_max,
+                    max_fps=cfg.tactile_max_fps,
                     first_frame_timeout=cfg.stream_first_frame_timeout,
                     name=f"{side}_cam_finger{ti}",
                 ), f"{side}_cam_finger{ti}")
@@ -329,9 +363,7 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
                         can_bitrate=cfg.gripper_can_bitrate,
                         speed=cfg.gripper_speed, torque=cfg.gripper_torque,
                     )
-                    itinerary = (cfg.left_gripper_itinerary if side == "left"
-                                 else cfg.right_gripper_itinerary)
-                    if gp.connect() and gp.init_gripper(itinerary_override=itinerary):
+                    if gp.connect() and gp.init_gripper(itinerary_override=gripper_itinerary(cfg, side)):
                         grippers[side] = gp
                         ok(f"{side} 夹爪就绪")
                     else:
@@ -405,7 +437,12 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
 
 # ==================================================================
 def main():
-    ap = argparse.ArgumentParser(description="睿尔曼双臂硬件自检")
+    ap = argparse.ArgumentParser(description="睿尔曼 ugripper 硬件自检")
+    ap.add_argument(
+        "--robot-type",
+        choices=["realman_ugripper_dual", "realman_ugripper_left"],
+        default="realman_ugripper_dual",
+    )
     ap.add_argument("--stage", choices=["existence", "camera", "teleop", "all"], default="existence")
     ap.add_argument("--arms", default=None, help="逗号分隔, 如 left,right (默认取 config)")
     ap.add_argument("--left-port", default=None, help="左主臂串口 (默认取 teleop config)")
@@ -419,13 +456,22 @@ def main():
     ap.add_argument("--no-gripper", action="store_true", help="阶段3 不连/不同步从臂夹爪")
     args = ap.parse_args()
 
-    cfg = RealmanUGripperDualConfig()
-    tcfg = BiRealmanUGripperLeaderConfig()
+    cfg = (RealmanUGripperLeftConfig() if args.robot_type == "realman_ugripper_left"
+           else RealmanUGripperDualConfig())
+    tcfg = (LeftRealmanUGripperLeaderConfig()
+            if isinstance(cfg, RealmanUGripperLeftConfig)
+            else BiRealmanUGripperLeaderConfig())
     if args.left_port:
-        tcfg.left_port = args.left_port
-    if args.right_port:
+        if isinstance(tcfg, LeftRealmanUGripperLeaderConfig):
+            tcfg.port = args.left_port
+        else:
+            tcfg.left_port = args.left_port
+    if args.right_port and isinstance(tcfg, BiRealmanUGripperLeaderConfig):
         tcfg.right_port = args.right_port
-    arms = args.arms.split(",") if args.arms else list(cfg.arms)
+    default_arms = ["left"] if isinstance(cfg, RealmanUGripperLeftConfig) else list(cfg.arms)
+    arms = args.arms.split(",") if args.arms else default_arms
+    if isinstance(cfg, RealmanUGripperLeftConfig) and arms != ["left"]:
+        ap.error("realman_ugripper_left 只支持 --arms left")
     use_tactile = cfg.use_tactile and not args.no_tactile
 
     print(f"自检目标: arms={arms}, use_tactile={use_tactile}, stage={args.stage}")

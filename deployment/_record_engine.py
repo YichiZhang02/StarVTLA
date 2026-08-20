@@ -19,7 +19,8 @@
 两个入口都构建 RecordConfig 后调用本模块的 run_record(cfg)。这里集中: 录制主循环、
 数据集创建 / episode 管理 / 键盘事件 / 处理管线 / 视频编码, 避免两个入口重复代码。
 
-动作可来自遥操作 (主臂) 或策略 (模型推理)。触觉传感器以 uint8 (TactileSensorFeat) 保存。
+动作可来自遥操作 (主臂) 或策略 (模型推理)。触觉以 uint16 采集，并作为正式
+video feature 保存到 videos/ 下的无损 FFV1/gbrp16le Matroska 文件。
 请勿直接运行本文件; 用 collect.py / inference.py。
 """
 
@@ -51,6 +52,7 @@ def _init_x11_threads():
 _init_x11_threads()
 # ============================================================================
 
+import contextlib
 import logging
 import platform
 import shutil
@@ -64,11 +66,17 @@ from typing import Any
 import numpy as np
 
 # ---- 硬件层 (deployment 自包含) ----
+from deployment.hardware.tactile_sensors import TactileMkvWriter
 from deployment.robots import Robot, RobotConfig, make_robot_from_config
 from deployment.robots.realman_ugripper_dual import RealmanUGripperDual  # noqa: F401  注册 config 选项
+from deployment.robots.realman_ugripper_left import RealmanUGripperLeft  # noqa: F401  注册 config 选项
 from deployment.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
 from deployment.teleoperators.realman_rm75b_leader import RealmanRM75bLeader  # noqa: F401  注册 config 选项
 from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeader  # noqa: F401  注册 config 选项
+from deployment.teleoperators.left_realman_ugripper_leader import (  # noqa: F401
+    LeftRealmanUGripperLeader,
+)
+from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
 
 # ---- 策略 / 数据集 / 处理管线 (复用本仓库 vtla) ----
 from vtla.engine.configs import parser
@@ -432,6 +440,65 @@ class StreamVideoWriter:
         self.close_episode(discard=False)
 
 
+def _tactile_camera_keys(robot: Robot) -> tuple[str, ...]:
+    """Return raw uint16 tactile observation keys in stable hardware-feature order."""
+    return tuple(
+        key
+        for key, feature in robot.observation_features.items()
+        if isinstance(feature, tuple) and ("cam_finger" in key or "tactile" in key)
+    )
+
+
+def _with_external_tactile_video_features(
+    features: dict[str, dict[str, Any]], robot: Robot, tactile_keys: tuple[str, ...]
+) -> dict[str, dict[str, Any]]:
+    """Mark tactile observations as externally encoded lossless dataset videos."""
+    result = {key: value.copy() for key, value in features.items()}
+    for camera_key in tactile_keys:
+        dataset_key = f"{OBS_STR}.images.{camera_key}"
+        feature = result.get(
+            dataset_key,
+            {
+                "dtype": "video",
+                "shape": robot.observation_features[camera_key],
+                "names": ["height", "width", "channels"],
+            },
+        )
+        feature.update(
+            {
+                "dtype": "video",
+                "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mkv",
+                "external_video": True,
+                "tactile_encoding": "tactile_u16_fixed_v1",
+                "storage_dtype": "uint16",
+            }
+        )
+        result[dataset_key] = feature
+    return result
+
+
+def _publish_stream_tactile_videos(
+    dataset_root: Path, episode_index: int, paths: dict[str, Path]
+) -> None:
+    """Place stream-mode tactile episodes under the standard videos hierarchy."""
+    chunk_index, file_index = divmod(int(episode_index), 1000)
+    for camera_key, source in paths.items():
+        destination = (
+            dataset_root
+            / "videos"
+            / f"{OBS_STR}.images.{camera_key}"
+            / f"chunk-{chunk_index:03d}"
+            / f"file-{file_index:03d}.mkv"
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"Tactile stream video already exists: {destination}")
+        shutil.move(str(source), str(destination))
+    if paths:
+        with contextlib.suppress(OSError):
+            next(iter(paths.values())).parent.rmdir()
+
+
 """ --------------- record_loop() data flow --------------------------
        [ Robot ]
            V
@@ -473,6 +540,7 @@ def record_loop(
     dataset: LeRobotDataset | None = None,
     record_features: dict[str, dict[str, Any]] | None = None,
     stream_writer: StreamVideoWriter | None = None,
+    tactile_writer: TactileMkvWriter | None = None,
     teleop: Teleoperator | None = None,
     policy: PreTrainedPolicy | None = None,
     preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None,
@@ -502,8 +570,16 @@ def record_loop(
         # Get robot observation
         obs = robot.get_observation()
 
-        # Applies a pipeline to the raw robot observation, default is IdentityProcessor
-        obs_processed = robot_observation_processor(obs)
+        # The authoritative tactile observation remains uint16 for the MKV writer. Policy,
+        # display and optional inference recordings consume the versioned uint8 derivative.
+        obs_for_processing = obs
+        if tactile_writer is not None:
+            obs_for_processing = obs.copy()
+            for camera_key in tactile_writer.camera_keys:
+                obs_for_processing[camera_key] = tactile_uint16_to_uint8(obs[camera_key])
+
+        # Applies a pipeline to the model/standard-dataset observation.
+        obs_processed = robot_observation_processor(obs_for_processing)
 
         # stream + policy 场景下 dataset 可能为 None，因此统一使用 features_for_frame
         features_for_frame = dataset.features if dataset is not None else record_features
@@ -560,6 +636,9 @@ def record_loop(
         # so action actually sent is saved in the dataset.
         _sent_action = robot.send_action(robot_action_to_send)
 
+        if tactile_writer is not None:
+            tactile_writer.add_observation(obs)
+
         # Write to dataset
         if dataset is not None:
             if features_for_frame is None:
@@ -599,7 +678,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
-    dataset_features = combine_feature_dicts(
+    all_dataset_features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
             pipeline=teleop_action_processor,
             initial_features=create_initial_features(action=robot.action_features),
@@ -611,7 +690,17 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
             use_videos=cfg.dataset.video,
         ),
     )
+    tactile_keys = _tactile_camera_keys(robot)
+    dataset_features = _with_external_tactile_video_features(
+        all_dataset_features, robot, tactile_keys
+    )
     record_features = dataset_features
+    if tactile_keys:
+        logging.info(
+            "Raw tactile features are stored as uint16 MKV under videos/ and indexed "
+            "as dataset video features: %s",
+            tactile_keys,
+        )
 
     dataset: LeRobotDataset | None = None
     if save_mode == "episode":
@@ -648,6 +737,17 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
     else:
         # stream 模式不创建 LeRobotDataset，只做 repo_id 合法性检查
         sanity_check_dataset_name(cfg.dataset.repo_id, cfg.policy)
+
+    tactile_writer = (
+        TactileMkvWriter(
+            root=resolve_dataset_root(cfg.dataset) / ".tactile_staging",
+            fps=cfg.dataset.fps,
+            camera_keys=tactile_keys,
+            manifest_path=resolve_dataset_root(cfg.dataset) / "meta" / "tactile_encoding.json",
+        )
+        if tactile_keys
+        else None
+    )
 
     # 按当前模式加载策略；stream 模式使用轻量 ds_meta 占位
     if cfg.policy is not None:
@@ -733,6 +833,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         events["start_episode"] = False
 
                     logging.info(f"开始录制 episode {dataset.num_episodes + 1}")
+                    if tactile_writer is not None:
+                        tactile_writer.start_episode(dataset.num_episodes)
 
                     # ── 主录制循环 ────────────────────────────────────────────
                     record_loop(
@@ -748,6 +850,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         postprocessor=postprocessor,
                         dataset=dataset,
                         record_features=record_features,
+                        tactile_writer=tactile_writer,
                         control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
@@ -757,11 +860,21 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     if events["rerecord_episode"]:
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
+                        if tactile_writer is not None:
+                            tactile_writer.close_episode(discard=True)
                         dataset.clear_episode_buffer()
                         continue
 
                     # ── 保存 ─────────────────────────────────────────────────
+                    if tactile_writer is not None:
+                        tactile_paths = tactile_writer.close_episode(discard=False)
+                        for camera_key, path in tactile_paths.items():
+                            dataset.register_external_video(
+                                f"{OBS_STR}.images.{camera_key}", path
+                            )
                     dataset.save_episode()
+                    if tactile_writer is not None:
+                        tactile_writer.cleanup_staging()
                     recorded_episodes += 1
         else:
             # stream 模式使用 sidecar 视频写入，不触碰 LeRobotDataset 计数逻辑
@@ -825,6 +938,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
                     logging.info(f"开始录制 stream episode {episode_index + 1}")
                     stream_writer.start_episode(episode_index)
+                    if tactile_writer is not None:
+                        tactile_writer.start_episode(episode_index)
                     record_loop(
                         robot=robot,
                         events=events,
@@ -839,6 +954,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         dataset=None,
                         record_features=record_features,
                         stream_writer=stream_writer,
+                        tactile_writer=tactile_writer,
                         control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
@@ -849,13 +965,24 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         events["rerecord_episode"] = False
                         events["exit_early"] = False
                         stream_writer.close_episode(discard=True)
+                        if tactile_writer is not None:
+                            tactile_writer.close_episode(discard=True)
                         continue
 
                     # ── 保存 ─────────────────────────────────────────────────
                     stream_writer.close_episode(discard=False)
+                    if tactile_writer is not None:
+                        tactile_paths = tactile_writer.close_episode(discard=False)
+                        _publish_stream_tactile_videos(
+                            resolve_dataset_root(cfg.dataset), episode_index, tactile_paths
+                        )
+                        tactile_writer.cleanup_staging()
                     recorded_episodes += 1
                     episode_index += 1
     finally:
+        if tactile_writer is not None:
+            tactile_writer.abort_episode()
+
         # 优先停止策略推理线程
         if policy is not None and hasattr(policy, "stop"):
             policy.stop()

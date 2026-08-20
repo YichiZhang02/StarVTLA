@@ -35,6 +35,7 @@ from .utils import (
 )
 from .video_utils import (
     VideoDecoderCache,
+    decode_tactile_video_frames_pyav,
     decode_video_frames_torchcodec,
 )
 
@@ -554,13 +555,22 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         for video_key, query_ts in query_timestamps.items():
             root = self.meta.url_root if self.streaming and not self.streaming_from_local else self.root
             video_path = f"{root}/{self.meta.get_video_file_path(ep_idx, video_key)}"
-            frames = decode_video_frames_torchcodec(
-                video_path,
-                query_ts,
-                self.tolerance_s,
-                decoder_cache=self.video_decoder_cache,
-                return_uint8=self._return_uint8,
-            )
+            encoding = self.meta.features[video_key].get("tactile_encoding")
+            if encoding in {"tactile_u16_fixed_v1", "tactile_u8_linear_v1"}:
+                frames = decode_tactile_video_frames_pyav(
+                    video_path,
+                    query_ts,
+                    self.tolerance_s,
+                    return_uint8=self._return_uint8,
+                )
+            else:
+                frames = decode_video_frames_torchcodec(
+                    video_path,
+                    query_ts,
+                    self.tolerance_s,
+                    decoder_cache=self.video_decoder_cache,
+                    return_uint8=self._return_uint8,
+                )
 
             item[video_key] = frames.squeeze(0) if len(query_ts) == 1 else frames
 

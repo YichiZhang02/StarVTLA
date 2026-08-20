@@ -40,7 +40,6 @@ from .utils import (
     DEFAULT_DATA_PATH,
     DEFAULT_EPISODES_PATH,
     DEFAULT_VIDEO_FILE_SIZE_IN_MB,
-    DEFAULT_VIDEO_PATH,
     update_chunk_file_indices,
 )
 from .video_utils import concatenate_video_files, get_video_duration_in_s
@@ -363,13 +362,13 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
         dst_file_durations = video_idx["dst_file_durations"]
 
         for src_chunk_idx, src_file_idx in unique_chunk_file_pairs:
-            src_path = src_meta.root / DEFAULT_VIDEO_PATH.format(
+            src_path = src_meta.root / src_meta.get_video_path_template(key).format(
                 video_key=key,
                 chunk_index=src_chunk_idx,
                 file_index=src_file_idx,
             )
 
-            dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
+            dst_path = dst_meta.root / dst_meta.get_video_path_template(key).format(
                 video_key=key,
                 chunk_index=chunk_idx,
                 file_index=file_idx,
@@ -399,7 +398,7 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
                 dst_key = (chunk_idx, file_idx)
                 videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
                 videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = dst_key
-                dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
+                dst_path = dst_meta.root / dst_meta.get_video_path_template(key).format(
                     video_key=key,
                     chunk_index=chunk_idx,
                     file_index=file_idx,

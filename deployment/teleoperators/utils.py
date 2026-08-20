@@ -40,6 +40,10 @@ def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
         from .bi_realman_ugripper_leader import BiRealmanUGripperLeader
 
         return BiRealmanUGripperLeader(config)
+    elif config.type == "left_realman_ugripper_leader":
+        from .left_realman_ugripper_leader import LeftRealmanUGripperLeader
+
+        return LeftRealmanUGripperLeader(config)
     else:
         try:
             return cast(Teleoperator, make_device_from_device_class(config))

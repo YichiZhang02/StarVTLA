@@ -45,18 +45,17 @@ class Robot(abc.ABC):
 
     def __init__(self, config: RobotConfig):
         self.robot_type = self.name
-        self.id = config.id
         self.calibration_dir = (
             config.calibration_dir if config.calibration_dir else HF_LEROBOT_CALIBRATION / ROBOTS / self.name
         )
         self.calibration_dir.mkdir(parents=True, exist_ok=True)
-        self.calibration_fpath = self.calibration_dir / f"{self.id}.json"
+        self.calibration_fpath = self.calibration_dir / "calibration.json"
         self.calibration: dict[str, MotorCalibration] = {}
         if self.calibration_fpath.is_file():
             self._load_calibration()
 
     def __str__(self) -> str:
-        return f"{self.id} {self.__class__.__name__}"
+        return self.__class__.__name__
 
     # TODO(aliberts): create a proper Feature class for this that links with datasets
     @property
