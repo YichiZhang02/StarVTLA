@@ -7,7 +7,6 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 dataset_id=${1:-rm_umi_dual_260708_pen_in_case_notac_undist_256}  # 数据集名
 policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam
 
-
 # 训练配置
 num_processes=${3:-4}
 batch_size=${4:-4}
@@ -18,26 +17,25 @@ log_freq=100
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
-state_mode=${8:-joint}  # none | joint | episode_rot6d | absolute_rot6d | episode_quat | absolute_quat
-action_mode=${9:-joint}  # joint | rot6d | quat
+state_mode=${8:-absolute_joint}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d | absolute_quat | episode_quat
+action_mode=${9:-absolute_joint}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d | absolute_quat | relative_quat
 
 # 数据增强
 augmentation_mode=${10:-none}  # none | mild | strong
-# 色温(白平衡)增强范围, 格式 "[min,max]" (逗号后不要空格). 例: "[0,0.6]" 偏暖, 覆盖偏黄的部署环境.
-# 留空则关闭色温增强. 与 augmentation_mode 正交: augmentation_mode=none 时只做色温, 否则色温加入采样池.
-# Use the default only when the variable is unset; an explicitly empty value disables it.
-color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}
+color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}  # 色温增强 [min,max] (逗号后不要空格)
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
 tactile_encoder_path=${TACTILE_ENCODER_PATH:-${11:-playground/pretrained_models/AnyTouch-ViT-L-16}}
 tactile_insert_location=${TACTILE_INSERT_LOCATION:-${12:-encoder}}  # 触觉插入位置 encoder | decoder
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-16}  # 触觉 tokens / per image
-dinov3_checkpoint=${DINOV3_CHECKPOINT:-}  # starvla_groot_dinoalign 训练期 teacher 权重文件
-# 触觉时序窗口（encode 和 as_image 两种模式均生效）
-# tactile_num_frames: 每步输入的触觉帧数（含当前帧）。1 = 单帧（默认，完全向后兼容）。
-# tactile_frame_offset: 相邻两个触觉帧的采样间隔（帧数）。1 = 相邻帧；k = 更宽的时间感受野。
-tactile_num_frames=${TACTILE_NUM_FRAMES:-1}
-tactile_frame_offset=${TACTILE_FRAME_OFFSET:-1}
+tactile_num_frames=${TACTILE_NUM_FRAMES:-1}  # 每步输入的触觉帧数（含当前帧）
+tactile_frame_offset=${TACTILE_FRAME_OFFSET:-1}  # 相邻两个触觉帧的采样间隔（帧数）
+
+# cpu / gpu training
+policy_device=${POLICY_DEVICE:-cuda}
+
+# WAM 训练图片可视化。其余频率/sample 数/采样步数/seed 固定在 FastWAMConfig。
+visualization_enabled=${VISUALIZATION_ENABLED:-true}
 
 # =================== 不是很需要改动的配置 ===================
 # 保存的模型/日志名拼接规则
@@ -81,11 +79,17 @@ log_file="${output_dir}/${run_name}.log"
 tmp_log="$(mktemp "${TMPDIR:-/tmp}/${run_name}.XXXXXX.log")"  # 训练期间先把日志写到系统临时目录(不污染 tac_infra), 跑完再搬到 output_dir 下
 tmp_status="${tmp_log}.status"  # POSIX sh 没有 PIPESTATUS，管道左侧通过文件传出真实退出码
 
-
-# FastWAM 训练图片可视化。其余频率/sample 数/采样步数/seed 固定在 FastWAMConfig。
-visualization_enabled=${VISUALIZATION_ENABLED:-true}
-
 # =================== 完全不需要改动的配置 ===================
+# action和state合法性检查
+case "${state_mode}" in
+  none|absolute_joint|episode_joint|absolute_rot6d|episode_rot6d|absolute_quat|episode_quat) ;;
+  *) echo "Invalid state_mode: ${state_mode}"; exit 1 ;;
+esac
+case "${action_mode}" in
+  absolute_joint|relative_joint|absolute_rot6d|relative_rot6d|absolute_quat|relative_quat) ;;
+  *) echo "Invalid action_mode: ${action_mode}"; exit 1 ;;
+esac
+
 # 预训练模型路径和基础 VLM 配置
 pretrained_path=
 base_vlm=
@@ -108,9 +112,6 @@ case "${policy_type}" in
     ;;
   starvla_groot_dinoalign)
     extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
-    if [ -n "${dinov3_checkpoint}" ]; then
-      extra_args="${extra_args} --policy.dinov3_checkpoint=${dinov3_checkpoint}"
-    fi
     ;;
   fastwam)
     extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"
@@ -162,6 +163,7 @@ echo "Training with dataset: $dataset_id"
 echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
+echo "Policy device: ${policy_device}"
 echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode | Action mode: $action_mode | Augmentation mode: $augmentation_mode"
 echo "Color temp range: ${color_temp_range:-<off>}"
 echo "Top cam keys:   ${top_cam}"
@@ -207,7 +209,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --policy.top_camera_keys="${top_cam}" \
     --policy.wrist_camera_keys="${wrist_cam}" \
     --policy.tactile_keys="${tactile_keys}" \
-    --policy.device=cuda \
+    --policy.device=${policy_device} \
     --policy.push_to_hub=false \
     ${extra_args} \
     --output_dir=${output_dir} \

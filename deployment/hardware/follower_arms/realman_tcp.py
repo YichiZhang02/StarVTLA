@@ -98,6 +98,7 @@ class RealmanTcpFollower(FollowerArmBase):
         self._handle = None    # rm_create_robot_arm 句柄
         self._connected = False
         self._reader: _FollowerStateReader | None = None
+        self._force_drag_active = False
 
     @staticmethod
     def _import_sdk():
@@ -178,6 +179,94 @@ class RealmanTcpFollower(FollowerArmBase):
             logger.warning(f"[{self.name}] 发送位姿动作失败, 错误码: {ret}")
         return ret
 
+    def start_six_axis_force_drag(
+        self,
+        *,
+        precise: bool = True,
+        mode: int = 3,
+        singular_wall: bool = True,
+    ) -> None:
+        """Enable RealMan six-axis force drag on this follower arm."""
+        if self._arm is None:
+            raise RuntimeError(f"[{self.name}] cannot start force drag while disconnected")
+        if mode not in (1, 2, 3):
+            raise ValueError(f"force drag mode must be 1, 2 or 3, got {mode}")
+        if self._force_drag_active:
+            return
+
+        requested_precision = 1 if precise else 0
+        ret = int(self._arm.rm_set_force_drag_mode(requested_precision))
+        if ret != 0:
+            raise RuntimeError(
+                f"[{self.name}] rm_set_force_drag_mode({requested_precision}) failed: ret={ret}"
+            )
+        ret, actual_precision = self._arm.rm_get_force_drag_mode()
+        if int(ret) != 0 or int(actual_precision) != requested_precision:
+            raise RuntimeError(
+                f"[{self.name}] force drag precision verification failed: "
+                f"ret={ret}, requested={requested_precision}, actual={actual_precision}"
+            )
+
+        ret = int(
+            self._arm.rm_start_multi_drag_teach(
+                int(mode),
+                1 if singular_wall else 0,
+            )
+        )
+        if ret != 0:
+            try:
+                self._arm.rm_stop_drag_teach()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"[{self.name}] rm_start_multi_drag_teach({mode}) failed: ret={ret}"
+            )
+        self._force_drag_active = True
+        logger.warning(
+            "[%s] six-axis force drag enabled: precise=%s mode=%d singular_wall=%s",
+            self.name,
+            precise,
+            mode,
+            singular_wall,
+        )
+
+    def stop_drag_teach(self) -> None:
+        """Stop force drag and latch the measured joints as the new hold target."""
+        if not self._force_drag_active:
+            return
+        if self._arm is None:
+            raise RuntimeError(f"[{self.name}] force drag is active but arm is disconnected")
+
+        hold_joints = self.read_joints_now()
+        if hold_joints is None:
+            cached = self.read_joints()
+            if cached.size == self._dof and np.all(np.isfinite(cached)) and self.get_state_age() <= 0.2:
+                hold_joints = cached
+                logger.warning(
+                    "[%s] using %.1fms cached joints for drag-exit hold",
+                    self.name,
+                    self.get_state_age() * 1000.0,
+                )
+
+        ret = int(self._arm.rm_stop_drag_teach())
+        if ret != 0:
+            raise RuntimeError(f"[{self.name}] rm_stop_drag_teach failed: ret={ret}")
+        self._force_drag_active = False
+
+        if hold_joints is None:
+            raise RuntimeError(
+                f"[{self.name}] force drag stopped but the current hold target could not be captured"
+            )
+        hold_ret = self.send_joints(hold_joints.tolist())
+        if hold_ret != 0:
+            raise RuntimeError(
+                f"[{self.name}] force drag stopped but current-pose hold failed: ret={hold_ret}"
+            )
+        logger.warning(
+            "[%s] six-axis force drag disabled; current joint pose latched as hold target",
+            self.name,
+        )
+
     def get_tool_work_frames(self) -> tuple[dict | None, dict | None]:
         """读当前工具坐标系 / 工作坐标系 (用于上电自检 movep 位姿系是否= flange/base)。
 
@@ -228,6 +317,11 @@ class RealmanTcpFollower(FollowerArmBase):
         logger.info(f"[{self.name}] move_to 完成")
 
     def disconnect(self) -> None:
+        if self._force_drag_active:
+            try:
+                self.stop_drag_teach()
+            except Exception as e:
+                logger.warning(f"[{self.name}] 停止力拖动出错: {e}")
         if self._reader is not None:
             try:
                 self._reader.stop()

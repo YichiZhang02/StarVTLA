@@ -14,6 +14,7 @@ from ..sensor_routing import (
     OBS_STATE_ABSOLUTE_EE,
     OBS_STATE_ABSOLUTE_QUAT,
     OBS_STATE_EPISODE_EE,
+    OBS_STATE_EPISODE_JOINT,
     OBS_STATE_EPISODE_QUAT,
     SensorRoutingMixin,
 )
@@ -230,7 +231,8 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
 
     def windowed_observation_keys(self) -> list[str]:
         state_key = {
-            "joint": OBS_STATE,
+            "absolute_joint": OBS_STATE,
+            "episode_joint": OBS_STATE_EPISODE_JOINT,
             "episode_rot6d": OBS_STATE_EPISODE_EE,
             "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
             "episode_quat": OBS_STATE_EPISODE_QUAT,
@@ -242,12 +244,11 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
         return self._dedupe(keys)
 
     def windowed_action_keys(self) -> list[str]:
-        if self.action_mode == "joint":
+        if self.action_representation == "joint":
             return [ACTION]
-        is_absolute = self.state_mode in ("absolute_rot6d", "absolute_quat")
-        if self.action_mode == "rot6d":
-            return [ACTION_ABSOLUTE_EE if is_absolute else ACTION_EPISODE_EE]
-        return [ACTION_ABSOLUTE_QUAT if is_absolute else ACTION_EPISODE_QUAT]
+        if self.action_representation == "rot6d":
+            return [ACTION_ABSOLUTE_EE]
+        return [ACTION_ABSOLUTE_QUAT]
 
     @property
     def observation_delta_indices(self) -> list[int]:
@@ -255,6 +256,8 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list[int]:
+        if self.action_reference == "relative":
+            return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
     @property

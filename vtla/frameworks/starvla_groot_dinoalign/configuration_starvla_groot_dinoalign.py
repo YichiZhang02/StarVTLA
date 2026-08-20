@@ -192,7 +192,7 @@ class StarvlaGrootDinoAlignConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        if self.action_mode == "relative_ee":
+        if self.action_reference == "relative":
             return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 

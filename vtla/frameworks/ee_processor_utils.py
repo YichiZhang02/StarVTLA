@@ -38,12 +38,14 @@ from .sensor_routing import (
     ACTION_RELATIVE_QUAT,
     OBS_STATE_ABSOLUTE_EE,
     OBS_STATE_ABSOLUTE_QUAT,
+    OBS_STATE_EPISODE_JOINT,
     OBS_STATE_EPISODE_EE,
     OBS_STATE_EPISODE_QUAT,
 )
 
 # Maps (state_mode, is_absolute) -> (obs_ee_key, action_ee_key, relative_stats_key)
 _STATE_MODE_KEYS = {
+    "episode_joint": (OBS_STATE_EPISODE_JOINT, ACTION, ACTION),
     "episode_rot6d":  (OBS_STATE_EPISODE_EE,   ACTION_EPISODE_EE,   ACTION_RELATIVE_EE),
     "absolute_rot6d": (OBS_STATE_ABSOLUTE_EE,  ACTION_ABSOLUTE_EE,  ACTION_RELATIVE_EE),
     "episode_quat":   (OBS_STATE_EPISODE_QUAT, ACTION_EPISODE_QUAT, ACTION_RELATIVE_QUAT),
@@ -62,15 +64,16 @@ def remap_ee_dataset_stats(dataset_stats, config):
         return dataset_stats
 
     # Normalise legacy aliases (episode_ee → episode_rot6d, etc.).
-    state_mode  = getattr(config, "state_mode",  "joint")
-    action_mode = getattr(config, "action_mode", "joint")
+    state_mode  = getattr(config, "state_mode",  "absolute_joint")
+    action_mode = getattr(config, "action_mode", "absolute_joint")
     from .sensor_routing import _STATE_MODE_ALIASES, _ACTION_MODE_ALIASES
     state_mode  = _STATE_MODE_ALIASES.get(state_mode,  state_mode)
     action_mode = _ACTION_MODE_ALIASES.get(action_mode, action_mode)
 
     state_ee  = state_mode  in _STATE_MODE_KEYS
-    action_ee = action_mode in ("rot6d", "quat")
-    if not (state_ee or action_ee):
+    action_reference = getattr(config, "action_reference", "absolute")
+    action_representation = getattr(config, "action_representation", "joint")
+    if not (state_ee or action_representation != "joint" or action_reference == "relative"):
         return dataset_stats
 
     dataset_stats = dict(dataset_stats)
@@ -80,16 +83,25 @@ def remap_ee_dataset_stats(dataset_stats, config):
         if obs_key in dataset_stats:
             dataset_stats[OBS_STATE] = dataset_stats[obs_key]
 
-    if action_ee:
-        # Determine the relative-action stats key based on the rotation format.
-        is_quat    = action_mode == "quat"
-        rel_key    = ACTION_RELATIVE_QUAT if is_quat else ACTION_RELATIVE_EE
-        if rel_key not in dataset_stats:
+    if action_representation != "joint":
+        absolute_key = ACTION_ABSOLUTE_QUAT if action_representation == "quat" else ACTION_ABSOLUTE_EE
+        selected_key = absolute_key
+        if action_reference == "relative":
+            selected_key = ACTION_RELATIVE_QUAT if action_representation == "quat" else ACTION_RELATIVE_EE
+        if selected_key not in dataset_stats:
             raise KeyError(
-                f"action_mode='{action_mode}' needs '{rel_key}' stats. Re-run "
+                f"action_mode='{action_mode}' needs '{selected_key}' stats. Re-run "
                 "tools/convert_joints_to_eepose.py to (re)generate them."
             )
-        dataset_stats[ACTION] = dataset_stats[rel_key]
+        dataset_stats[ACTION] = dataset_stats[selected_key]
+    elif action_reference == "relative":
+        relative_joint_key = ACTION + "_relative_joint"
+        if relative_joint_key not in dataset_stats:
+            raise KeyError(
+                f"action_mode='{action_mode}' needs '{relative_joint_key}' stats. Re-run "
+                "tools/convert_joints_to_eepose.py to (re)generate them."
+            )
+        dataset_stats[ACTION] = dataset_stats[relative_joint_key]
 
     return dataset_stats
 
@@ -97,17 +109,17 @@ def remap_ee_dataset_stats(dataset_stats, config):
 def make_ee_relative_steps(config):
     """Build the paired (relative, absolute) action steps for a policy processor.
 
-    In EE mode (action_mode='rot6d' or 'quat') they run in SE(3) ``pose`` mode with the
-    correct rotation format; otherwise they fall back to the joint element-wise behaviour
-    gated by the pi05-only ``use_relative_actions`` flag (no-op for act/diffusion).
+    Relative EE modes run in SE(3) ``pose`` mode; relative joint mode uses element-wise
+    subtraction. Absolute modes create disabled no-op steps so every framework keeps one pipeline.
     """
-    action_mode = getattr(config, "action_mode", "joint")
+    action_mode = getattr(config, "action_mode", "absolute_joint")
     from .sensor_routing import _ACTION_MODE_ALIASES
     action_mode = _ACTION_MODE_ALIASES.get(action_mode, action_mode)
 
-    action_ee = action_mode in ("rot6d", "quat")
-    enabled   = getattr(config, "use_relative_actions", False) or action_ee
-    rot_mode  = "quat" if action_mode == "quat" else "rot6d"
+    representation = getattr(config, "action_representation", "joint")
+    enabled = getattr(config, "action_reference", "absolute") == "relative"
+    action_ee = representation in ("rot6d", "quat")
+    rot_mode = "quat" if representation == "quat" else "rot6d"
 
     relative_step = RelativeActionsProcessorStep(
         enabled=enabled,

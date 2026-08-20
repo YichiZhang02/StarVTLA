@@ -57,15 +57,19 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
 
     max_state_dim: int = 32
     task_key: str = "task"
-    state_mode: str = "joint"
+    state_mode: str = "absolute_joint"
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         transition = transition.copy()
 
-        if self.state_mode not in ["none", "joint", "episode_ee", "absolute_ee"]:
+        valid_modes = {
+            "none", "absolute_joint", "episode_joint", "episode_rot6d", "absolute_rot6d",
+            "episode_quat", "absolute_quat", "joint", "episode_ee", "absolute_ee",
+        }
+        if self.state_mode not in valid_modes:
             raise ValueError(
                 f"Invalid PI05 state_mode: {self.state_mode}. "
-                "Expected one of: 'none', 'joint', 'episode_ee', 'absolute_ee'."
+                f"Expected one of: {sorted(valid_modes)}."
             )
 
         tasks = transition.get(TransitionKey.COMPLEMENTARY_DATA, {}).get(self.task_key)
@@ -90,7 +94,7 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
 
         state = transition.get(TransitionKey.OBSERVATION, {}).get(OBS_STATE)
         if state is None:
-            raise ValueError("State is required for PI05 state_mode='joint'")
+            raise ValueError(f"State is required for PI05 state_mode='{self.state_mode}'")
 
         # TODO: check if this necessary
         state = deepcopy(state)

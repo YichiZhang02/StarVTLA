@@ -87,8 +87,12 @@ STAT_KEYS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "
 NEW_FEATURES = (
     "observation.state_episode_ee",
     "action_episode_ee",
+    "observation.state_absolute_ee",
+    "action_absolute_ee",
     "observation.state_episode_quat",
     "action_episode_quat",
+    "observation.state_absolute_quat",
+    "action_absolute_quat",
 )
 
 
@@ -217,6 +221,24 @@ def to_episode_quat_umi(vec: np.ndarray, idx: dict, baseline) -> np.ndarray:
     for side, (p0, R0) in (("right", (Rp0, RR0)), ("left", (Lp0, LR0))):
         pos, quat, grip = split_arm_pose(vec, idx, side)
         out.append(relative_arm_ee_quat(pos, quat_to_mat(quat), grip, p0, R0))
+    return np.concatenate(out).astype(np.float32)
+
+
+def to_absolute_ee_umi(vec: np.ndarray, idx: dict) -> np.ndarray:
+    """Stored world pose -> canonical base-frame rot6d layout."""
+    out = []
+    for side in ("right", "left"):
+        pos, quat, grip = split_arm_pose(vec, idx, side)
+        out.append(np.concatenate([pos, mat_to_rot6d(quat_to_mat(quat)), [grip]]))
+    return np.concatenate(out).astype(np.float32)
+
+
+def to_absolute_quat_umi(vec: np.ndarray, idx: dict) -> np.ndarray:
+    """Stored world pose -> canonical base-frame quaternion layout."""
+    out = []
+    for side in ("right", "left"):
+        pos, quat, grip = split_arm_pose(vec, idx, side)
+        out.append(np.concatenate([pos, quat, [grip]]))
     return np.concatenate(out).astype(np.float32)
 
 
@@ -529,8 +551,8 @@ def main():
     print(f"      {len(baselines)} episode baselines")
 
     # accumulate global + per-episode stats
-    all_state, all_action = [], []
-    all_state_eq, all_action_eq = [], []
+    all_state, all_action, all_state_abs, all_action_abs = [], [], [], []
+    all_state_eq, all_action_eq, all_state_aq, all_action_aq = [], [], [], []
     per_ep: dict[int, dict[str, list]] = {}
 
     print("[2/4] converting data parquet (adding columns)")
@@ -544,6 +566,10 @@ def main():
         ac_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
         st_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
         ac_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        st_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
+        ac_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
+        st_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
+        ac_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
@@ -553,15 +579,28 @@ def main():
             # quat variants (same relative transform, rotation stored as quaternion)
             st_eq[i] = to_episode_quat_umi(state_col[i], st_idx, base)
             ac_eq[i] = to_episode_quat_umi(action_col[i], ac_idx, base)
-            per_ep.setdefault(ep, {"s": [], "a": [], "s_quat": [], "a_quat": []})
+            st_abs[i] = to_absolute_ee_umi(state_col[i], st_idx)
+            ac_abs[i] = to_absolute_ee_umi(action_col[i], ac_idx)
+            st_aq[i] = to_absolute_quat_umi(state_col[i], st_idx)
+            ac_aq[i] = to_absolute_quat_umi(action_col[i], ac_idx)
+            per_ep.setdefault(ep, {"s": [], "a": [], "s_quat": [], "a_quat": [],
+                                   "s_abs": [], "a_abs": [], "s_abs_quat": [], "a_abs_quat": []})
             per_ep[ep]["s"].append(st_ee[i])
             per_ep[ep]["a"].append(ac_ee[i])
             per_ep[ep]["s_quat"].append(st_eq[i])
             per_ep[ep]["a_quat"].append(ac_eq[i])
+            per_ep[ep]["s_abs"].append(st_abs[i])
+            per_ep[ep]["a_abs"].append(ac_abs[i])
+            per_ep[ep]["s_abs_quat"].append(st_aq[i])
+            per_ep[ep]["a_abs_quat"].append(ac_aq[i])
         all_state.append(st_ee)
         all_action.append(ac_ee)
         all_state_eq.append(st_eq)
         all_action_eq.append(ac_eq)
+        all_state_abs.append(st_abs)
+        all_action_abs.append(ac_abs)
+        all_state_aq.append(st_aq)
+        all_action_aq.append(ac_aq)
 
         # sanity: state & action must be in the same world frame (their T0 is shared).
         first_rows = np.where(df["frame_index"].to_numpy() == 0)[0]
@@ -581,8 +620,12 @@ def main():
                 tab = tab.drop([col])
         tab = tab.append_column("observation.state_episode_ee",   _fsl_f32(st_ee))
         tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee))
+        tab = tab.append_column("observation.state_absolute_ee",  _fsl_f32(st_abs))
+        tab = tab.append_column("action_absolute_ee",              _fsl_f32(ac_abs))
         tab = tab.append_column("observation.state_episode_quat",  _fsl_f32_quat(st_eq))
         tab = tab.append_column("action_episode_quat",             _fsl_f32_quat(ac_eq))
+        tab = tab.append_column("observation.state_absolute_quat", _fsl_f32_quat(st_aq))
+        tab = tab.append_column("action_absolute_quat",            _fsl_f32_quat(ac_aq))
         pq.write_table(tab, f)
         print(f"      {f.relative_to(root)}  ({len(df)} frames)")
 
@@ -605,11 +648,15 @@ def main():
     stat_sources = (
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
         ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
+        ("observation.state_absolute_ee",  feature_stats(np.concatenate(all_state_abs))),
+        ("action_absolute_ee",              feature_stats(np.concatenate(all_action_abs))),
         # action_relative_ee: the relativized target the model trains on (St^-1·A_{t+k}).
         ("action_relative_ee",              rel_stats),
         # quat variants
         ("observation.state_episode_quat",  feature_stats(np.concatenate(all_state_eq))),
         ("action_episode_quat",             feature_stats(np.concatenate(all_action_eq))),
+        ("observation.state_absolute_quat", feature_stats(np.concatenate(all_state_aq))),
+        ("action_absolute_quat",            feature_stats(np.concatenate(all_action_aq))),
         ("action_relative_quat",            rel_quat_stats),
     )
     for feat, st in stat_sources:
@@ -624,8 +671,12 @@ def main():
     ep_stats = {ep: {
         "observation.state_episode_ee":  feature_stats(np.stack(d["s"])),
         "action_episode_ee":              feature_stats(np.stack(d["a"])),
+        "observation.state_absolute_ee": feature_stats(np.stack(d["s_abs"])),
+        "action_absolute_ee":             feature_stats(np.stack(d["a_abs"])),
         "observation.state_episode_quat": feature_stats(np.stack(d["s_quat"])),
         "action_episode_quat":            feature_stats(np.stack(d["a_quat"])),
+        "observation.state_absolute_quat": feature_stats(np.stack(d["s_abs_quat"])),
+        "action_absolute_quat":            feature_stats(np.stack(d["a_abs_quat"])),
     } for ep, d in per_ep.items()}
     ep_files = sorted(glob.glob(str(root / "meta" / "episodes" / "**" / "*.parquet"), recursive=True))
     for ef in ep_files:

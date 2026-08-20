@@ -53,5 +53,5 @@ python tools/merge_datasets.py \
 
 echo "==================================================================="
 echo "完成 ✅  训练数据集: ${out}"
-echo "  训练示例: bash train.sh ${out_id} pi05 4 16 20000 false none episode_ee relative_ee"
+echo "  训练示例: bash train.sh ${out_id} pi05 4 16 20000 false none episode_rot6d relative_rot6d"
 echo "==================================================================="

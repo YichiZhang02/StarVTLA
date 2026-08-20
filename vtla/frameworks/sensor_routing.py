@@ -47,25 +47,30 @@ VALID_TACTILE_MODES = ("none", "as_image", "encode")
 # Backward-compat aliases (still accepted, normalised to the canonical name on validation):
 #   "episode_ee"  -> "episode_rot6d",  "absolute_ee" -> "absolute_rot6d"
 VALID_STATE_MODES = (
-    "none", "joint",
+    "none", "absolute_joint", "episode_joint",
     "episode_rot6d", "absolute_rot6d",
     "episode_quat",  "absolute_quat",
 )
 # Accepted for backward compat; map to canonical names in _normalise_ee_modes().
 _STATE_MODE_ALIASES: dict[str, str] = {
+    "joint":       "absolute_joint",
     "episode_ee":  "episode_rot6d",
     "absolute_ee": "absolute_rot6d",
 }
 
-# action_mode choices:
-#   joint  — joint-space targets (default).
-#   rot6d  — EE pose relative to the CURRENT observation (delta), rot6d rotation.
-#   quat   — same as rot6d but rotation stored as quaternion [x,y,z,w].
+# action_mode combines reference and representation, e.g. absolute_joint or relative_rot6d.
 #
 # Backward-compat alias: "relative_ee" -> "rot6d"
-VALID_ACTION_MODES = ("joint", "rot6d", "quat")
+VALID_ACTION_MODES = (
+    "absolute_joint", "relative_joint",
+    "absolute_rot6d", "relative_rot6d",
+    "absolute_quat", "relative_quat",
+)
 _ACTION_MODE_ALIASES: dict[str, str] = {
-    "relative_ee": "rot6d",
+    "joint":       "absolute_joint",
+    "rot6d":       "relative_rot6d",
+    "quat":        "relative_quat",
+    "relative_ee": "relative_rot6d",
 }
 
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
@@ -74,6 +79,7 @@ VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
 # Dataset columns / stats keys added offline by tools/convert_joints_to_eepose.py.
 # rot6d variants (original "_ee" suffix, kept for backward compat).
 OBS_STATE_EPISODE_EE = OBS_STATE + "_episode_ee"    # observation.state_episode_ee  (rot6d)
+OBS_STATE_EPISODE_JOINT = OBS_STATE + "_episode_joint"
 ACTION_EPISODE_EE    = ACTION + "_episode_ee"        # action_episode_ee              (rot6d)
 OBS_STATE_ABSOLUTE_EE = OBS_STATE + "_absolute_ee"  # observation.state_absolute_ee (rot6d)
 ACTION_ABSOLUTE_EE   = ACTION + "_absolute_ee"       # action_absolute_ee             (rot6d)
@@ -150,11 +156,23 @@ class SensorRoutingMixin:
     freeze_tactile_encoder: bool = False
 
     # --- state / action routing ---
-    # none | joint | episode_rot6d | absolute_rot6d | episode_quat | absolute_quat
+    # none | absolute_joint | episode_joint | episode_rot6d | absolute_rot6d |
+    # episode_quat | absolute_quat
     # (aliases accepted: episode_ee→episode_rot6d, absolute_ee→absolute_rot6d)
-    state_mode: str = "joint"
-    # joint | rot6d | quat   (alias: relative_ee→rot6d)
-    action_mode: str = "joint"
+    state_mode: str = "absolute_joint"
+    # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d |
+    # absolute_quat | relative_quat
+    action_mode: str = "absolute_joint"
+    # Derived from the compound modes during validation. They are saved in checkpoints so tools
+    # can inspect the data contract without parsing strings, but state_mode/action_mode remain the
+    # user-facing CLI knobs.
+    state_reference: str = "absolute"
+    state_representation: str = "joint"
+    action_reference: str = "absolute"
+    action_representation: str = "joint"
+    # Gripper commands remain absolute even when arm joints/poses are relative.
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    action_feature_names: list[str] | None = None
     # Number of arms packed in the EE vectors.
     # rot6d: per arm = pos(3) + rot6d(6) + gripper(1) = 10 dims.
     # quat:  per arm = pos(3) + qx,qy,qz,qw(4) + gripper(1) = 8 dims.
@@ -288,15 +306,26 @@ class SensorRoutingMixin:
     # ------------------------------------------------------------------
     def _normalise_ee_modes(self) -> None:
         """Resolve backward-compat aliases for state_mode / action_mode (mutates in place)."""
-        self.state_mode  = _STATE_MODE_ALIASES.get(self.state_mode,  self.state_mode)
+        original_action_mode = self.action_mode
+        self.state_mode = _STATE_MODE_ALIASES.get(self.state_mode, self.state_mode)
         self.action_mode = _ACTION_MODE_ALIASES.get(self.action_mode, self.action_mode)
+        # Legacy PI05 configs represented relative joint action with a separate boolean.
+        if original_action_mode == "joint" and getattr(self, "use_relative_actions", False):
+            self.action_mode = "relative_joint"
+
+        if self.state_mode == "none":
+            self.state_reference, self.state_representation = "absolute", "none"
+        elif "_" in self.state_mode:
+            self.state_reference, self.state_representation = self.state_mode.split("_", 1)
+        if "_" in self.action_mode:
+            self.action_reference, self.action_representation = self.action_mode.split("_", 1)
 
     def ee_rot_mode(self) -> str:
         """Return the rotation format implied by ``state_mode`` / ``action_mode``.
 
         Returns ``"quat"`` when either mode uses quaternion EE; otherwise ``"rot6d"``.
         """
-        if self.state_mode in ("episode_quat", "absolute_quat") or self.action_mode == "quat":
+        if self.state_representation == "quat" or self.action_representation == "quat":
             return "quat"
         return "rot6d"
 
@@ -311,7 +340,7 @@ class SensorRoutingMixin:
 
     def is_ee_mode(self) -> bool:
         """True when any EE state or action mode is active."""
-        return self.state_mode not in ("none", "joint") or self.action_mode in ("rot6d", "quat")
+        return self.state_representation in ("rot6d", "quat") or self.action_representation in ("rot6d", "quat")
 
     # ------------------------------------------------------------------
     # Validation building blocks (call these from each config)
@@ -334,21 +363,8 @@ class SensorRoutingMixin:
                 f"Invalid action_mode '{self.action_mode}'. "
                 f"Expected one of {VALID_ACTION_MODES} (aliases: {_ACTION_MODE_ALIASES})."
             )
-        # EE action modes require an EE state mode.
-        _ee_state_modes = ("episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat")
-        if self.action_mode in ("rot6d", "quat") and self.state_mode not in _ee_state_modes:
-            raise ValueError(
-                f"action_mode='{self.action_mode}' requires state_mode in {_ee_state_modes}: the "
-                "relative action is computed against the current EE observation."
-            )
-        # Rotation format of state and action must match.
-        state_is_quat = self.state_mode in ("episode_quat", "absolute_quat")
-        action_is_quat = self.action_mode == "quat"
-        if self.action_mode in ("rot6d", "quat") and (state_is_quat != action_is_quat):
-            raise ValueError(
-                f"state_mode='{self.state_mode}' and action_mode='{self.action_mode}' use different "
-                "rotation formats. Use both rot6d variants together or both quat variants together."
-            )
+        # Action and model state are intentionally independent. Relative actions use a hidden raw
+        # observation anchor, so state_mode='none' and mixed joint/EE representations are valid.
         if self.tactile_encoder_type not in VALID_TACTILE_ENCODERS:
             raise ValueError(
                 f"Invalid tactile_encoder_type '{self.tactile_encoder_type}'. "
@@ -437,6 +453,7 @@ class SensorRoutingMixin:
         """
         # All EE-variant column keys (drop whichever are not selected).
         _all_ee_keys = (
+            OBS_STATE_EPISODE_JOINT,
             OBS_STATE_EPISODE_EE, OBS_STATE_ABSOLUTE_EE,
             OBS_STATE_EPISODE_QUAT, OBS_STATE_ABSOLUTE_QUAT,
         )
@@ -444,7 +461,7 @@ class SensorRoutingMixin:
             self.input_features.pop(OBS_STATE, None)
             for k in _all_ee_keys:
                 self.input_features.pop(k, None)
-        elif self.state_mode == "joint":
+        elif self.state_mode == "absolute_joint":
             for k in _all_ee_keys:
                 self.input_features.pop(k, None)
             if padded_state_dim is not None and OBS_STATE not in self.input_features:
@@ -454,6 +471,7 @@ class SensorRoutingMixin:
         else:
             # EE mode: pick the canonical column for this (state_mode, rot_mode) pair.
             _ee_key_map = {
+                "episode_joint": OBS_STATE_EPISODE_JOINT,
                 "episode_rot6d":  OBS_STATE_EPISODE_EE,
                 "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
                 "episode_quat":   OBS_STATE_EPISODE_QUAT,
@@ -493,17 +511,16 @@ class SensorRoutingMixin:
             ACTION_EPISODE_EE, ACTION_ABSOLUTE_EE,
             ACTION_EPISODE_QUAT, ACTION_ABSOLUTE_QUAT,
         )
-        if self.action_mode == "joint":
+        if self.action_representation == "joint":
             for k in _all_action_ee:
                 self.output_features.pop(k, None)
-        elif self.action_mode in ("rot6d", "quat"):
-            # Choose episode vs. absolute to match state_mode.
-            _absolute_states = ("absolute_rot6d", "absolute_quat")
-            is_absolute = self.state_mode in _absolute_states
-            if self.action_mode == "rot6d":
-                ee_key = ACTION_ABSOLUTE_EE if is_absolute else ACTION_EPISODE_EE
-            else:  # quat
-                ee_key = ACTION_ABSOLUTE_QUAT if is_absolute else ACTION_EPISODE_QUAT
+        elif self.action_representation in ("rot6d", "quat"):
+            # EE actions are always loaded in the robot base frame. Relative encoding, when
+            # requested, is applied later against the hidden current-observation anchor.
+            if self.action_representation == "rot6d":
+                ee_key = ACTION_ABSOLUTE_EE
+            else:
+                ee_key = ACTION_ABSOLUTE_QUAT
             for k in _all_action_ee:
                 if k != ee_key:
                     self.output_features.pop(k, None)

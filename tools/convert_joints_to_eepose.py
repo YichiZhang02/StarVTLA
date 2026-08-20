@@ -23,13 +23,11 @@ untouched, so joint-mode training is unaffected. EE dimensions are 10/8 per arm 
     observation.state_episode_ee : 10 dims/arm, EE pose of the STATE joints relative to each
                                    episode's FIRST frame (T0^{-1}·Tt), expressed in that frame.
                                    Rotation uses rot6d (first two rotation-matrix columns).
-    action_episode_ee            : IDENTICAL to observation.state_episode_ee (the state's own
-                                   trajectory). Kept as a separate column so it can carry the action
-                                   horizon (delta_indices) independently of the state window.
+    action_episode_ee            : FK of the real joint ACTION command, expressed relative to the
+                                   state's episode-first pose T0.
     observation.state_absolute_ee: 10 dims/arm, EE pose in the robot base frame (Tt,
                                    NO T0 subtraction) — keeps absolute workspace position. rot6d.
-    action_absolute_ee           : IDENTICAL to observation.state_absolute_ee (separate column
-                                   only so it can carry the action horizon independently). rot6d.
+    action_absolute_ee           : FK of the real joint ACTION command in the robot base frame.
 
     observation.state_episode_quat : 8 dims/arm, same as state_episode_ee but rotation as quaternion
                                      [x, y, z, w].
@@ -45,10 +43,8 @@ rot6d columns use per arm ``[xyz(3), rot6d(6), gripper(1)]``, ordered RIGHT arm 
 when both exist. quat columns use per arm ``[xyz(3), quat_xyzw(4), gripper(1)]``.
 Gripper is kept absolute in both representations.
 
-The action is the STATE's own future trajectory: at train time the action chunk (future
-state_episode_ee values) is relativized against the current state_episode_ee anchor S_t, giving
-``S_t^{-1} · S_{t+k}`` = ``T_state_t^{-1} · T_state_{t+k}`` (T0 cancels): the future observed pose
-relative to the current observed pose. See ``vtla/engine/utils/ee_transforms.py``.
+At train time, relative EE targets are computed from the current observed pose and future commanded
+action: ``T_state_t^{-1} · T_action_{t+k}``. See ``vtla/engine/utils/ee_transforms.py``.
 
 Updates ``meta/info.json`` (features), ``meta/stats.json`` (global), and ``meta/episodes/*.parquet``
 (per-episode stats) so the dataset loads with the new features.
@@ -97,6 +93,7 @@ EE_DIM_QUAT = 16  # quat:  2 arms * 8
 DOF = 7
 STAT_KEYS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
 NEW_FEATURES = (
+    "observation.state_episode_joint",
     "observation.state_episode_ee",
     "action_episode_ee",
     "observation.state_absolute_ee",
@@ -284,6 +281,16 @@ def compute_baselines(algo: Algo, data_files: list[Path], jidx: dict) -> dict[in
     return baselines
 
 
+def compute_joint_baselines(data_files: list[Path]) -> dict[int, np.ndarray]:
+    """Map episode index to its first raw joint observation."""
+    baselines: dict[int, np.ndarray] = {}
+    for f in data_files:
+        df = pq.read_table(f, columns=["episode_index", "frame_index", "observation.state"]).to_pandas()
+        for _, row in df[df["frame_index"] == 0].iterrows():
+            baselines.setdefault(int(row["episode_index"]), np.asarray(row["observation.state"], dtype=np.float32))
+    return baselines
+
+
 def compute_relative_ee_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
     """Stats of the RELATIVE action ``S_t^{-1}·S_{t+k}`` over all valid (t, k) within episodes.
 
@@ -294,12 +301,13 @@ def compute_relative_ee_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
     """
     rels = []
     for d in per_ep.values():
-        S = torch.from_numpy(np.stack(d["s"]).astype(np.float32))  # (L, EE_DIM)
+        S = torch.from_numpy(np.stack(d["s_abs"]).astype(np.float32))
+        A = torch.from_numpy(np.stack(d["a_abs"]).astype(np.float32))
         L = S.shape[0]
         for k in range(1, horizon + 1):
             if L - k <= 0:
                 break
-            rels.append(ee_to_relative(S[: L - k], S[k:], n_arms=n_arms).numpy())
+            rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms).numpy())
     return feature_stats(np.concatenate(rels))
 
 
@@ -307,12 +315,28 @@ def compute_relative_quat_stats(per_ep: dict, horizon: int, n_arms: int) -> dict
     """Stats of the RELATIVE quat action ``S_t^{-1}·S_{t+k}`` (quat format, 16-dim for 2 arms)."""
     rels = []
     for d in per_ep.values():
-        S = torch.from_numpy(np.stack(d["s_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT)
+        S = torch.from_numpy(np.stack(d["s_abs_quat"]).astype(np.float32))
+        A = torch.from_numpy(np.stack(d["a_abs_quat"]).astype(np.float32))
         L = S.shape[0]
         for k in range(1, horizon + 1):
             if L - k <= 0:
                 break
-            rels.append(ee_to_relative(S[: L - k], S[k:], n_arms=n_arms, rot_mode="quat").numpy())
+            rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms, rot_mode="quat").numpy())
+    return feature_stats(np.concatenate(rels))
+
+
+def compute_relative_joint_stats(per_ep: dict, horizon: int, relative_mask: np.ndarray) -> dict:
+    """Stats for future absolute joint commands relative to the current observed joints."""
+    rels = []
+    for d in per_ep.values():
+        state = np.stack(d["joint_state"]).astype(np.float32)
+        action = np.stack(d["joint_action"]).astype(np.float32)
+        for k in range(1, horizon + 1):
+            if len(state) - k <= 0:
+                break
+            rel = action[k:].copy()
+            rel[:, relative_mask] -= state[:-k, relative_mask]
+            rels.append(rel)
     return feature_stats(np.concatenate(rels))
 
 
@@ -364,6 +388,11 @@ def main():
 
     info = json.loads((root / "meta" / "info.json").read_text())
     in_names = info["features"]["observation.state"]["names"]
+    action_names = info["features"]["action"]["names"]
+    if list(action_names) != list(in_names):
+        raise SystemExit(
+            "Joint conversion requires action and observation.state to use the same ordered joint layout."
+        )
     jidx = joint_indices(in_names)
     sides = jidx["sides"]
     n_arms = len(sides)
@@ -375,9 +404,11 @@ def main():
     data_files = sorted_data_files(root)
     print(f"[1/4] baselines from {len(data_files)} data files")
     baselines = compute_baselines(algo, data_files, jidx)
+    joint_baselines = compute_joint_baselines(data_files)
     print(f"      {len(baselines)} episode baselines")
 
     # accumulate global + per-episode stats
+    all_state_joint_episode = []
     all_state, all_action = [], []
     all_state_abs, all_action_abs = [], []
     all_state_eq, all_action_eq = [], []
@@ -390,6 +421,8 @@ def main():
         df = tab.to_pandas()
         ep_col = df["episode_index"].to_numpy()
         state_col = df["observation.state"].to_numpy()
+        action_col = df["action"].to_numpy()
+        st_joint_episode = np.zeros((len(df), len(in_names)), dtype=np.float32)
         st_ee = np.zeros((len(df), ee_dim), dtype=np.float32)
         ac_ee = np.zeros((len(df), ee_dim), dtype=np.float32)
         st_abs = np.zeros((len(df), ee_dim), dtype=np.float32)
@@ -401,22 +434,24 @@ def main():
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
+            st_joint_episode[i] = np.asarray(state_col[i], dtype=np.float32)
+            joint_mask = np.array(["gripper" not in str(name).lower() for name in in_names])
+            st_joint_episode[i, joint_mask] -= joint_baselines[ep][joint_mask]
             st_ee[i] = to_episode_ee(algo, state_col[i], jidx, base)
-            # action = the state's OWN future trajectory (relativized to current obs at train time),
-            # so action_episode_ee is identical per-frame to state_episode_ee (separate column only
-            # so it can carry the action horizon independently).
-            ac_ee[i] = st_ee[i]
-            # absolute_ee: base-frame FK with NO T0 subtraction. The relative training target
-            # St^-1·S_{t+k} is anchor-independent, so action_absolute_ee mirrors state_absolute_ee.
+            ac_ee[i] = to_episode_ee(algo, action_col[i], jidx, base)
             st_abs[i] = to_absolute_ee(algo, state_col[i], jidx)
-            ac_abs[i] = st_abs[i]
+            ac_abs[i] = to_absolute_ee(algo, action_col[i], jidx)
             # quat variants
             st_eq[i] = to_episode_quat(algo, state_col[i], jidx, base)
-            ac_eq[i] = st_eq[i]
+            ac_eq[i] = to_episode_quat(algo, action_col[i], jidx, base)
             st_aq[i] = to_absolute_quat(algo, state_col[i], jidx)
-            ac_aq[i] = st_aq[i]
+            ac_aq[i] = to_absolute_quat(algo, action_col[i], jidx)
             per_ep.setdefault(ep, {"s": [], "a": [], "s_abs": [], "a_abs": [],
-                                   "s_quat": [], "a_quat": [], "s_abs_quat": [], "a_abs_quat": []})
+                                   "s_quat": [], "a_quat": [], "s_abs_quat": [], "a_abs_quat": [],
+                                   "joint_episode": [], "joint_state": [], "joint_action": []})
+            per_ep[ep]["joint_episode"].append(st_joint_episode[i])
+            per_ep[ep]["joint_state"].append(np.asarray(state_col[i], dtype=np.float32))
+            per_ep[ep]["joint_action"].append(np.asarray(action_col[i], dtype=np.float32))
             per_ep[ep]["s"].append(st_ee[i])
             per_ep[ep]["a"].append(ac_ee[i])
             per_ep[ep]["s_abs"].append(st_abs[i])
@@ -425,6 +460,7 @@ def main():
             per_ep[ep]["a_quat"].append(ac_eq[i])
             per_ep[ep]["s_abs_quat"].append(st_aq[i])
             per_ep[ep]["a_abs_quat"].append(ac_aq[i])
+        all_state_joint_episode.append(st_joint_episode)
         all_state.append(st_ee)
         all_action.append(ac_ee)
         all_state_abs.append(st_abs)
@@ -438,6 +474,7 @@ def main():
         for col in NEW_FEATURES:
             if col in tab.column_names:
                 tab = tab.drop([col])
+        tab = tab.append_column("observation.state_episode_joint", _fsl_f32(st_joint_episode, len(in_names)))
         tab = tab.append_column("observation.state_episode_ee",   _fsl_f32(st_ee, ee_dim))
         tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee, ee_dim))
         tab = tab.append_column("observation.state_absolute_ee",   _fsl_f32(st_abs, ee_dim))
@@ -454,7 +491,9 @@ def main():
     out_names_quat = build_names_quat(sides)
     template = dict(info["features"]["action"])
     for feat in NEW_FEATURES:
-        if "quat" in feat:
+        if feat == "observation.state_episode_joint":
+            info["features"][feat] = {**template, "shape": [len(in_names)], "names": list(in_names)}
+        elif "quat" in feat:
             info["features"][feat] = {**template, "shape": [ee_dim_quat], "names": list(out_names_quat)}
         else:
             info["features"][feat] = {**template, "shape": [ee_dim], "names": list(out_names)}
@@ -468,13 +507,16 @@ def main():
     # action_relative_ee: stats of the relativized action the model actually trains on.
     rel_stats = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
     rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
+    relative_joint_stats = compute_relative_joint_stats(per_ep, args.horizon, joint_mask)
     stat_sources = (
+        ("observation.state_episode_joint", feature_stats(np.concatenate(all_state_joint_episode))),
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
         ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
         ("observation.state_absolute_ee",   feature_stats(np.concatenate(all_state_abs))),
         ("action_absolute_ee",              feature_stats(np.concatenate(all_action_abs))),
         # action_relative_ee is anchor-independent (St^-1·S_{t+k} cancels T0).
         ("action_relative_ee",              rel_stats),
+        ("action_relative_joint",           relative_joint_stats),
         # quat variants
         ("observation.state_episode_quat",  feature_stats(np.concatenate(all_state_eq))),
         ("action_episode_quat",             feature_stats(np.concatenate(all_action_eq))),
@@ -492,6 +534,7 @@ def main():
     # ---- meta/episodes/*.parquet (per-episode stats) ----
     print("[4/4] meta/episodes per-episode stats")
     ep_stats = {ep: {
+        "observation.state_episode_joint": feature_stats(np.stack(d["joint_episode"])),
         "observation.state_episode_ee":   feature_stats(np.stack(d["s"])),
         "action_episode_ee":               feature_stats(np.stack(d["a"])),
         "observation.state_absolute_ee":   feature_stats(np.stack(d["s_abs"])),

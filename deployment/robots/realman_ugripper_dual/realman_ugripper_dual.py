@@ -707,8 +707,11 @@ class RealmanUGripperDual(Robot):
 
         for side in self._ordered_arms:
             arm = self._arms[side]
-            keys = [f"{side}_{n}" for n in self.EE_NAMES]
-            if not all(k in action for k in keys[:9]):  # 至少要有位姿 9 维
+            rot6d_keys = [f"{side}_ee_rot6d_{i}" for i in range(6)]
+            quat_keys = [f"{side}_ee_q{axis}" for axis in "xyzw"]
+            if not all(f"{side}_ee_{axis}" in action for axis in ("x", "y", "z")) or not (
+                all(k in action for k in rot6d_keys) or all(k in action for k in quat_keys)
+            ):
                 logger.warning(f"[{side}] EE 动作缺少位姿字段, 跳过本臂")
                 continue
 
@@ -716,8 +719,10 @@ class RealmanUGripperDual(Robot):
             p_tgt = np.array([action[f"{side}_ee_x"],
                               action[f"{side}_ee_y"],
                               action[f"{side}_ee_z"]], dtype=np.float64)
-            R_tgt = _rot6d_to_mat(np.array([action[f"{side}_ee_rot6d_{i}"] for i in range(6)],
-                                           dtype=np.float64))
+            if all(k in action for k in rot6d_keys):
+                R_tgt = _rot6d_to_mat(np.array([action[k] for k in rot6d_keys], dtype=np.float64))
+            else:
+                R_tgt = R.from_quat(np.array([action[k] for k in quat_keys], dtype=np.float64)).as_matrix()
             grip = action.get(f"{side}_gripper", None)
 
             # 2. 以当前 flange 为基准做单步安全限幅
@@ -745,6 +750,56 @@ class RealmanUGripperDual(Robot):
                 sent_action[f"{side}_{n}"] = float(v)
 
         return sent_action
+
+    # ==================== 力拖动 / 独立夹爪控制 ====================
+
+    def start_force_drag(
+        self, *, precise: bool = True, mode: int = 3, singular_wall: bool = True
+    ) -> None:
+        """Enable six-axis force drag on every configured follower arm."""
+        started: list[str] = []
+        try:
+            for side in self._ordered_arms:
+                follower = self._arms[side].follower
+                if follower is None:
+                    raise RuntimeError(f"[{side}] follower is unavailable")
+                follower.start_six_axis_force_drag(
+                    precise=precise, mode=mode, singular_wall=singular_wall
+                )
+                started.append(side)
+        except Exception:
+            for side in reversed(started):
+                try:
+                    self._arms[side].follower.stop_drag_teach()
+                except Exception as rollback_error:
+                    logger.error(f"[{side}] force-drag rollback failed: {rollback_error}")
+            raise
+
+    def stop_force_drag(self) -> None:
+        failures: list[str] = []
+        for side in self._ordered_arms:
+            follower = self._arms[side].follower
+            if follower is None:
+                continue
+            try:
+                follower.stop_drag_teach()
+            except Exception as e:
+                failures.append(f"{side}: {e}")
+        if failures:
+            raise RuntimeError("failed to stop force drag: " + "; ".join(failures))
+
+    def send_gripper_action(self, value: float) -> dict[str, float]:
+        """Send a normalized gripper target without sending an arm pose."""
+        target = float(np.clip(value, 0.0, 1.0))
+        sent: dict[str, float] = {}
+        for side in self._ordered_arms:
+            gripper = self._arms[side].gripper
+            if gripper is None:
+                continue
+            if not gripper.move_norm(target):
+                raise RuntimeError(f"[{side}] gripper rejected target {target:.3f}")
+            sent[f"{side}_{self.GRIPPER_NAME}"] = target
+        return sent
 
     # ==================== 断开 ====================
 

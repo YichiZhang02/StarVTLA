@@ -39,7 +39,8 @@ import numpy as np
 import torch
 
 from vtla.engine.configs import PipelineFeatureType, PolicyFeature
-from vtla.engine.processor.pipeline import ObservationProcessorStep, ProcessorStepRegistry
+from vtla.engine.processor.pipeline import ActionProcessorStep, ObservationProcessorStep, ProcessorStepRegistry
+from vtla.engine.processor.relative_action_processor import ACTION_ANCHOR
 from vtla.engine.utils.constants import OBS_STATE
 from vtla.engine.utils.ee_kinematics import (
     compute_baseline,
@@ -49,7 +50,7 @@ from vtla.engine.utils.ee_kinematics import (
     to_absolute_ee,
     to_episode_ee,
 )
-from vtla.engine.utils.ee_transforms import PER_ARM_DIM_BY_ROT_MODE
+from vtla.engine.utils.ee_transforms import PER_ARM_DIM_BY_ROT_MODE, _pack, _unpack
 
 
 @dataclass
@@ -168,3 +169,105 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
             "rot_mode": self.rot_mode,
             "n_arms": self.n_arms,
         }
+
+
+@dataclass
+@ProcessorStepRegistry.register(name="action_anchor_processor")
+class ActionAnchorPreprocessorStep(ObservationProcessorStep):
+    """Cache the current observation in the action representation without exposing it to the model."""
+
+    state_feature_names: list[str] = field(default_factory=list)
+    representation: str = "joint"
+    n_arms: int = 2
+
+    def __post_init__(self) -> None:
+        needs_fk = self.representation in ("rot6d", "quat")
+        self._jidx = joint_indices(self.state_feature_names) if needs_fk else None
+        self._algo = make_realman_algo() if needs_fk else None
+
+    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        raw = observation.get(OBS_STATE)
+        if raw is None:
+            return observation
+        if self.representation == "joint":
+            observation[ACTION_ANCHOR] = raw.clone() if isinstance(raw, torch.Tensor) else np.array(raw, copy=True)
+            return observation
+        vec = raw.detach().cpu().numpy().astype(np.float64).flatten() if isinstance(raw, torch.Tensor) else np.asarray(raw, dtype=np.float64).flatten()
+        anchor = to_absolute_ee(self._algo, vec, self._jidx, rot_mode=self.representation)
+        observation[ACTION_ANCHOR] = torch.from_numpy(anchor)
+        return observation
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "state_feature_names": self.state_feature_names,
+            "representation": self.representation,
+            "n_arms": self.n_arms,
+        }
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register(name="joint_state_mode_processor")
+class JointStateModePreprocessorStep(ObservationProcessorStep):
+    """Apply state_mode=episode_joint or remove state for state_mode=none at inference."""
+
+    state_feature_names: list[str] = field(default_factory=list)
+    mode: str = "episode_joint"
+
+    def __post_init__(self) -> None:
+        self._baseline: torch.Tensor | None = None
+        self._relative_mask = torch.tensor(
+            ["gripper" not in str(name).lower() for name in self.state_feature_names], dtype=torch.bool
+        )
+
+    def reset(self) -> None:
+        self._baseline = None
+
+    def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
+        raw = observation.get(OBS_STATE)
+        if self.mode == "none":
+            observation.pop(OBS_STATE, None)
+            return observation
+        if raw is None:
+            return observation
+        value = raw if isinstance(raw, torch.Tensor) else torch.as_tensor(raw)
+        if self._baseline is None:
+            self._baseline = value.detach().clone()
+        out = value.clone()
+        mask = self._relative_mask.to(device=out.device)
+        if mask.numel() == out.shape[-1]:
+            out[..., mask] -= self._baseline.to(device=out.device, dtype=out.dtype)[..., mask]
+        observation[OBS_STATE] = out
+        return observation
+
+    def get_config(self) -> dict[str, Any]:
+        return {"state_feature_names": self.state_feature_names, "mode": self.mode}
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features
+
+
+@dataclass
+@ProcessorStepRegistry.register(name="quat_action_to_rot6d_processor")
+class QuatActionToRot6dStep(ActionProcessorStep):
+    """Convert an absolute quaternion EE policy output to the robot's canonical rot6d layout."""
+
+    n_arms: int = 2
+
+    def action(self, action: torch.Tensor) -> torch.Tensor:
+        position, rotation, gripper = _unpack(action, self.n_arms, rot_mode="quat")
+        return _pack(position, rotation, gripper, rot_mode="rot6d")
+
+    def get_config(self) -> dict[str, Any]:
+        return {"n_arms": self.n_arms}
+
+    def transform_features(
+        self, features: dict[PipelineFeatureType, dict[str, PolicyFeature]]
+    ) -> dict[PipelineFeatureType, dict[str, PolicyFeature]]:
+        return features

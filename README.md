@@ -72,6 +72,21 @@ bash train.sh \
   <dataset_id> <poilcy_type> <num_gpu> <batch_size> <training step>
 ```
 
+`train.sh` 的第 8、9 个参数分别控制 state/action 数据契约：
+
+```text
+state_mode:  none | absolute_joint | episode_joint | absolute_rot6d |
+             episode_rot6d | absolute_quat | episode_quat
+action_mode: absolute_joint | relative_joint | absolute_rot6d |
+             relative_rot6d | absolute_quat | relative_quat
+```
+
+例如，无 proprioception 输入、预测相对当前观测的 rot6d EE 动作：
+
+```bash
+bash train.sh <dataset_id> pi05 1 32 10000 false none none relative_rot6d
+```
+
 ## Collection and Inference
 硬件检查：
 

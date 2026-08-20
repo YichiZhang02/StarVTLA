@@ -50,6 +50,14 @@ from .diffusion.configuration_diffusion import DiffusionConfig
 from .fastwam.configuration_fastwam import FastWAMConfig
 from .pi05.configuration_pi05 import PI05Config
 from .pretrained import PreTrainedPolicy
+from .sensor_routing import (
+    ACTION_ABSOLUTE_EE,
+    ACTION_ABSOLUTE_QUAT,
+    OBS_STATE_ABSOLUTE_EE,
+    OBS_STATE_ABSOLUTE_QUAT,
+    OBS_STATE_EPISODE_EE,
+    OBS_STATE_EPISODE_QUAT,
+)
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig
 from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
     StarvlaGrootDinoAlignConfig,
@@ -261,42 +269,52 @@ def make_pre_post_processors(
         )
         _reconnect_relative_absolute_steps(preprocessor, postprocessor)
 
-        # For EE state modes at inference the dataset does not supply the pre-computed EE column;
-        # prepend a step that converts joint angles to the EE pose on-the-fly so the model receives
-        # the right input. episode_ee -> pose relative to the episode first frame; absolute_ee ->
-        # raw base-frame FK (no baseline).
+        # Build the inference-only state representation and hidden relative-action anchor from the
+        # robot's raw joint observation. The anchor is independent of the state shown to the model,
+        # so state_mode='none' and mixed joint/EE state/action representations remain valid.
         state_mode = getattr(policy_cfg, "state_mode", None)
+        action_reference = getattr(policy_cfg, "action_reference", "absolute")
+        action_representation = getattr(policy_cfg, "action_representation", "joint")
         episode_modes = ("episode_rot6d", "episode_quat", "episode_ee")
         absolute_modes = ("absolute_rot6d", "absolute_quat", "absolute_ee")
+        state_names = getattr(policy_cfg, "state_feature_names", None) or []
+        n_arms = getattr(policy_cfg, "ee_num_arms", 2)
+        prefix_steps = []
+        if action_reference == "relative":
+            from .episode_ee_processor import ActionAnchorPreprocessorStep
+
+            prefix_steps.append(ActionAnchorPreprocessorStep(
+                state_feature_names=state_names,
+                representation=action_representation,
+                n_arms=n_arms,
+            ))
+
         if state_mode in (*episode_modes, *absolute_modes):
             from .episode_ee_processor import EpisodeEEPreprocessorStep
 
-            state_names = getattr(policy_cfg, "state_feature_names", None) or []
             relative = state_mode in episode_modes
             rot_mode = "quat" if state_mode in ("episode_quat", "absolute_quat") else "rot6d"
-            n_arms = getattr(policy_cfg, "ee_num_arms", 2)
             ee_step = EpisodeEEPreprocessorStep(
                 state_feature_names=state_names,
                 relative_to_baseline=relative,
                 rot_mode=rot_mode,
                 n_arms=n_arms,
             )
-            preprocessor.steps = [ee_step, *preprocessor.steps]
+            prefix_steps.append(ee_step)
+        elif state_mode in ("episode_joint", "none"):
+            from .episode_ee_processor import JointStateModePreprocessorStep
 
-            # episode_ee + action_mode='relative_ee': the postprocessor (AbsoluteActionsProcessorStep)
-            # only recovers the action relative to the episode first frame (S_{t+k}). Append a step
-            # that lifts it to the world frame (A_{t+k} = A0 · S_{t+k}) using A0 cached by ee_step.
-            # absolute_ee needs NO such lift: the relative step's cached anchor is the absolute pose
-            # Tt, so ee_to_absolute(Tt, a_rel) = T_{t+k} is already the world flange pose.
-            if relative and getattr(policy_cfg, "action_mode", None) in ("rot6d", "quat", "relative_ee"):
-                from vtla.engine.processor import EpisodeEEToWorldStep
+            prefix_steps.append(JointStateModePreprocessorStep(
+                state_feature_names=state_names,
+                mode=state_mode,
+            ))
 
-                world_step = EpisodeEEToWorldStep(
-                    n_arms=n_arms,
-                    rot_mode=rot_mode,
-                    ee_step=ee_step,
-                )
-                postprocessor.steps = [*postprocessor.steps, world_step]
+        if prefix_steps:
+            preprocessor.steps = [*prefix_steps, *preprocessor.steps]
+        if action_representation == "quat":
+            from .episode_ee_processor import QuatActionToRot6dStep
+
+            postprocessor.steps = [*postprocessor.steps, QuatActionToRot6dStep(n_arms=n_arms)]
 
         return preprocessor, postprocessor
 
@@ -423,6 +441,37 @@ def make_policy(
         # never loaded by inference policy construction.
         kwargs["load_dino_teacher"] = for_training
     features = dataset_to_policy_features(ds_meta.features)
+
+    if for_training:
+        state_sources = {
+            "episode_joint": OBS_STATE + "_episode_joint",
+            "episode_rot6d": OBS_STATE_EPISODE_EE,
+            "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
+            "episode_quat": OBS_STATE_EPISODE_QUAT,
+            "absolute_quat": OBS_STATE_ABSOLUTE_QUAT,
+        }
+        action_sources = {
+            "rot6d": ACTION_ABSOLUTE_EE,
+            "quat": ACTION_ABSOLUTE_QUAT,
+        }
+        required = []
+        state_source = state_sources.get(getattr(cfg, "state_mode", "absolute_joint"))
+        if state_source is not None:
+            required.append(state_source)
+        action_representation = getattr(cfg, "action_representation", "joint")
+        action_source = action_sources.get(action_representation)
+        if action_source is not None:
+            required.append(action_source)
+        if getattr(cfg, "action_reference", "absolute") == "relative" and action_source is not None:
+            required.append(
+                OBS_STATE_ABSOLUTE_EE if action_representation == "rot6d" else OBS_STATE_ABSOLUTE_QUAT
+            )
+        missing = [key for key in required if key not in ds_meta.features]
+        if missing:
+            raise ValueError(
+                f"The selected state/action modes require missing dataset features {missing}. "
+                "Re-run scripts/process_joint_data.sh or scripts/process_umi_data.sh."
+            )
 
     # Build input/output features from the dataset meta. Visual (camera) features ALWAYS come from
     # the dataset so the configured camera keys match what the data loader actually provides, and so

@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 class InferenceConfig(RecordConfig):
     # 自动把机器人硬件 + 任务描述对齐到 checkpoint (默认开)
     match_policy: bool = True
+    # 推理 episode 必须从同一 home 状态开始。
+    reset_before_episode: bool = True
 
 
 def _task_from_checkpoint(pretrained_path: str) -> str | None:
@@ -181,7 +183,7 @@ def _apply_match_policy(cfg: InferenceConfig) -> None:
     # 腕部去畸变: 按 checkpoint 自动判定 (消除训练-推理 gap)
     _resolve_undistort(cfg)
 
-    # 动作空间: 按 checkpoint 的 action_mode 自动设 (relative_ee -> ee), 堵住"训练EE/推理joint"静默错配。
+    # 动作空间只由 action representation 决定；absolute/relative 已由 postprocessor 解码。
     _resolve_action_space(cfg)
 
     logger.info(f"[match-policy] 对齐结果: use_tactile={cfg.robot.use_tactile}, "
@@ -191,18 +193,24 @@ def _apply_match_policy(cfg: InferenceConfig) -> None:
 
 
 def _resolve_action_space(cfg: InferenceConfig) -> None:
-    """按 checkpoint 的 action_mode 对齐机器人动作空间, 并做硬校验防止带病起跑。
+    """按 checkpoint 的 action representation 对齐机器人动作空间并做硬校验。
 
-    - action_mode='relative_ee' -> robot.action_space='ee' (机器人发末端位姿, 走 rm_movep_canfd)
-    - 否则                       -> 'joint'
+    - *_rot6d / *_quat -> robot.action_space='ee'
+    - *_joint          -> robot.action_space='joint'
     机器人不支持 action_space 字段时: 若 checkpoint 需要 ee, 直接报错 (该机器人无法执行 EE 动作,
     继续会把位姿当关节弧度下发 -> 撞机)。
     """
-    needs_ee = getattr(cfg.policy, "action_mode", None) == "relative_ee"
+    representation = getattr(cfg.policy, "action_representation", None)
+    if representation is None:
+        legacy_mode = getattr(cfg.policy, "action_mode", "joint")
+        representation = "rot6d" if legacy_mode in ("rot6d", "relative_ee") else (
+            "quat" if legacy_mode == "quat" else legacy_mode.rsplit("_", 1)[-1]
+        )
+    needs_ee = representation in ("rot6d", "quat")
     if not hasattr(cfg.robot, "action_space"):
         if needs_ee:
             raise ValueError(
-                f"checkpoint 的 action_mode=relative_ee 需要 EE 动作空间, 但机器人 "
+                f"checkpoint 的 action_representation={representation} 需要 EE 动作空间, 但机器人 "
                 f"'{getattr(cfg.robot, 'type', cfg.robot)}' 不支持 action_space 字段。"
                 "请使用支持 EE 的机器人 (如 realman_ugripper_dual/realman_ugripper_left)。"
             )
@@ -219,6 +227,8 @@ def inference(cfg: InferenceConfig):
         raise ValueError("inference 需要模型: 请指定 --policy.path=.../pretrained_model")
     if cfg.teleop is not None:
         raise ValueError("inference 是纯推理入口, 不要 --teleop.*; 采数据请用 `python -m deployment.collect`")
+    if not cfg.reset_before_episode:
+        raise ValueError("inference 要求每个 episode 前复位; 不允许 --reset_before_episode=false")
 
     if cfg.match_policy:
         _apply_match_policy(cfg)

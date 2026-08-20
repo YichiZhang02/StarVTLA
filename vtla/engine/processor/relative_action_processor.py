@@ -25,6 +25,7 @@ from vtla.engine.utils.constants import ACTION, OBS_STATE
 from vtla.engine.utils.ee_transforms import ee_to_absolute, ee_to_relative
 
 OBS_STATE_EPISODE_EE    = OBS_STATE + "_episode_ee"
+OBS_STATE_EPISODE_JOINT = OBS_STATE + "_episode_joint"
 ACTION_EPISODE_EE       = ACTION + "_episode_ee"
 OBS_STATE_ABSOLUTE_EE   = OBS_STATE + "_absolute_ee"
 ACTION_ABSOLUTE_EE      = ACTION + "_absolute_ee"
@@ -35,8 +36,14 @@ OBS_STATE_ABSOLUTE_QUAT = OBS_STATE + "_absolute_quat"
 ACTION_ABSOLUTE_QUAT    = ACTION + "_absolute_quat"
 
 # Backward-compat aliases (same as in sensor_routing.py).
-_STATE_ALIASES  = {"episode_ee": "episode_rot6d", "absolute_ee": "absolute_rot6d"}
-_ACTION_ALIASES = {"relative_ee": "rot6d"}
+_STATE_ALIASES = {
+    "joint": "absolute_joint", "episode_ee": "episode_rot6d", "absolute_ee": "absolute_rot6d",
+}
+_ACTION_ALIASES = {
+    "joint": "absolute_joint", "rot6d": "relative_rot6d", "quat": "relative_quat",
+    "relative_ee": "relative_rot6d",
+}
+ACTION_ANCHOR = OBS_STATE + "_action_anchor"
 
 
 def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
@@ -56,7 +63,27 @@ def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
             if src + "_is_pad" in batch:
                 batch[dst + "_is_pad"] = batch.pop(src + "_is_pad")
 
+    # Preserve an action anchor independently of the state presented to the model. EE anchors are
+    # always absolute so postprocessing directly recovers a base-frame robot target.
+    action_reference, action_representation = action_mode.split("_", 1)
+    if action_reference == "relative":
+        if action_representation == "joint" and OBS_STATE in batch:
+            batch[ACTION_ANCHOR] = batch[OBS_STATE]
+        elif action_representation == "rot6d" and OBS_STATE_ABSOLUTE_EE in batch:
+            batch[ACTION_ANCHOR] = batch[OBS_STATE_ABSOLUTE_EE]
+        elif action_representation == "quat" and OBS_STATE_ABSOLUTE_QUAT in batch:
+            batch[ACTION_ANCHOR] = batch[OBS_STATE_ABSOLUTE_QUAT]
+        if ACTION_ANCHOR not in batch:
+            raise KeyError(
+                f"action_mode='{action_mode}' requires a current '{action_representation}' anchor; "
+                "re-run the dataset preprocessing script to generate the required state columns."
+            )
+
     # State routing.
+    if state_mode == "none":
+        batch.pop(OBS_STATE, None)
+    elif state_mode == "episode_joint":
+        _route(OBS_STATE, OBS_STATE_EPISODE_JOINT)
     if state_mode == "episode_rot6d":
         _route(OBS_STATE, OBS_STATE_EPISODE_EE)
     elif state_mode == "absolute_rot6d":
@@ -66,15 +93,12 @@ def route_ee_batch(batch: dict, state_mode: str, action_mode: str) -> dict:
     elif state_mode == "absolute_quat":
         _route(OBS_STATE, OBS_STATE_ABSOLUTE_QUAT)
 
-    # Action routing.
-    _absolute_states = ("absolute_rot6d", "absolute_quat")
-    is_absolute = state_mode in _absolute_states
-    if action_mode == "rot6d":
-        src = ACTION_ABSOLUTE_EE if is_absolute else ACTION_EPISODE_EE
-        _route(ACTION, src)
-    elif action_mode == "quat":
-        src = ACTION_ABSOLUTE_QUAT if is_absolute else ACTION_EPISODE_QUAT
-        _route(ACTION, src)
+    # Action source selection is independent of state reference and action reference. Relative
+    # encoding is performed by RelativeActionsProcessorStep after this routing step.
+    if action_representation == "rot6d":
+        _route(ACTION, ACTION_ABSOLUTE_EE)
+    elif action_representation == "quat":
+        _route(ACTION, ACTION_ABSOLUTE_QUAT)
 
     return batch
 
@@ -163,6 +187,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
     n_arms: int = 2
     # Rotation format for pose mode: "rot6d" (default) or "quat".
     rot_mode: str = "rot6d"
+    state_key: str = ACTION_ANCHOR
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
@@ -186,12 +211,15 @@ class RelativeActionsProcessorStep(ProcessorStep):
 
     def __call__(self, transition: EnvTransition) -> EnvTransition:
         observation = transition.get(TransitionKey.OBSERVATION, {})
-        state = observation.get(OBS_STATE) if observation else None
+        state = observation.get(self.state_key) if observation else None
+        # Old serialized processors did not carry the hidden anchor key.
+        if state is None and observation:
+            state = observation.get(OBS_STATE)
 
         # In pose mode the reference is a single EE pose per sample. Policies with a multi-step
         # observation window (e.g. diffusion: state is (B, n_obs, D)) collapse to the most recent
         # frame (t=0) as the relativization anchor.
-        if state is not None and self.mode == "pose" and state.ndim == 3:
+        if state is not None and state.ndim == 3:
             state = state[:, -1]
 
         # Always cache the (resolved) state for the paired AbsoluteActionsProcessorStep
@@ -202,6 +230,9 @@ class RelativeActionsProcessorStep(ProcessorStep):
             return transition
 
         new_transition = transition.copy()
+        if observation and self.state_key in observation:
+            new_transition[TransitionKey.OBSERVATION] = dict(observation)
+            new_transition[TransitionKey.OBSERVATION].pop(self.state_key, None)
         action = new_transition.get(TransitionKey.ACTION)
         if action is None or state is None:
             return new_transition
@@ -229,6 +260,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
             "mode": self.mode,
             "n_arms": self.n_arms,
             "rot_mode": self.rot_mode,
+            "state_key": self.state_key,
         }
 
     def transform_features(

@@ -39,7 +39,7 @@ PER_ARM_DIM = 10
 EE_DIM = 20
 
 # Realman SDK lives under deployment/sdk (vendored, no pip install required).
-_SDK_PATH = Path(__file__).resolve().parents[4] / "deployment" / "sdk"
+_SDK_PATH = Path(__file__).resolve().parents[3] / "deployment" / "sdk"
 
 
 def _ensure_sdk_on_path() -> None:

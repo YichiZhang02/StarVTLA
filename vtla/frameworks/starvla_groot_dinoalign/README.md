@@ -149,7 +149,7 @@ bash train.sh <dataset_id> starvla_groot_dinoalign
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
   bash train.sh \
   rm_umi_dual_pen_open starvla_groot_dinoalign 4 16 30000 \
-  true none joint joint none
+  true none absolute_joint absolute_joint none
 ```
 
 常用 policy override：

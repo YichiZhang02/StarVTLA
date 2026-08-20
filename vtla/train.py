@@ -321,11 +321,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # / scheduler / step are restored from the checkpoint independently of the processor.
     _ee_state_modes = ("episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat",
                        "episode_ee", "absolute_ee")  # include legacy aliases
-    _ee_action_modes = ("rot6d", "quat", "relative_ee")  # include legacy alias
+    _ee_action_modes = (
+        "absolute_rot6d", "relative_rot6d", "absolute_quat", "relative_quat",
+        "rot6d", "quat", "relative_ee",
+    )
     _needs_rebuilt_processor = (
-        getattr(active_cfg, "use_relative_actions", False)
-        or getattr(active_cfg, "state_mode", "joint") in _ee_state_modes
-        or getattr(active_cfg, "action_mode", "joint") in _ee_action_modes
+        getattr(active_cfg, "action_reference", "absolute") == "relative"
+        or getattr(active_cfg, "state_mode", "absolute_joint") in _ee_state_modes
+        or getattr(active_cfg, "action_mode", "absolute_joint") in _ee_action_modes
         or (getattr(active_cfg, "type", None) == "fastwam" and not cfg.resume)
     )
     if _needs_rebuilt_processor and processor_pretrained_path is not None:
@@ -368,7 +371,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             processor_kwargs["preprocessor_overrides"][
                 "pi05_prepare_state_tokenizer_processor_step"
             ] = {
-                "state_mode": getattr(active_cfg, "state_mode", "joint"),
+                "state_mode": getattr(active_cfg, "state_mode", "absolute_joint"),
                 "max_state_dim": getattr(active_cfg, "max_state_dim", 32),
             }
         postprocessor_kwargs["postprocessor_overrides"] = {
@@ -483,8 +486,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         # Select joint vs EE columns as the canonical observation.state / action before the processor.
         batch = route_ee_batch(
             batch,
-            getattr(active_cfg, "state_mode", "joint"),
-            getattr(active_cfg, "action_mode", "joint"),
+            getattr(active_cfg, "state_mode", "absolute_joint"),
+            getattr(active_cfg, "action_mode", "absolute_joint"),
         )
         for cam_key in dataset.meta.camera_keys:
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:

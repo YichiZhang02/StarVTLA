@@ -153,6 +153,10 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset:
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:
+            # Some converted tactile/video streams intentionally have no pixel statistics in
+            # stats.json. ImageNet normalization is authoritative for every visual input, so
+            # materialize the feature entry instead of assuming the offline stats file has one.
+            dataset.meta.stats.setdefault(key, {})
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 

@@ -23,7 +23,7 @@ python -m vtla.train \
   --policy.base_vlm=./playground/pretrained_models/Qwen3.5-0.8B \
   --policy.chunk_size=8 \
   --policy.n_action_steps=8 \
-  --policy.state_mode=joint \
+  --policy.state_mode=absolute_joint \
   --policy.top_camera_key=observation.images.cam_top \
   --policy.wrist_camera_key=observation.images.cam_right_wrist \
   --batch_size=8 \

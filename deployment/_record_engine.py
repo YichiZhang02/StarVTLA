@@ -207,6 +207,57 @@ def move_to_home_smooth(
         busy_wait(1 / fps - (time.perf_counter() - t0))
 
 
+def wait_for_episode_start(
+    *,
+    robot: Robot,
+    events: dict,
+    episode_label: str,
+    fps: int,
+    play_sounds: bool,
+    reset_before_episode: bool,
+    home_action: dict[str, float],
+    home_duration_s: float,
+) -> bool:
+    """Prepare one episode and wait for an explicit start request.
+
+    Returns ``True`` when the start event was consumed. ``False`` means the
+    operator requested another preparation cycle or stopped the session.
+    """
+    events["start_episode"] = False
+    events["exit_early"] = False
+    events["rerecord_episode"] = False
+    events["toggle_gripper"] = 0
+
+    if reset_before_episode:
+        if not home_action:
+            raise RuntimeError("reset_before_episode=True requires a non-empty home action")
+        log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
+        move_to_home_smooth(robot, home_action, fps, home_duration_s)
+        log_say("复位完成 按↑开始", play_sounds)
+    else:
+        log_say(
+            f"{episode_label}: 保持当前位置 | 按↑开始 | →保存 | ←重录 | ESC退出",
+            play_sounds,
+        )
+
+    while (
+        not events["start_episode"]
+        and not events["rerecord_episode"]
+        and not events["stop_recording"]
+    ):
+        time.sleep(0.05)
+
+    if events["stop_recording"]:
+        return False
+    if events["rerecord_episode"]:
+        events["rerecord_episode"] = False
+        events["start_episode"] = False
+        return False
+
+    events["start_episode"] = False
+    return True
+
+
 @dataclass
 class DatasetRecordConfig:
     # Dataset identifier. By convention it should match '{hf_username}/{dataset_name}'.
@@ -265,6 +316,9 @@ class RecordConfig:
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Whether the robot returns home before every episode. Entry points set
+    # this explicitly: collect=False, inference=True.
+    reset_before_episode: bool = True
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -273,9 +327,6 @@ class RecordConfig:
             cli_overrides = parser.get_cli_overrides("policy")
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
-
-        if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -529,6 +580,52 @@ def _publish_stream_tactile_videos(
 """
 
 
+def build_drag_action(
+    robot: Robot,
+    observation: RobotObservation,
+    gripper_target: float | None,
+) -> RobotAction:
+    """Build drag supervision from measured joints and the active gripper target."""
+    missing = [key for key in robot.action_features if key not in observation]
+    if missing:
+        raise ValueError(
+            "drag mode requires action features to be present in the measured observation; "
+            f"missing: {missing}"
+        )
+    action = {key: float(observation[key]) for key in robot.action_features}
+    if gripper_target is not None:
+        for key in action:
+            if "gripper" in key:
+                action[key] = float(gripper_target)
+    return action
+
+
+def toggle_drag_gripper(
+    robot: Robot,
+    observation: RobotObservation,
+    current_target: float | None,
+    *,
+    open_value: float,
+    close_value: float,
+) -> float:
+    """Toggle all drag grippers and return the newly commanded target."""
+    if current_target is None:
+        measured = [float(v) for k, v in observation.items() if "gripper" in k]
+        if not measured:
+            raise ValueError("drag mode could not find a measured gripper position")
+        currently_open = float(np.mean(measured)) >= (open_value + close_value) / 2.0
+    else:
+        currently_open = abs(current_target - open_value) <= abs(current_target - close_value)
+
+    target = close_value if currently_open else open_value
+    send_gripper = getattr(robot, "send_gripper_action", None)
+    if not callable(send_gripper):
+        raise TypeError(f"robot {robot.name!r} does not support independent gripper control")
+    send_gripper(target)
+    logging.info("[drag] 夹爪目标切换为 %.3f (%s)", target, "张开" if target == open_value else "闭合")
+    return target
+
+
 @safe_stop_image_writer
 def record_loop(
     robot: Robot,
@@ -548,6 +645,9 @@ def record_loop(
     control_time_s: int | None = None,
     single_task: str | None = None,
     display_data: bool = False,
+    drag_mode: bool = False,
+    drag_gripper_open_value: float = 1.0,
+    drag_gripper_close_value: float = 0.0,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -560,6 +660,7 @@ def record_loop(
 
     timestamp = 0
     start_episode_t = time.perf_counter()
+    drag_gripper_target: float | None = None
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
@@ -569,6 +670,18 @@ def record_loop(
 
         # Get robot observation
         obs = robot.get_observation()
+
+        if drag_mode:
+            toggle_count = int(events.get("toggle_gripper", 0))
+            events["toggle_gripper"] = 0
+            for _ in range(toggle_count):
+                drag_gripper_target = toggle_drag_gripper(
+                    robot,
+                    obs,
+                    drag_gripper_target,
+                    open_value=drag_gripper_open_value,
+                    close_value=drag_gripper_close_value,
+                )
 
         # The authoritative tactile observation remains uint16 for the MKV writer. Policy,
         # display and optional inference recordings consume the versioned uint8 derivative.
@@ -611,6 +724,8 @@ def record_loop(
                 raise ValueError("record_features is required for policy action conversion.")
             act_processed_policy = make_robot_action(action_values, features_for_frame)
 
+        elif drag_mode:
+            action_values = build_drag_action(robot, obs, drag_gripper_target)
         elif policy is None and isinstance(teleop, Teleoperator):
             act = teleop.get_action()
 
@@ -625,7 +740,9 @@ def record_loop(
             continue
 
         # Applies a pipeline to the action, default is IdentityProcessor
-        if policy is not None and act_processed_policy is not None:
+        if drag_mode:
+            robot_action_to_send = None
+        elif policy is not None and act_processed_policy is not None:
             action_values = act_processed_policy
             robot_action_to_send = robot_action_processor((act_processed_policy, obs))
         else:
@@ -634,7 +751,8 @@ def record_loop(
 
         # Send action to robot. Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset.
-        _sent_action = robot.send_action(robot_action_to_send)
+        if robot_action_to_send is not None:
+            robot.send_action(robot_action_to_send)
 
         if tactile_writer is not None:
             tactile_writer.add_observation(obs)
@@ -663,6 +781,9 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
     """录制引擎主流程。由 collect.py / inference.py 构建好 RecordConfig 后调用。"""
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    mode = getattr(cfg, "mode", "teleop")
+    mode = getattr(mode, "value", mode)
+    drag_mode = mode == "drag"
     # 解析保存模式与统计开关 (stream 默认不计算统计)
     save_mode = cfg.dataset.save
     compute_stats_enabled = resolve_compute_stats(save_mode, cfg.dataset.compute_stats)
@@ -674,7 +795,15 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
         init_rerun(session_name="recording")
 
     robot = make_robot_from_config(cfg.robot)
-    teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    teleop = (
+        make_teleoperator_from_config(cfg.teleop)
+        if cfg.teleop is not None and not drag_mode
+        else None
+    )
+    if drag_mode:
+        for method_name in ("start_force_drag", "stop_force_drag", "send_gripper_action"):
+            if not callable(getattr(robot, method_name, None)):
+                raise TypeError(f"robot {robot.name!r} does not support drag method {method_name}()")
 
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
@@ -780,7 +909,17 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
     listener, events = init_keyboard_listener()
 
+    force_drag_active = False
     try:
+        if drag_mode:
+            robot.start_force_drag(
+                precise=bool(getattr(cfg, "drag_force_precise", True)),
+                mode=int(getattr(cfg, "drag_force_mode", 3)),
+                singular_wall=bool(getattr(cfg, "drag_singular_wall", True)),
+            )
+            force_drag_active = True
+            log_say("六维力拖动已开启", cfg.play_sounds)
+
         if save_mode == "episode":
             if dataset is None:
                 raise RuntimeError("Episode mode requires a valid dataset instance.")
@@ -788,49 +927,23 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
                 _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
-                home_action: dict[str, float] = capture_home_action(robot)
-                auto_home = bool(home_action)
+                home_action: dict[str, float] = (
+                    capture_home_action(robot) if cfg.reset_before_episode else {}
+                )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-
-                    # ── 每次 episode 开始前: 平滑复位, 等用户按↑确认 ──────────
-                    if auto_home:
-                        log_say(
-                            f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}: 机械臂复位中...",
-                            cfg.play_sounds,
-                        )
-                        move_to_home_smooth(robot, home_action, cfg.dataset.fps, _home_duration)
-                        log_say("复位完成 按↑开始", cfg.play_sounds)
-                        # 清除复位期间可能残留的按键事件, 等待用户主动按↑
-                        events["start_episode"] = False
-                        events["exit_early"] = False
-                        events["rerecord_episode"] = False
-                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
-                            time.sleep(0.05)
-                        if events["stop_recording"]:
-                            break
-                        # ← 在等待阶段被按下 → 重新复位
-                        if events["rerecord_episode"]:
-                            events["rerecord_episode"] = False
-                            events["start_episode"] = False
-                            continue
-                        events["start_episode"] = False  # 消费"开始"触发
-                    else:
-                        log_say(
-                            f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}: 按↑开始 | →保存 | ←重录 | ESC退出",
-                            cfg.play_sounds,
-                        )
-                        events["start_episode"] = False
-                        events["exit_early"] = False
-                        events["rerecord_episode"] = False
-                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
-                            time.sleep(0.05)
-                        if events["stop_recording"]:
-                            break
-                        if events["rerecord_episode"]:
-                            events["rerecord_episode"] = False
-                            events["start_episode"] = False
-                            continue
-                        events["start_episode"] = False
+                    if not wait_for_episode_start(
+                        robot=robot,
+                        events=events,
+                        episode_label=(
+                            f"Episode {dataset.num_episodes + 1}/{cfg.dataset.num_episodes}"
+                        ),
+                        fps=cfg.dataset.fps,
+                        play_sounds=cfg.play_sounds,
+                        reset_before_episode=cfg.reset_before_episode,
+                        home_action=home_action,
+                        home_duration_s=_home_duration,
+                    ):
+                        continue
 
                     logging.info(f"开始录制 episode {dataset.num_episodes + 1}")
                     if tactile_writer is not None:
@@ -854,6 +967,13 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        drag_mode=drag_mode,
+                        drag_gripper_open_value=float(
+                            getattr(cfg, "drag_gripper_open_value", 1.0)
+                        ),
+                        drag_gripper_close_value=float(
+                            getattr(cfg, "drag_gripper_close_value", 0.0)
+                        ),
                     )
 
                     # ── 重录: 丢弃本次 episode, 回到复位等待 ─────────────────
@@ -894,47 +1014,21 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                 recorded_episodes = 0
                 episode_index = episode_start
                 _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
-                home_action_stream: dict[str, float] = capture_home_action(robot)
-                auto_home_stream = bool(home_action_stream)
+                home_action_stream: dict[str, float] = (
+                    capture_home_action(robot) if cfg.reset_before_episode else {}
+                )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-
-                    # ── 每次 episode 开始前: 平滑复位, 等用户按↑确认 ──────────
-                    if auto_home_stream:
-                        log_say(
-                            f"Stream episode {episode_index + 1}: 机械臂复位中...",
-                            cfg.play_sounds,
-                        )
-                        move_to_home_smooth(robot, home_action_stream, cfg.dataset.fps, _home_duration_s)
-                        log_say("复位完成 按↑开始", cfg.play_sounds)
-                        events["start_episode"] = False
-                        events["exit_early"] = False
-                        events["rerecord_episode"] = False
-                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
-                            time.sleep(0.05)
-                        if events["stop_recording"]:
-                            break
-                        if events["rerecord_episode"]:
-                            events["rerecord_episode"] = False
-                            events["start_episode"] = False
-                            continue
-                        events["start_episode"] = False
-                    else:
-                        log_say(
-                            f"Stream episode {episode_index + 1}: 按↑开始 | →保存 | ←重录 | ESC退出",
-                            cfg.play_sounds,
-                        )
-                        events["start_episode"] = False
-                        events["exit_early"] = False
-                        events["rerecord_episode"] = False
-                        while not events["start_episode"] and not events["rerecord_episode"] and not events["stop_recording"]:
-                            time.sleep(0.05)
-                        if events["stop_recording"]:
-                            break
-                        if events["rerecord_episode"]:
-                            events["rerecord_episode"] = False
-                            events["start_episode"] = False
-                            continue
-                        events["start_episode"] = False
+                    if not wait_for_episode_start(
+                        robot=robot,
+                        events=events,
+                        episode_label=f"Stream episode {episode_index + 1}",
+                        fps=cfg.dataset.fps,
+                        play_sounds=cfg.play_sounds,
+                        reset_before_episode=cfg.reset_before_episode,
+                        home_action=home_action_stream,
+                        home_duration_s=_home_duration_s,
+                    ):
+                        continue
 
                     logging.info(f"开始录制 stream episode {episode_index + 1}")
                     stream_writer.start_episode(episode_index)
@@ -958,6 +1052,13 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         control_time_s=cfg.dataset.episode_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        drag_mode=drag_mode,
+                        drag_gripper_open_value=float(
+                            getattr(cfg, "drag_gripper_open_value", 1.0)
+                        ),
+                        drag_gripper_close_value=float(
+                            getattr(cfg, "drag_gripper_close_value", 0.0)
+                        ),
                     )
 
                     # ── 重录: 丢弃本次视频, 回到复位等待 ─────────────────────
@@ -980,8 +1081,18 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     recorded_episodes += 1
                     episode_index += 1
     finally:
+        if force_drag_active:
+            try:
+                robot.stop_force_drag()
+                log_say("六维力拖动已关闭", cfg.play_sounds)
+            except Exception:
+                logging.exception("停止六维力拖动失败")
+
         if tactile_writer is not None:
-            tactile_writer.abort_episode()
+            try:
+                tactile_writer.abort_episode()
+            except Exception:
+                logging.exception("清理触觉 episode writer 失败")
 
         # 优先停止策略推理线程
         if policy is not None and hasattr(policy, "stop"):

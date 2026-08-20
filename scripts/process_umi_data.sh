@@ -79,5 +79,5 @@ python tools/convert_umi_to_eepose.py \
 
 echo "==================================================================="
 echo "完成 ✅  训练数据集: ${final}"
-echo "  训练示例: bash train.sh ${dataset_id}_undist_${size} pi05 1 32 10000 false none episode_ee relative_ee"
+echo "  训练示例: bash train.sh ${dataset_id}_undist_${size} pi05 1 32 10000 false none episode_rot6d relative_rot6d"
 echo "==================================================================="

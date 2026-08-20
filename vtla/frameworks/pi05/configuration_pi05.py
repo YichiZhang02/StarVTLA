@@ -51,7 +51,7 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
     min_period: float = 4e-3
     max_period: float = 4.0
 
-    # Relative actions: converts absolute actions to relative (relative to state).
+    # Deprecated compatibility fields. New configs use action_mode='relative_joint'.
     use_relative_actions: bool = False
     # Joint names to exclude from relative (kept absolute). Empty list = all dims relative.
     relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
@@ -139,11 +139,6 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
         # Shared enum / reserved-mode validation (tactile_mode, state_mode, encoder).
         self.validate_sensor_modes()
 
-        if self.state_mode == "none" and self.use_relative_actions:
-            raise ValueError(
-                "PI05 state_mode='none' cannot be used with use_relative_actions=true "
-                "because relative action conversion depends on observation.state."
-            )
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""
@@ -152,11 +147,6 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
         if self.output_features is None:
             self.output_features = {}
 
-        if self.state_mode == "none" and self.use_relative_actions:
-            raise ValueError(
-                "PI05 state_mode='none' cannot be used with use_relative_actions=true "
-                "because relative action conversion depends on observation.state."
-            )
 
         # Route cameras (wrist_only) + tactile (as_image) + state via the shared mixin.
         empty_keys = tuple(self.add_empty_cameras(self.empty_cameras, self.image_resolution))
@@ -199,7 +189,7 @@ class PI05Config(SensorRoutingMixin, PreTrainedConfig):
         # relative_ee predicts the FUTURE trajectory relative to the current observation, so the
         # action chunk starts at t+1 (k=0 would be the current pose => identity, wasted). Joint mode
         # keeps the openpi convention of starting at the current frame (t).
-        if self.action_mode == "relative_ee":
+        if self.action_reference == "relative":
             return list(range(1, self.chunk_size + 1))
         return list(range(self.chunk_size))
 
