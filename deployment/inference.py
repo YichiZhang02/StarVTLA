@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 class InferenceConfig(RecordConfig):
     # 自动把机器人硬件 + 任务描述对齐到 checkpoint (默认开)
     match_policy: bool = True
-    # 推理 episode 必须从同一 home 状态开始。
+    # 默认每个推理 episode 复位，也允许调用方显式关闭。
     reset_before_episode: bool = True
 
 
@@ -227,9 +227,6 @@ def inference(cfg: InferenceConfig):
         raise ValueError("inference 需要模型: 请指定 --policy.path=.../pretrained_model")
     if cfg.teleop is not None:
         raise ValueError("inference 是纯推理入口, 不要 --teleop.*; 采数据请用 `python -m deployment.collect`")
-    if not cfg.reset_before_episode:
-        raise ValueError("inference 要求每个 episode 前复位; 不允许 --reset_before_episode=false")
-
     if cfg.match_policy:
         _apply_match_policy(cfg)
 

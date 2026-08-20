@@ -40,6 +40,7 @@
     - 其余硬件参数 (IP/串口等) 走各自 config 默认, 需要时照样可 --robot.xxx / --teleop.xxx 覆盖
 """
 
+import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -55,9 +56,10 @@ class CollectMode(str, Enum):
 
 @dataclass
 class CollectConfig(RecordConfig):
-    """Collection-only control ownership and force-drag settings."""
+    """Collection control mode and an independent episode-reset policy."""
 
     mode: CollectMode = CollectMode.TELEOP
+    # Independent of mode: both teleop and drag support reset=True/False.
     reset_before_episode: bool = False
     # LingKong normalized gripper convention: 1=open, 0=fully closed.
     drag_gripper_open_value: float = 1.0
@@ -81,12 +83,55 @@ class CollectConfig(RecordConfig):
             raise ValueError("drag_force_mode must be 1, 2 or 3")
 
 
+def _validate_reset_home(cfg: CollectConfig) -> None:
+    """Reject partial RealMan home targets before connecting hardware."""
+    if not cfg.reset_before_episode:
+        return
+
+    home_joints = getattr(cfg.robot, "home_joints", None)
+    if home_joints is None:
+        # The robot captures its connection-time pose as a fixed home target.
+        return
+    if not isinstance(home_joints, dict):
+        raise ValueError("--robot.home_joints 必须是关节名到角度值的字典")
+
+    sides = getattr(cfg.robot, "arms", None)
+    if sides is None:
+        # realman_ugripper_left always controls logical left.
+        sides = ("left",)
+    expected = {
+        f"{side}_main_joint{joint_index}"
+        for side in sides
+        for joint_index in range(1, 8)
+    }
+    provided = set(home_joints)
+    missing = sorted(expected - provided)
+    unknown = sorted(provided - expected)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"缺少 {missing}")
+        if unknown:
+            details.append(f"未知 {unknown}")
+        raise ValueError(
+            "--robot.home_joints 必须完整指定启用臂的 7 个关节: "
+            + "; ".join(details)
+        )
+
+    non_finite = sorted(
+        key for key, value in home_joints.items() if not math.isfinite(float(value))
+    )
+    if non_finite:
+        raise ValueError(f"--robot.home_joints 包含非有限值: {non_finite}")
+    if float(getattr(cfg.robot, "home_duration_s", 4.0)) <= 0:
+        raise ValueError("--robot.home_duration_s 必须大于 0")
+
+
 @parser.wrap()
 def collect(cfg: CollectConfig):
     if cfg.policy is not None:
         raise ValueError("collect 是采数据入口, 不接受 --policy.*; 模型推理请用 `python -m deployment.inference`")
-    if cfg.reset_before_episode:
-        raise ValueError("collect 不允许 episode 间自动复位; 请移除 --reset_before_episode=true")
+    _validate_reset_home(cfg)
     if cfg.mode == CollectMode.TELEOP and cfg.teleop is None:
         raise ValueError("collect 需要遥操作器: 请指定 --teleop.type=... (如 bi_realman_ugripper_leader)")
     if cfg.mode == CollectMode.DRAG:

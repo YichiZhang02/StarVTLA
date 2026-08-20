@@ -61,7 +61,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from pprint import pformat
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -217,6 +217,7 @@ def wait_for_episode_start(
     reset_before_episode: bool,
     home_action: dict[str, float],
     home_duration_s: float,
+    on_prepared: Callable[[], None] | None = None,
 ) -> bool:
     """Prepare one episode and wait for an explicit start request.
 
@@ -233,8 +234,12 @@ def wait_for_episode_start(
             raise RuntimeError("reset_before_episode=True requires a non-empty home action")
         log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
         move_to_home_smooth(robot, home_action, fps, home_duration_s)
+        if on_prepared is not None:
+            on_prepared()
         log_say("复位完成 按↑开始", play_sounds)
     else:
+        if on_prepared is not None:
+            on_prepared()
         log_say(
             f"{episode_label}: 保持当前位置 | 按↑开始 | →保存 | ←重录 | ESC退出",
             play_sounds,
@@ -910,15 +915,32 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
     listener, events = init_keyboard_listener()
 
     force_drag_active = False
+
+    def start_force_drag() -> None:
+        nonlocal force_drag_active
+        if not drag_mode or force_drag_active:
+            return
+        robot.start_force_drag(
+            precise=bool(getattr(cfg, "drag_force_precise", True)),
+            mode=int(getattr(cfg, "drag_force_mode", 3)),
+            singular_wall=bool(getattr(cfg, "drag_singular_wall", True)),
+        )
+        force_drag_active = True
+        log_say("六维力拖动已开启", cfg.play_sounds)
+
+    def stop_force_drag() -> None:
+        nonlocal force_drag_active
+        if not force_drag_active:
+            return
+        robot.stop_force_drag()
+        force_drag_active = False
+        log_say("六维力拖动已关闭", cfg.play_sounds)
+
     try:
-        if drag_mode:
-            robot.start_force_drag(
-                precise=bool(getattr(cfg, "drag_force_precise", True)),
-                mode=int(getattr(cfg, "drag_force_mode", 3)),
-                singular_wall=bool(getattr(cfg, "drag_singular_wall", True)),
-            )
-            force_drag_active = True
-            log_say("六维力拖动已开启", cfg.play_sounds)
+        # A reset sends pose commands, so force drag must not own the arm at
+        # the same time. Without reset, keep drag active across episodes.
+        if drag_mode and not cfg.reset_before_episode:
+            start_force_drag()
 
         if save_mode == "episode":
             if dataset is None:
@@ -931,6 +953,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     capture_home_action(robot) if cfg.reset_before_episode else {}
                 )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                    if drag_mode and cfg.reset_before_episode:
+                        stop_force_drag()
                     if not wait_for_episode_start(
                         robot=robot,
                         events=events,
@@ -942,6 +966,11 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         reset_before_episode=cfg.reset_before_episode,
                         home_action=home_action,
                         home_duration_s=_home_duration,
+                        on_prepared=(
+                            start_force_drag
+                            if drag_mode and cfg.reset_before_episode
+                            else None
+                        ),
                     ):
                         continue
 
@@ -975,6 +1004,9 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             getattr(cfg, "drag_gripper_close_value", 0.0)
                         ),
                     )
+
+                    if drag_mode and cfg.reset_before_episode:
+                        stop_force_drag()
 
                     # ── 重录: 丢弃本次 episode, 回到复位等待 ─────────────────
                     if events["rerecord_episode"]:
@@ -1018,6 +1050,8 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     capture_home_action(robot) if cfg.reset_before_episode else {}
                 )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                    if drag_mode and cfg.reset_before_episode:
+                        stop_force_drag()
                     if not wait_for_episode_start(
                         robot=robot,
                         events=events,
@@ -1027,6 +1061,11 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         reset_before_episode=cfg.reset_before_episode,
                         home_action=home_action_stream,
                         home_duration_s=_home_duration_s,
+                        on_prepared=(
+                            start_force_drag
+                            if drag_mode and cfg.reset_before_episode
+                            else None
+                        ),
                     ):
                         continue
 
@@ -1061,6 +1100,9 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         ),
                     )
 
+                    if drag_mode and cfg.reset_before_episode:
+                        stop_force_drag()
+
                     # ── 重录: 丢弃本次视频, 回到复位等待 ─────────────────────
                     if events["rerecord_episode"]:
                         events["rerecord_episode"] = False
@@ -1083,8 +1125,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
     finally:
         if force_drag_active:
             try:
-                robot.stop_force_drag()
-                log_say("六维力拖动已关闭", cfg.play_sounds)
+                stop_force_drag()
             except Exception:
                 logging.exception("停止六维力拖动失败")
 
