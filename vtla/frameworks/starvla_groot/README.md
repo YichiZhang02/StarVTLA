@@ -1,51 +1,84 @@
-# StarvlaGroot (QwenGR00T) policy
+# StarVLA-GR00T
 
-Qwen-VL backbone (prefix encoder) + GR00T flow-matching DiT action head, ported
-from starVLA into the vtla (LeRobot-style) framework. Registered policy type:
-`starvla_groot`.
+`starvla_groot` 是 StarVTLA 注册的视觉语言动作 policy，由 Qwen vision-language backbone 和 GR00T flow-matching DiT action head 组成。
 
-## Layout
-- `configuration_starvla_groot.py` — `StarvlaGrootConfig(PreTrainedConfig)`
-- `modeling_starvla_groot.py` — `StarvlaGrootPolicy(PreTrainedPolicy)`
-- `processor_starvla_groot.py` — `make_starvla_groot_pre_post_processors`
-- `qwen_vl_interface.py` — generic `AutoModelForImageTextToText` wrapper
-- `action_head/` — vendored GR00T flow-matching head (`flow_matching_head.py`,
-  `cross_attention_dit.py` [needs `diffusers`], `action_encoder.py`)
+## 结构
 
-No YAML is required: the config is a draccus-registered dataclass, exactly like
-`act` / `pi05`. Override any field on the command line with `--policy.<field>=...`.
-
-## Minimal training command
-```bash
-python -m vtla.train \
-  --dataset.repo_id=<your/dataset> \
-  --policy.type=starvla_groot \
-  --policy.base_vlm=./playground/pretrained_models/Qwen3.5-0.8B \
-  --policy.chunk_size=8 \
-  --policy.n_action_steps=8 \
-  --policy.state_mode=absolute_joint \
-  --policy.top_camera_key=observation.images.cam_top \
-  --policy.wrist_camera_key=observation.images.cam_right_wrist \
-  --batch_size=8 \
-  --steps=20000 \
-  --output_dir=outputs/train/starvla_groot
+```text
+图像 + 任务文本
+  -> Qwen AutoModelForImageTextToText
+  -> multimodal hidden states
+  -> GR00T flow-matching action head
+  -> action chunk
 ```
 
-Useful overrides:
-- `--policy.action_model_type=DiT-B|DiT-L`
-- `--policy.repeated_diffusion_steps=8` (noise samples per batch element)
-- `--policy.num_inference_timesteps=4` (denoising Euler steps at inference)
-- `--policy.wrist_only=true` (single-view) / `--policy.state_mode=none`
-- `--policy.train_expert_only=true` (freeze the VLM, train only the action head)
-- `--policy.freeze_vision_encoder=true`
+主要文件：
 
-## VLM / transformers compatibility
-The action head is VLM-agnostic; the backbone is loaded by
-`AutoModelForImageTextToText.from_pretrained(base_vlm)`, so `base_vlm` must be an
-architecture your installed `transformers` recognizes.
+| 文件 | 作用 |
+| --- | --- |
+| `configuration_starvla_groot.py` | 注册配置和输入输出契约 |
+| `modeling_starvla_groot.py` | policy 前向、loss 和 action 采样 |
+| `processor_starvla_groot.py` | pre/postprocessor 构建 |
+| `qwen_vl_interface.py` | Qwen 多模态接口 |
+| `action_head/` | GR00T flow-matching DiT |
 
-- `Qwen/Qwen3-VL-*` (model_type `qwen3_vl`) works on transformers >= 4.57.0.
-- `Qwen3.5-0.8B` (model_type `qwen3_5`) is **not** in any stable transformers
-  release as of 4.57.x — its `config.json` reports `transformers_version
-  4.57.0.dev0`. To use it, install a transformers build that ships `qwen3_5`
-  (e.g. from source), or point `base_vlm` at a `qwen3_vl` checkpoint instead.
+配置使用 Draccus dataclass，不需要 YAML。共享的数据集、`robot_type`、state/action 和触觉约定见 [VTLA Training](../../README.md)。
+
+## 训练
+
+推荐使用根目录包装脚本，它会从数据集自动推断相机 key，并把数据集 `robot_type` 写入 checkpoint：
+
+```bash
+bash train.sh <dataset_id> starvla_groot 1 4 20000 \
+  true none absolute_joint absolute_joint none
+```
+
+EE action 示例：
+
+```bash
+bash train.sh <processed_dataset_id> starvla_groot 1 4 20000 \
+  true none absolute_rot6d relative_rot6d none
+```
+
+基础 VLM 默认读取：
+
+```text
+playground/pretrained_models/Qwen3.5-0.8B
+```
+
+常用 policy override：
+
+```text
+--policy.action_model_type=DiT-B|DiT-L
+--policy.repeated_diffusion_steps=8
+--policy.num_inference_timesteps=4
+--policy.train_expert_only=true
+--policy.freeze_vision_encoder=true
+--policy.gradient_checkpointing=false
+```
+
+`train_expert_only=true` 会冻结 VLM，仅训练 action head；需要视觉 backbone 适应当前相机域时保持为 `false`。
+
+## 触觉
+
+`tactile_mode=as_image` 将触觉作为额外图像视角，`tactile_mode=encode` 使用 Tactile MAE 生成 context。多帧触觉会按时间窗口拼接到 hidden states。
+
+```bash
+TACTILE_NUM_FRAMES=3 \
+TACTILE_FRAME_OFFSET=2 \
+TACTILE_ENCODER_PATH=playground/pretrained_models/AnyTouch-ViT-L-16 \
+  bash train.sh <dataset_id> starvla_groot 1 4 20000 \
+  true encode absolute_joint absolute_joint none
+```
+
+## Transformers 兼容性
+
+VLM 通过 `AutoModelForImageTextToText.from_pretrained()` 加载，本地 `transformers` 必须认识 checkpoint 的 `model_type`。Qwen3.5 权重若来自开发版 Transformers，应使用包含相同 `qwen3_5` 实现的版本；稳定版不识别该架构时会在加载阶段失败。
+
+## 推理
+
+```bash
+bash inference.sh <run_id> <step>
+```
+
+推理从 checkpoint 自动恢复 policy 配置、任务文本和 `robot_type`。机器人构型与 B/ISF FK/IK 不能手动错配。

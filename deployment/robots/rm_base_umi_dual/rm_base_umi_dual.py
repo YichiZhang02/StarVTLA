@@ -15,17 +15,25 @@
 # limitations under the License.
 
 """
-睿尔曼 RM75b 单左臂 ugripper LeRobot 适配器。
+睿尔曼 RM75b 双臂 (ugripper 集成版) LeRobot 适配器
 
-硬件由从臂、领控电爪、腕部鱼眼相机和两路触觉组成，所有观测与动作使用 left_ 前缀：
+每条手臂: 从臂(TCP) + 领控电爪(gRPC/CAN) + 手腕鱼眼相机(gRPC/UDP) + 2 路触觉(gRPC)。
+主臂由 bi_realman_ugripper_leader 遥操作器负责, 本机器人只管从臂侧设备。
+
+数据格式 (每条启用的手臂, side ∈ {left, right}):
     observation.state:
-        left_main_joint1..7  (float, 弧度)
-        left_main_gripper    (float, 归一化 [0,1], 1=张开)
+        {side}_main_joint1..7  (float, 弧度)
+        {side}_main_gripper    (float, 归一化 [0,1], 1=张开)
     observation.images:
-        left_cam_wrist       (1080, 1920, 3) uint8
-        left_cam_finger0/1   (288, 384, 3) uint16 [depth*1000, deform_x/y*1000+30000]
+        {side}_cam_wrist       (1080, 1920, 3) uint8  RGB 鱼眼
+        {side}_cam_finger0     (288, 384, 3)   uint16 [depth*1000, deform_x/y*1000+30000]
+        {side}_cam_finger1     (288, 384, 3)   uint16
     action:
-        left_main_joint1..7, left_main_gripper
+        {side}_main_joint1..7  (float, 弧度)
+        {side}_main_gripper    (float, 归一化 [0,1])
+
+并发: 各路视觉/触觉数据流各跑独立进程 (见 deployment/hardware 下各硬件类), 从臂关节状态
+各跑一个后台线程 (RealmanTcpFollower 内部状态读取), get_observation 全程非阻塞。
 """
 
 import logging
@@ -40,11 +48,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from deployment.hardware.top_cameras import make_top_cameras_from_configs
+from deployment.hardware.calibration import MotorCalibration
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
-from .config_realman_ugripper_left import RealmanUGripperLeftConfig
+from .config_rm_base_umi_dual import RmBaseUmiDualConfig
 from deployment.hardware.grippers import LingkongGripper
 from deployment.hardware.wrist_cameras import FisheyeGrpcCamera, WristUndistorter, default_calib_path
 from deployment.hardware.tactile_sensors import DmroboticsFlux
@@ -101,24 +110,30 @@ class _ArmDevices:
         return [r for r in (self.fisheye, self.tactile0, self.tactile1) if r is not None]
 
 
-class RealmanUGripperLeft(Robot):
-    """睿尔曼 RM75b 单左臂 ugripper。"""
+class RmBaseUmiDual(Robot):
+    """睿尔曼 RM75b 双臂 (ugripper 集成版)。"""
 
-    config_class = RealmanUGripperLeftConfig
-    name = "realman_ugripper_left"
+    config_class = RmBaseUmiDualConfig
+    name = "rm_base_umi_dual"
+    kinematics_force_type = RmBaseUmiDualConfig.kinematics_force_type
 
     DOF = 7
     JOINT_NAMES = [f"main_joint{i}" for i in range(1, 8)]
     GRIPPER_NAME = "main_gripper"
 
+    # EE-pose 模式 (action_space="ee") 的每臂 20 维布局名 + 固定臂序 (右臂在前, 与训练 build_names 一致)
     EE_NAMES = ["ee_x", "ee_y", "ee_z"] + [f"ee_rot6d_{i}" for i in range(6)] + ["gripper"]
-    SIDE = "left"
-    SIDES = (SIDE,)
+    _SIDE_ORDER = ("right", "left")
 
-    def __init__(self, config: RealmanUGripperLeftConfig):
+    def __init__(self, config: RmBaseUmiDualConfig):
         super().__init__(config)
         self.config = config
-        self._arms: dict[str, _ArmDevices] = {self.SIDE: _ArmDevices(self.SIDE)}
+
+        for side in config.arms:
+            if side not in ("left", "right"):
+                raise ValueError(f"无效的手臂名 '{side}', 只支持 'left' / 'right'")
+
+        self._arms: dict[str, _ArmDevices] = {side: _ArmDevices(side) for side in config.arms}
 
         # 腕部去畸变开关: "true" 开, "false"/"auto" 关 (auto 仅在 inference.py 改写为 true/false 时生效;
         # 采集/遥操作无 policy, auto 即关闭, 存原生鱼眼供离线 tools 去畸变)。
@@ -131,7 +146,7 @@ class RealmanUGripperLeft(Robot):
         # connect() 后由 _capture_home_joints() 填充
         self._home_joints: dict[str, list[float]] = {}
 
-        # 动作空间: "ee" 时 action_features 改为 10 维末端位姿, send_action 走 rm_movep_canfd。
+        # 动作空间: "ee" 时 action_features 改为 20 维末端位姿, send_action 走 rm_movep_canfd。
         # observation 始终产出关节 (state 的 EE 化由推理 preprocessor 负责)。
         self._ee_action = str(getattr(config, "action_space", "joint")).lower() == "ee"
         self._algo = None  # 离线 FK 句柄 (ee 模式安全限幅用; 不占实时控制句柄)
@@ -139,27 +154,30 @@ class RealmanUGripperLeft(Robot):
     # ==================== 配置辅助 ====================
 
     def _board_ip(self, side: str) -> str:
-        return self.config.board_ip
+        return self.config.left_board_ip if side == "left" else self.config.right_board_ip
 
     def _follower_ip(self, side: str) -> str:
-        return self.config.follower_ip
+        return self.config.left_follower_ip if side == "left" else self.config.right_follower_ip
 
     def _fisheye_udp_port(self, side: str) -> int:
-        return self.config.fisheye_udp_port
+        return self.config.left_fisheye_udp_port if side == "left" else self.config.right_fisheye_udp_port
 
     def _wrist_calib_path(self, side: str) -> str:
-        """返回左腕标定文件；未配置时使用 deployment 内置标定。"""
-        return str(self.config.wrist_calib or default_calib_path(self.SIDE))
+        """该臂腕部去畸变标定文件: config.wrist_calib[side] 优先, 否则用 deployment 内置。"""
+        wc = self.config.wrist_calib or {}
+        return str(wc.get(side) or default_calib_path(side))
 
     def _tactile_pc_ports(self, side: str) -> tuple[int, int]:
-        return self.config.tactile0_pc_port, self.config.tactile1_pc_port
+        if side == "left":
+            return self.config.left_tactile0_pc_port, self.config.left_tactile1_pc_port
+        return self.config.right_tactile0_pc_port, self.config.right_tactile1_pc_port
 
     # ==================== 特征定义 ====================
 
     @property
     def _motors_ft(self) -> dict[str, type]:
         ft: dict[str, type] = {}
-        for side in self.SIDES:
+        for side in self.config.arms:
             for joint in self.JOINT_NAMES:
                 ft[f"{side}_{joint}"] = float
             ft[f"{side}_{self.GRIPPER_NAME}"] = float
@@ -167,11 +185,12 @@ class RealmanUGripperLeft(Robot):
 
     @property
     def _ordered_arms(self) -> list[str]:
-        return list(self.SIDES)
+        """启用的手臂, 强制 right->left 顺序 (与训练 EE 布局 build_names 一致)。"""
+        return [s for s in self._SIDE_ORDER if s in self.config.arms]
 
     @property
     def _pose_ft(self) -> dict[str, type]:
-        """EE-pose 动作布局: [xyz(3), rot6d(6), gripper(1)]。"""
+        """EE-pose 动作布局: 20 维, 右臂在前, 每臂 [xyz(3), rot6d(6), gripper(1)]。"""
         ft: dict[str, type] = {}
         for side in self._ordered_arms:
             for n in self.EE_NAMES:
@@ -181,10 +200,9 @@ class RealmanUGripperLeft(Robot):
     def _ensure_algo(self):
         """离线 FK 句柄 (RM-75-E), 用于 ee 模式安全限幅时读当前 flange 位姿。懒加载。"""
         if self._algo is None:
-            from Robotic_Arm.rm_ctypes_wrap import rm_force_type_e, rm_robot_arm_model_e
-            from Robotic_Arm.rm_robot_interface import Algo
+            from vtla.engine.utils.ee_kinematics import make_realman_algo
 
-            self._algo = Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
+            self._algo = make_realman_algo(self.kinematics_force_type)
         return self._algo
 
     def _current_flange(self, side: str) -> tuple[np.ndarray, np.ndarray]:
@@ -201,7 +219,7 @@ class RealmanUGripperLeft(Robot):
     @property
     def _stream_ft(self) -> dict[str, tuple]:
         ft: dict[str, tuple] = {}
-        for side in self.SIDES:
+        for side in self.config.arms:
             if self._undistort_on:
                 crop = self.config.undistort_crop
                 ft[f"{side}_cam_wrist"] = (crop, crop, 3)
@@ -248,7 +266,7 @@ class RealmanUGripperLeft(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        # ee 模式为 10 维末端位姿；joint 模式为 7 关节加夹爪。
+        # ee 模式: 20 维末端位姿 (与 policy 的 relative_ee 输出对齐); 否则 16 维关节角。
         return self._pose_ft if self._ee_action else self._motors_ft
 
     # ==================== 连接状态 ====================
@@ -266,11 +284,30 @@ class RealmanUGripperLeft(Robot):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} 已连接")
 
-        try:
-            self._connect_one_arm(self.SIDE)
-        except Exception as err:  # noqa: BLE001
+        # 两条臂硬件完全独立 (不同板子/夹爪/从臂), 并行连接以缩短启动时间。
+        # 各自的耗时大头: 3 路数据流首帧等待 + 夹爪 grip_init 自标定 (会开合两次)。
+        errors: dict[str, Exception] = {}
+
+        def _do(side: str):
+            try:
+                self._connect_one_arm(side)
+            except Exception as e:  # noqa: BLE001
+                errors[side] = e
+
+        threads = [
+            threading.Thread(target=_do, args=(side,), name=f"connect-{side}")
+            for side in self.config.arms
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        if errors:
+            # 任一臂失败则回滚已连接的设备, 再抛出
             self._safe_teardown()
-            raise ConnectionError(f"[{self.SIDE}] 臂连接失败: {err}") from err
+            side, err = next(iter(errors.items()))
+            raise ConnectionError(f"[{side}] 臂连接失败: {err}") from err
 
         # 额外本地相机
         for cam_name, cam in self.cameras.items():
@@ -286,7 +323,7 @@ class RealmanUGripperLeft(Robot):
         self._capture_home_joints()
         if self._ee_action and self.config.ee_frame_check:
             self._check_ee_frames()
-        logger.info(f"{self} 连接完成 ({self.config.follower_ip}, {self.config.board_ip})")
+        logger.info(f"{self} 连接完成 (ugripper 双臂, 启用: {self.config.arms})")
 
     def _check_ee_frames(self) -> None:
         """ee 模式自检: 工具/工作坐标系须≈单位, 否则 movep 位姿系 != 训练 FK 的 flange/base 系。
@@ -439,7 +476,11 @@ class RealmanUGripperLeft(Robot):
             if not gripper.connect():
                 logger.warning(f"[{side}] 夹爪 gRPC 连接失败, 该臂夹爪将不可用")
                 return
-            if not gripper.init_gripper(itinerary_override=self.config.gripper_itinerary):
+            itinerary = (
+                self.config.left_gripper_itinerary if side == "left"
+                else self.config.right_gripper_itinerary
+            )
+            if not gripper.init_gripper(itinerary_override=itinerary):
                 logger.warning(f"[{side}] 夹爪初始化失败, 该臂夹爪将不可用")
                 return
             arm.gripper = gripper
@@ -454,7 +495,21 @@ class RealmanUGripperLeft(Robot):
         return True
 
     def calibrate(self) -> None:
-        logger.info(f"{self} 无整机标定流程, 跳过")
+        logger.info(f"开始校准 {self}...")
+        self.calibration = {}
+        idx = 1
+        for side in self.config.arms:
+            for joint in self.JOINT_NAMES:
+                self.calibration[f"{side}_{joint}"] = MotorCalibration(
+                    id=idx, drive_mode=0, homing_offset=0, range_min=-180, range_max=180
+                )
+                idx += 1
+            self.calibration[f"{side}_{self.GRIPPER_NAME}"] = MotorCalibration(
+                id=idx, drive_mode=0, homing_offset=0, range_min=0, range_max=1000
+            )
+            idx += 1
+        self._save_calibration()
+        logger.info(f"校准数据已保存到 {self.calibration_fpath}")
 
     def configure(self) -> None:
         logger.info(f"配置 {self}...")
@@ -483,7 +538,7 @@ class RealmanUGripperLeft(Robot):
     def move_to_home(self) -> None:
         """机械臂和夹爪复位到初始位置 (推理时按→保存后调用)。
 
-        流程: 先立即张开夹爪，再将机械臂平滑插值到 home 位置。
+        流程: 先立即张开夹爪 (非阻塞), 再并行将双臂平滑插值到 home 位置。
         """
         if not self.is_connected:
             logger.warning("move_to_home: 机器人未连接, 跳过")
@@ -498,7 +553,7 @@ class RealmanUGripperLeft(Robot):
                 except Exception as e:
                     logger.warning(f"[{side}] 夹爪复位出错: {e}")
 
-        # 2. 平滑运动到 home 位置
+        # 2. 双臂并行平滑运动到 home 位置
         def _home_arm(side: str, arm: _ArmDevices) -> None:
             target = self._home_joints.get(side)
             if target is None:
@@ -530,7 +585,7 @@ class RealmanUGripperLeft(Robot):
         obs: dict[str, Any] = {}
 
         # 1. 关节 + 夹爪 (state)
-        for side in self.SIDES:
+        for side in self.config.arms:
             arm = self._arms[side]
             joints = arm.follower.read_joints() if arm.follower is not None else [0.0] * self.DOF
             for i, joint in enumerate(self.JOINT_NAMES):
@@ -543,7 +598,7 @@ class RealmanUGripperLeft(Robot):
             )
 
         # 2. 数据流图像
-        for side in self.SIDES:
+        for side in self.config.arms:
             arm = self._arms[side]
             wrist = arm.fisheye.async_read()
             if arm.wrist_undistorter is not None:
@@ -581,7 +636,7 @@ class RealmanUGripperLeft(Robot):
 
         sent_action: dict[str, Any] = {}
 
-        for side in self.SIDES:
+        for side in self.config.arms:
             arm = self._arms[side]
 
             # 1. 关节目标
@@ -643,7 +698,7 @@ class RealmanUGripperLeft(Robot):
         return p_out, R_out
 
     def _send_action_ee(self, action: dict[str, Any]) -> dict[str, Any]:
-        """收基座系绝对 flange 位姿 (10 维) -> 单步限幅 -> rm_movep_canfd 透传。
+        """收基座系绝对 flange 位姿 (20 维, 右臂在前) -> 单步限幅 -> rm_movep_canfd 透传。
 
         位姿系与训练 FK 同源 (rm_algo_forward_kinematics 的 flange/base 系, 无 tcp 外参);
         movep 直接吃该 flange 世界位姿。夹爪走绝对归一化。

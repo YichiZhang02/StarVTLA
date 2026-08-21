@@ -19,8 +19,7 @@
 
 最小命令:
     python -m deployment.collect \
-        --robot.type=realman_ugripper_dual \
-        --teleop.type=bi_realman_ugripper_leader \
+        --robot.type=rm_base_umi_dual \
         --dataset.repo_id=pick_pen \
         --dataset.single_task="抓笔" \
         --dataset.num_episodes=20
@@ -28,7 +27,7 @@
 六维力拖动 (不连接主臂, 空格键切换夹爪):
     python -m deployment.collect \
         --mode=drag \
-        --robot.type=realman_ugripper_left \
+        --robot.type=rm_isf_umi_left \
         --dataset.repo_id=drag_demo \
         --dataset.single_task="抓笔" \
         --drag_gripper_close_value=0.0
@@ -46,6 +45,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from deployment._record_engine import RecordConfig, StickyHint, run_record  # noqa: E402
+from deployment.teleoperators import TeleoperatorConfig
 from vtla.engine.configs import parser
 
 
@@ -83,6 +83,33 @@ class CollectConfig(RecordConfig):
             raise ValueError("drag_force_mode must be 1, 2 or 3")
 
 
+def _resolve_teleop_config(cfg: CollectConfig) -> None:
+    """Resolve and validate the teleoperator declared by the concrete robot config."""
+    if cfg.mode == CollectMode.DRAG:
+        cfg.teleop = None
+        return
+
+    teleop_type = cfg.robot.teleop_type
+    if not teleop_type:
+        raise ValueError(
+            f"robot.type={cfg.robot.type!r} does not declare a teleop_type"
+        )
+    try:
+        teleop_cls = TeleoperatorConfig.get_choice_class(teleop_type)
+    except KeyError as exc:
+        raise ValueError(
+            f"robot.type={cfg.robot.type!r} declares unregistered teleop_type={teleop_type!r}"
+        ) from exc
+
+    if cfg.teleop is None:
+        cfg.teleop = teleop_cls()
+    elif not isinstance(cfg.teleop, teleop_cls):
+        raise ValueError(
+            f"robot.type={cfg.robot.type!r} requires teleop.type={teleop_type!r}, "
+            f"got {cfg.teleop.type!r}"
+        )
+
+
 def _validate_reset_home(cfg: CollectConfig) -> None:
     """Reject partial RealMan home targets before connecting hardware."""
     if not cfg.reset_before_episode:
@@ -97,7 +124,7 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
 
     sides = getattr(cfg.robot, "arms", None)
     if sides is None:
-        # realman_ugripper_left always controls logical left.
+        # rm_isf_umi_left always controls logical left.
         sides = ("left",)
     expected = {
         f"{side}_main_joint{joint_index}"
@@ -131,13 +158,10 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
 def collect(cfg: CollectConfig):
     if cfg.policy is not None:
         raise ValueError("collect 是采数据入口, 不接受 --policy.*; 模型推理请用 `python -m deployment.inference`")
+    _resolve_teleop_config(cfg)
     _validate_reset_home(cfg)
-    if cfg.mode == CollectMode.TELEOP and cfg.teleop is None:
-        raise ValueError("collect 需要遥操作器: 请指定 --teleop.type=... (如 bi_realman_ugripper_leader)")
     if cfg.mode == CollectMode.DRAG:
-        # Drag owns the follower directly. Ignore any inherited/default teleop config
-        # and keep the recorded action in measured joint space.
-        cfg.teleop = None
+        # Drag owns the follower directly and records measured joint-space actions.
         if hasattr(cfg.robot, "action_space"):
             cfg.robot.action_space = "joint"
     if cfg.dataset.single_task is None:

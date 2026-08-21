@@ -1,151 +1,201 @@
 # Tactile MAE
 
-A clean, self-contained re-implementation of **AnyTouch (stage 1) MAE** for
-pretraining a tactile-image backbone directly on **LeRobot** datasets.
+该模块实现 AnyTouch stage-1 风格的 masked autoencoder，用 StarVTLA 的 LeRobot 触觉视频或 raw frame cache 预训练触觉图像 backbone。它只训练 image path，不包含文本对齐、跨传感器标签或 AnyTouch 后续对比学习阶段。
 
-Because we only have tactile *images* (no text / cross-sensor labels / multi-stage
-contrastive learning), AnyTouch degenerates to a masked auto-encoder. This repo
-keeps the AnyTouch model structure and stage-1 training recipe **identical**, but:
+## 模型
 
-- trains directly on LeRobot v3.0 datasets (no data-format conversion);
-- supports both **ViT-L/14** and **ViT-B/16**;
-- supports three init modes through a single `--pretrained_path`;
-- ships eval + reconstruction visualization + t-SNE.
+| 组件 | ViT-L | ViT-B |
+| --- | --- | --- |
+| encoder | ViT-L/14，1024 hidden，24 layers | ViT-B/16，768 hidden，12 layers |
+| projection | 1024 -> 768 | 768 -> 512 |
+| decoder | 8 layers，512 hidden，16 heads，2048 MLP | 同左 |
+| sensor token | 10 slots，每 slot 5 tokens | 同左 |
+| 默认 mask | 75% random patches | 同左 |
+| loss | masked-patch MSE + 可选 visible loss | 同左 |
 
-## Model (identical to AnyTouch stage1, image path)
+Patch embedding 遵循 AnyTouch stage-1 的 `use_same_patchemb` 路径：图像重复成 3 帧后进入 `video_patch_embedding` Conv3d。Encoder 使用 Transformers CLIP building blocks，decoder 位于 [models/vit_decoder.py](models/vit_decoder.py)，参数命名保持与 AnyTouch checkpoint 一致。
 
-| component | spec |
-|---|---|
-| encoder | CLIP ViT (`touch_model.*`) — ViT-L/14 (1024-d, 24L) or ViT-B/16 (768-d, 12L) |
-| projection | `touch_projection`: hidden → 768 (L) / 512 (B) |
-| decoder | 8× ViT layer, 512-d / 16 heads / 2048 mlp (`touch_decoder_blocks.*`) |
-| tokens | cls + **5 sensor tokens** (`sensor_token` ∈ ℝ^{10×5×d}) |
-| masking | random 75% |
-| loss | masked-patch MSE (`norm_pix_loss=False`) |
-| patch-embed | stage1 `use_same_patchemb`: image → 3×-repeat → `video_patch_embedding` (Conv3d) |
+## 推荐训练入口
 
-The encoder is assembled from `transformers` CLIP building blocks and the decoder is
-vendored ([models/vit_decoder.py](models/vit_decoder.py)) so the parameter names match
-the released AnyTouch checkpoint exactly and it **strict-loads** (missing=0, unexpected=0),
-independent of the installed `transformers` version.
+从仓库根目录运行：
 
-## Sensor id
+```bash
+bash scripts/train_enc.sh \
+  <dataset_ids> <scratch|clip|anytouch> <vit_b|vit_l> \
+  <num_processes> <batch_size> <epochs>
+```
 
-AnyTouch `sensor_token` has 10 slots (each 5 tokens). Pretrain used:
-`0` GelSight(early) · `1` DIGIT · `2` GelSight(OF-Real) · `3` GelSight-Mini · `4` DuraGel · `-1` agnostic (slot 9).
-Our HD tac16 finger defaults to `--sensor_id -1` (agnostic). Switch to `3` (gelsight-like)
-or a free slot (`6`) via `--sensor_id`.
+示例：
 
-## Three init modes — one `--pretrained_path`
+```bash
+bash scripts/train_enc.sh \
+  "dataset_a dataset_b" clip vit_b 4 128 100
+```
 
-| mode | `--pretrained_path` | behavior |
-|---|---|---|
-| from scratch | *(empty)* | random init |
-| from CLIP | `playground/pretrained_models/CLIP-ViT-L-14-DataComp.XL-s13B-b90K` | loads encoder+projection (decoder/sensor tokens init) |
-| from AnyTouch | `playground/pretrained_models/checkpoint.pth` (or converted dir) | strict full MAE load |
+输出位于：
 
-The loader auto-detects the source namespace (`vision_model.*` = CLIP, `touch_mae_model.*` /
-`touch_model.*` = AnyTouch). Optionally normalize the AnyTouch `.pth` into an HF-style dir:
+```text
+playground/results/backbones/<timestamp>_tacmae_<arch>_from_<init_mode>/
+```
+
+包装脚本负责识别输入模式、预热数据 cache、选择 camera key、启动单进程 Python 或多进程 torchrun，并把配置和日志保存到 run 目录。完整参数和环境变量见 [Workflow Scripts](../../../scripts/README.md#触觉-backbone-训练)。
+
+## 初始化
+
+统一通过 `pretrained_path` 自动识别权重命名空间：
+
+| 模式 | 来源 | 加载范围 |
+| --- | --- | --- |
+| `scratch` | 空 | 全部随机初始化 |
+| `clip` | 本地 CLIP 目录 | encoder + projection |
+| `anytouch` | AnyTouch `.pth` 或转换目录 | 完整 MAE strict load |
+
+默认本地路径：
+
+```text
+ViT-B CLIP: playground/pretrained_models/CLIP-ViT-B-16-DataComp.XL-s13B-b90K
+ViT-L CLIP: playground/pretrained_models/CLIP-ViT-L-14-DataComp.XL-s13B-b90K
+AnyTouch:   playground/pretrained_models/AnyTouch-ViT-L-16
+```
+
+公开 AnyTouch 完整权重只支持 ViT-L，因此 `init_mode=anytouch` 与 `arch=vit_b` 会被拒绝。
+
+将原始 AnyTouch checkpoint 转为 HF 风格目录：
 
 ```bash
 python -m vtla.tac_encoder.tactile_mae.tools.convert_anytouch_to_hf \
   --src playground/pretrained_models/checkpoint.pth \
-  --out playground/pretrained_models/anytouch_mae_vitl --arch vit_l
+  --out playground/pretrained_models/anytouch_mae_vitl \
+  --arch vit_l
 ```
 
-## Train
+## Sensor ID
+
+AnyTouch 有 10 个 sensor slots，每个 slot 5 个 token。已知 ID 包括：
+
+| ID | 传感器 |
+| ---: | --- |
+| `0` | early GelSight |
+| `1` | DIGIT |
+| `2` | GelSight OF-Real |
+| `3` | GelSight Mini |
+| `4` | DuraGel |
+| `-1` | agnostic，映射到 slot 9 |
+
+当前触觉默认使用 `SENSOR_ID=-1`。只有明确需要复用某类 sensor token 时才改为 `3` 或未占用 slot。
+
+## LeRobot 数据模式
+
+包含 `meta/info.json` 的输入按 LeRobot 数据集处理。脚本只解码触觉 camera key，不读取 top/wrist RGB。未显式设置 `TACTILE_KEYS` 时，包装脚本使用当前默认触觉 key；单臂或不同命名的数据建议直接从数据集 metadata 传入：
 
 ```bash
-# scripts/train.sh <scratch|clip|anytouch> [arch] [num_gpus] [dataset_ids...]
-bash vtla/tac_encoder/tactile_mae/scripts/train.sh anytouch vit_l 4 \
-     rm_nist_260320_strawberry rm_nist_260520_usb
+TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_finger1]' \
+  bash scripts/train_enc.sh <dataset_id> clip vit_b 1 128 100
 ```
 
-Or directly:
+首次运行会构建 dataset cache。多个 LeRobot 数据集可以联合训练，但不能与 raw frame cache 混合。
+
+## 接触帧筛选
+
+包装脚本默认启用 contact filter：
+
+```text
+score = max(per-channel pixel std), scale 0..255
+contact = score > CONTACT_STD_THRESHOLD
+```
+
+接触帧全部保留，非接触帧按 `NONCONTACT_KEEP_RATIO` 随机保留。默认：
+
+```text
+CONTACT_FILTER=1
+CONTACT_STD_THRESHOLD=0.5
+NONCONTACT_KEEP_RATIO=0.05
+CONTACT_STRIDE=1
+```
+
+结果缓存到 `<dataset>/meta/contact_std.npz`。关闭筛选：
 
 ```bash
-torchrun --nproc_per_node=4 -m vtla.tac_encoder.tactile_mae.train \
-  --arch vit_l --pretrained_path playground/pretrained_models/checkpoint.pth \
-  --dataset_root playground/data --dataset_ids rm_nist_260320_strawberry \
-  --camera_keys observation.images.cam_finger0 observation.images.cam_finger1 \
-  --sensor_id -1 --use_sensor_token --use_same_patchemb \
-  --sensor_token_for_all --batch_size 64 --epochs 20 --warmup_epochs 1 \
-  --weight_decay 0.1 --blr 1e-3 --output_dir playground/results/tac_mae
+CONTACT_FILTER=0 bash scripts/train_enc.sh <dataset_id>
 ```
 
-Defaults mirror `train_stage1.sh`: AdamW(β=0.9,0.99), wd 0.1, `lr=blr·eff_bs/256`,
-half-cycle cosine + warmup, AMP, ImageNet-norm + H/V-flip + ColorJitter aug.
+## Raw Frame Cache
 
-## Eval & visualization
+不含 LeRobot metadata 的连续触觉图像流可以先转成 decode-once frame cache：
 
 ```bash
-# scripts/eval.sh <checkpoint> [arch] [dataset_ids...]
-bash vtla/tac_encoder/tactile_mae/scripts/eval.sh \
-     playground/results/tac_mae/checkpoint-19.pth vit_l rm_nist_260320_strawberry
-```
-
-Produces, under `--output_dir`:
-- `metrics.txt` — masked-patch MSE on the held-out split;
-- `reconstruction.png` — `[original | masked | reconstruction | pasted]`;
-- `tsne.png` — t-SNE of CLS features (colored by dataset, or by camera for a single dataset).
-
-## Layout
-
-```
-tactile_mae/
-├── models/        mae_model.py · vit_decoder.py · pos_embed.py · build.py
-├── data/          lerobot_tactile_dataset.py
-├── engine/        train_engine.py · lr_sched.py · misc.py
-├── tools/         convert_anytouch_to_hf.py
-├── scripts/       train.sh · eval.sh
-├── config.py · train.py · eval.py
-```
-
-## Pretrain on a flat image stream (no LeRobot)
-
-To pretrain on a raw directory of tactile PNGs (e.g. AnyTouch `data_tac2_s`,
-a single continuous stream with no episodes / state / action), skip LeRobot
-entirely: convert the PNGs straight into the decode-once **frame cache** and
-train with `--raw_frame_cache`.
-
-```bash
-# 1) PNG stream -> frame cache (resized uint8 memmap; ~16.5 GB for 224 @ 114905 frames)
 python -m vtla.tac_encoder.tactile_mae.tools.png_to_frame_cache \
   --src_dir <flat_png_dir> \
-  --dataset_root playground/data --dataset_id pretrained_data \
-  --camera_key observation.images.cam_finger0 --image_size 224 --num_workers 16
-
-# 2) train directly off the cache (no mp4 / parquet / LeRobot metadata)
-torchrun --nproc_per_node=4 -m vtla.tac_encoder.tactile_mae.train \
-  --raw_frame_cache --dataset_root playground/data --dataset_ids pretrained_data \
-  --camera_keys observation.images.cam_finger0 --image_size 224 \
-  --arch vit_l --pretrained_path playground/pretrained_models/checkpoint.pth \
-  --sensor_id -1 --use_sensor_token --use_same_patchemb --sensor_token_for_all \
-  --batch_size 64 --epochs 20 --output_dir playground/results/tac_mae_pretrain
+  --dataset_root playground/data \
+  --dataset_id pretrained_data \
+  --camera_key observation.images.cam_finger0 \
+  --image_size 224 \
+  --num_workers 16
 ```
 
-`--raw_frame_cache` reads the pre-built cache directly and splits train/val by
-contiguous **row range** (last `--val_ratio` fraction = val), since the stream has
-no episodes. `--image_size` must match what the cache was built with (the cache
-signature folder, e.g. `all_224_v1`, encodes it). Contact filtering is not
-available in this mode (it needs per-frame decode from a LeRobot dataset).
+然后运行：
 
-## Contact-frame filtering (optional)
+```bash
+RAW_FRAME_CACHE=1 \
+IMAGE_SIZE=224 \
+  bash scripts/train_enc.sh pretrained_data clip vit_b 4 128 100
+```
 
-By default every tactile frame is used. With `--contact_filter`, training keeps
-only **contact** frames and subsamples the rest:
+Raw 模式按连续行范围划分 train/validation，最后 `VAL_RATIO` 比例作为 validation。`IMAGE_SIZE` 必须和 cache 签名一致。因为没有逐帧 LeRobot 解码来源，contact filter 会自动关闭。
 
-- contact score = **max per-channel std** of the frame (0-255 scale); idle gel
-  frames are ~0.1, contact frames rise to several units;
-- `score > --contact_std_threshold` (default `0.5`) ⇒ contact (kept);
-- otherwise kept with probability `--noncontact_keep_ratio` (default `0.05`).
+## 直接调用
 
-Scores are computed once and cached at `<dataset>/meta/contact_std.npz`. In
-`scripts/train_enc.sh` enables this by default; tune via env:
-`CONTACT_FILTER=0` (off), `CONTACT_STD_THRESHOLD`, `NONCONTACT_KEEP_RATIO`.
+需要绕过包装脚本时：
 
-## Notes
-- ViT-L `from CLIP` uses the HF CLIP dir; ViT-B `from CLIP` reads the
-  **open_clip** `CLIP-ViT-B-16` weights directly (auto-remapped in the loader).
-- `from anytouch` is ViT-L only (no released ViT-B weights).
-- Only tactile camera streams are decoded (top/wrist views are skipped) for speed.
+```bash
+torchrun --nproc_per_node=4 \
+  -m vtla.tac_encoder.tactile_mae.train \
+  --arch vit_l \
+  --pretrained_path playground/pretrained_models/AnyTouch-ViT-L-16 \
+  --dataset_root playground/data \
+  --dataset_ids <dataset_id> \
+  --camera_keys observation.images.left_cam_finger0 observation.images.left_cam_finger1 \
+  --sensor_id -1 \
+  --use_sensor_token \
+  --use_same_patchemb \
+  --sensor_token_for_all \
+  --mask_ratio 0.75 \
+  --batch_size 64 \
+  --epochs 100 \
+  --warmup_epochs 1 \
+  --weight_decay 0.1 \
+  --blr 1e-5 \
+  --amp_dtype bfloat16 \
+  --output_dir playground/results/backbones/tacmae_run
+```
+
+包装脚本当前还设置 `visible_loss_weight=0.1`，并对 sensor-token beta 从 `0.0` 调度到 `0.75`。复现实验时应一并记录这些参数。
+
+## Eval 和可视化
+
+```bash
+bash vtla/tac_encoder/tactile_mae/scripts/eval.sh \
+  <checkpoint> <vit_b|vit_l> <dataset_ids...>
+```
+
+输出目录包含：
+
+| 文件 | 内容 |
+| --- | --- |
+| `metrics.txt` | validation masked-patch MSE |
+| `reconstruction.png` | 原图、mask、重建和 pasted 对比 |
+| `tsne.png` | CLS 特征的 t-SNE |
+
+## 目录
+
+```text
+tactile_mae/
+├── models/      MAE、decoder、position embedding 和构建逻辑
+├── data/        LeRobot 触觉数据集
+├── engine/      训练循环、scheduler 和分布式工具
+├── tools/       checkpoint 与 frame-cache 转换
+├── scripts/     直接训练和评估脚本
+├── config.py
+├── train.py
+└── eval.py
+```

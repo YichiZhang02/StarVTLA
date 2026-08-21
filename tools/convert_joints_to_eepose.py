@@ -19,6 +19,7 @@
 Reads the joint ``observation.state`` names, automatically detects one or two complete Realman
 arms, and via forward kinematics ADDS eight columns to the SAME dataset. Joint columns are left
 untouched, so joint-mode training is unaffected. EE dimensions are 10/8 per arm for rot6d/quat.
+The RealMan B/ISF FK variant is selected strictly from ``meta/info.json`` robot_type.
 
     observation.state_episode_ee : 10 dims/arm, EE pose of the STATE joints relative to each
                                    episode's FIRST frame (T0^{-1}·Tt), expressed in that frame.
@@ -63,6 +64,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -76,15 +78,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from deployment.robots import RobotConfig  # noqa: E402
 from vtla.engine.utils.ee_transforms import ee_to_relative  # noqa: E402
-
-# Realman SDK (vendored under deployment/sdk); FK is offline, no arm connection needed.
-_SDK = _REPO_ROOT / "deployment" / "sdk"
-if str(_SDK) not in sys.path:
-    sys.path.insert(0, str(_SDK))
-
-from Robotic_Arm.rm_ctypes_wrap import rm_force_type_e, rm_robot_arm_model_e  # noqa: E402
-from Robotic_Arm.rm_robot_interface import Algo  # noqa: E402
+from vtla.engine.utils.ee_kinematics import make_realman_algo  # noqa: E402
 
 PER_ARM_DIM = 10
 PER_ARM_DIM_QUAT = 8
@@ -169,7 +165,7 @@ def split_arms(vec: np.ndarray, jidx: dict):
 
 # ----------------------------------------------------------------------------
 # Kinematics
-def fk(algo: Algo, joints_rad: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def fk(algo: Any, joints_rad: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Single-arm FK. 7 joint radians -> (pos xyz(3,), rotation matrix(3,3))."""
     joints_deg = np.degrees(joints_rad).tolist()
     pose = algo.rm_algo_forward_kinematics(joints_deg, flag=0)  # [x,y,z, qw,qx,qy,qz]
@@ -210,12 +206,12 @@ def absolute_arm_ee_quat(pos, mat, grip) -> np.ndarray:
     return np.concatenate([pos, mat_to_quat_np(mat), [grip]]).astype(np.float64)
 
 
-def fk_both(algo: Algo, joint_vector: np.ndarray, jidx: dict):
+def fk_both(algo: Any, joint_vector: np.ndarray, jidx: dict):
     """Run FK for every arm present in ``jidx`` (one or two arms)."""
     return tuple((fk(algo, joints), grip) for joints, grip in split_arms(joint_vector, jidx))
 
 
-def to_episode_ee(algo: Algo, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
+def to_episode_ee(algo: Any, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
     """Joints -> per-arm relative-first-frame rot6d EE using ``baseline`` T0."""
     arms = fk_both(algo, joint_vector, jidx)
     return np.concatenate([
@@ -229,7 +225,7 @@ def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
     return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
 
 
-def to_absolute_ee(algo: Algo, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
+def to_absolute_ee(algo: Any, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
     """Joints -> per-arm base-frame rot6d EE, without an episode baseline."""
     return np.concatenate([
         absolute_arm_ee(pos, mat, grip)
@@ -237,7 +233,7 @@ def to_absolute_ee(algo: Algo, joint_vector: np.ndarray, jidx: dict) -> np.ndarr
     ]).astype(np.float32)
 
 
-def to_episode_quat(algo: Algo, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
+def to_episode_quat(algo: Any, joint_vector: np.ndarray, jidx: dict, baseline) -> np.ndarray:
     """Joints -> per-arm relative-first-frame quaternion EE."""
     arms = fk_both(algo, joint_vector, jidx)
     return np.concatenate([
@@ -246,7 +242,7 @@ def to_episode_quat(algo: Algo, joint_vector: np.ndarray, jidx: dict, baseline) 
     ]).astype(np.float32)
 
 
-def to_absolute_quat(algo: Algo, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
+def to_absolute_quat(algo: Any, joint_vector: np.ndarray, jidx: dict) -> np.ndarray:
     """Joints -> per-arm base-frame quaternion EE."""
     return np.concatenate([
         absolute_arm_ee_quat(pos, mat, grip)
@@ -266,7 +262,7 @@ def sorted_data_files(root: Path) -> list[Path]:
     return [Path(f) for f in sorted(files, key=key)]
 
 
-def compute_baselines(algo: Algo, data_files: list[Path], jidx: dict) -> dict[int, tuple]:
+def compute_baselines(algo: Any, data_files: list[Path], jidx: dict) -> dict[int, tuple]:
     """Map episode index to each present arm's first-frame ``(position, rotation)``."""
     baselines: dict[int, tuple] = {}
     for f in data_files:
@@ -387,6 +383,13 @@ def main():
         raise SystemExit("provide --root, or --src and --dst")
 
     info = json.loads((root / "meta" / "info.json").read_text())
+    robot_type = info.get("robot_type")
+    supported_robot_types = RobotConfig.get_kinematics_robot_types()
+    if robot_type not in supported_robot_types:
+        raise SystemExit(
+            f"Unsupported or missing robot_type={robot_type!r} in meta/info.json; "
+            f"expected one of {supported_robot_types}."
+        )
     in_names = info["features"]["observation.state"]["names"]
     action_names = info["features"]["action"]["names"]
     if list(action_names) != list(in_names):
@@ -395,12 +398,22 @@ def main():
         )
     jidx = joint_indices(in_names)
     sides = jidx["sides"]
+    try:
+        robot_config_cls = RobotConfig.validate_kinematics_sides(robot_type, sides)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     n_arms = len(sides)
     ee_dim = n_arms * PER_ARM_DIM
     ee_dim_quat = n_arms * PER_ARM_DIM_QUAT
     out_names = build_names(sides)
 
-    algo = Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
+    force_type = robot_config_cls.kinematics_force_type
+    assert force_type is not None
+    algo = make_realman_algo(force_type)
+    print(
+        f"[kinematics] robot_type={robot_type}, "
+        f"force_type={force_type.upper()}"
+    )
     data_files = sorted_data_files(root)
     print(f"[1/4] baselines from {len(data_files)} data files")
     baselines = compute_baselines(algo, data_files, jidx)

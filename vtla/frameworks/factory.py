@@ -24,6 +24,8 @@ from typing_extensions import Unpack
 
 import torch
 
+from deployment.robots import RobotConfig
+
 if TYPE_CHECKING:
     from vtla.datasets.dataset_metadata import LeRobotDatasetMetadata
 
@@ -279,6 +281,7 @@ def make_pre_post_processors(
         absolute_modes = ("absolute_rot6d", "absolute_quat", "absolute_ee")
         state_names = getattr(policy_cfg, "state_feature_names", None) or []
         n_arms = getattr(policy_cfg, "ee_num_arms", 2)
+        robot_type = getattr(policy_cfg, "robot_type", None)
         prefix_steps = []
         if action_reference == "relative":
             from .episode_ee_processor import ActionAnchorPreprocessorStep
@@ -287,6 +290,7 @@ def make_pre_post_processors(
                 state_feature_names=state_names,
                 representation=action_representation,
                 n_arms=n_arms,
+                robot_type=robot_type,
             ))
 
         if state_mode in (*episode_modes, *absolute_modes):
@@ -299,6 +303,7 @@ def make_pre_post_processors(
                 relative_to_baseline=relative,
                 rot_mode=rot_mode,
                 n_arms=n_arms,
+                robot_type=robot_type,
             )
             prefix_steps.append(ee_step)
         elif state_mode in ("episode_joint", "none"):
@@ -441,6 +446,12 @@ def make_policy(
         # never loaded by inference policy construction.
         kwargs["load_dino_teacher"] = for_training
     features = dataset_to_policy_features(ds_meta.features)
+
+    # Persist the dataset's exact physical robot identity in the policy checkpoint.
+    if for_training:
+        dataset_robot_type = ds_meta.robot_type
+        RobotConfig.validate_kinematics_sides(dataset_robot_type, tuple(detected_sides))
+        cfg.robot_type = dataset_robot_type
 
     if for_training:
         state_sources = {

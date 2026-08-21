@@ -44,7 +44,11 @@ class Robot(abc.ABC):
     name: str
 
     def __init__(self, config: RobotConfig):
-        self.robot_type = self.name
+        if self.name != config.type:
+            raise ValueError(
+                f"Robot class name={self.name!r} does not match config.type={config.type!r}"
+            )
+        self.robot_type = config.type
         self.calibration_dir = (
             config.calibration_dir if config.calibration_dir else HF_LEROBOT_CALIBRATION / ROBOTS / self.name
         )

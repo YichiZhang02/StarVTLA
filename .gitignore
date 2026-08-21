@@ -46,3 +46,5 @@ deployment/sdk/
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/
 /logs_pc_flux/
+
+1.sh

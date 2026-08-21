@@ -38,6 +38,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from deployment.robots import RobotConfig
 from vtla.engine.configs import PipelineFeatureType, PolicyFeature
 from vtla.engine.processor.pipeline import ActionProcessorStep, ObservationProcessorStep, ProcessorStepRegistry
 from vtla.engine.processor.relative_action_processor import ACTION_ANCHOR
@@ -75,9 +76,12 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
     rot_mode: str = "rot6d"
     # Number of arms packed in the EE vector.
     n_arms: int = 2
+    # Selects the physical RealMan B/ISF kinematics used when the dataset was processed.
+    robot_type: str | None = None
 
     def __post_init__(self) -> None:
-        self._algo = make_realman_algo()
+        force_type = RobotConfig.get_kinematics_force_type(self.robot_type)
+        self._algo = make_realman_algo(force_type)
         self._jidx: dict = joint_indices(self.state_feature_names)
         self._baseline: tuple | None = None   # ((R_p0, R_R0), (L_p0, L_R0))
         self._a0_packed: torch.Tensor | None = None  # (1, ee_dim) world-flange EE at episode start
@@ -168,6 +172,7 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
             "relative_to_baseline": self.relative_to_baseline,
             "rot_mode": self.rot_mode,
             "n_arms": self.n_arms,
+            "robot_type": self.robot_type,
         }
 
 
@@ -179,11 +184,13 @@ class ActionAnchorPreprocessorStep(ObservationProcessorStep):
     state_feature_names: list[str] = field(default_factory=list)
     representation: str = "joint"
     n_arms: int = 2
+    robot_type: str | None = None
 
     def __post_init__(self) -> None:
         needs_fk = self.representation in ("rot6d", "quat")
         self._jidx = joint_indices(self.state_feature_names) if needs_fk else None
-        self._algo = make_realman_algo() if needs_fk else None
+        force_type = RobotConfig.get_kinematics_force_type(self.robot_type) if needs_fk else None
+        self._algo = make_realman_algo(force_type) if force_type is not None else None
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         raw = observation.get(OBS_STATE)
@@ -202,6 +209,7 @@ class ActionAnchorPreprocessorStep(ObservationProcessorStep):
             "state_feature_names": self.state_feature_names,
             "representation": self.representation,
             "n_arms": self.n_arms,
+            "robot_type": self.robot_type,
         }
 
     def transform_features(

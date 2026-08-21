@@ -68,8 +68,8 @@ import numpy as np
 # ---- 硬件层 (deployment 自包含) ----
 from deployment.hardware.tactile_sensors import TactileMkvWriter
 from deployment.robots import Robot, RobotConfig, make_robot_from_config
-from deployment.robots.realman_ugripper_dual import RealmanUGripperDual  # noqa: F401  注册 config 选项
-from deployment.robots.realman_ugripper_left import RealmanUGripperLeft  # noqa: F401  注册 config 选项
+from deployment.robots.rm_base_umi_dual import RmBaseUmiDual  # noqa: F401  注册 config 选项
+from deployment.robots.rm_isf_umi_left import RmIsfUmiLeft  # noqa: F401  注册 config 选项
 from deployment.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
 from deployment.teleoperators.realman_rm75b_leader import RealmanRM75bLeader  # noqa: F401  注册 config 选项
 from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeader  # noqa: F401  注册 config 选项
@@ -218,6 +218,7 @@ def wait_for_episode_start(
     home_action: dict[str, float],
     home_duration_s: float,
     on_prepared: Callable[[], None] | None = None,
+    already_at_home: bool = False,
 ) -> bool:
     """Prepare one episode and wait for an explicit start request.
 
@@ -232,8 +233,9 @@ def wait_for_episode_start(
     if reset_before_episode:
         if not home_action:
             raise RuntimeError("reset_before_episode=True requires a non-empty home action")
-        log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
-        move_to_home_smooth(robot, home_action, fps, home_duration_s)
+        if not already_at_home:
+            log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
+            move_to_home_smooth(robot, home_action, fps, home_duration_s)
         if on_prepared is not None:
             on_prepared()
         log_say("复位完成 按↑开始", play_sounds)
@@ -261,6 +263,29 @@ def wait_for_episode_start(
 
     events["start_episode"] = False
     return True
+
+
+def reset_then_finalize_episode(
+    *,
+    robot: Robot,
+    reset_before_episode: bool,
+    home_action: dict[str, float],
+    fps: int,
+    home_duration_s: float,
+    play_sounds: bool,
+    episode_label: str,
+    finalize: Callable[[], None],
+) -> bool:
+    """Return home before discarding or saving the recorded in-memory episode."""
+    if reset_before_episode:
+        if not home_action:
+            raise RuntimeError("reset_before_episode=True requires a non-empty home action")
+        log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
+        move_to_home_smooth(robot, home_action, fps, home_duration_s)
+        log_say("复位完成", play_sounds)
+
+    finalize()
+    return reset_before_episode
 
 
 @dataclass
@@ -860,7 +885,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                 cfg.dataset.repo_id,
                 cfg.dataset.fps,
                 root=cfg.dataset.root,
-                robot_type=robot.name,
+                robot_type=robot.robot_type,
                 features=dataset_features,
                 use_videos=cfg.dataset.video,
                 streaming_encoding=_inference_mode,
@@ -948,6 +973,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
+                prepared_at_home = False
                 _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
                 home_action: dict[str, float] = (
                     capture_home_action(robot) if cfg.reset_before_episode else {}
@@ -971,8 +997,11 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             if drag_mode and cfg.reset_before_episode
                             else None
                         ),
+                        already_at_home=prepared_at_home,
                     ):
+                        prepared_at_home = False
                         continue
+                    prepared_at_home = False
 
                     logging.info(f"开始录制 episode {dataset.num_episodes + 1}")
                     if tactile_writer is not None:
@@ -1008,25 +1037,51 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
 
-                    # ── 重录: 丢弃本次 episode, 回到复位等待 ─────────────────
+                    episode_label = f"Episode {dataset.num_episodes + 1}"
+
+                    # ── 重录: 先复位，再丢弃本次 episode ──────────────────────
                     if events["rerecord_episode"]:
-                        events["rerecord_episode"] = False
-                        events["exit_early"] = False
-                        if tactile_writer is not None:
-                            tactile_writer.close_episode(discard=True)
-                        dataset.clear_episode_buffer()
+                        def discard_episode() -> None:
+                            events["rerecord_episode"] = False
+                            events["exit_early"] = False
+                            if tactile_writer is not None:
+                                tactile_writer.close_episode(discard=True)
+                            dataset.clear_episode_buffer()
+
+                        prepared_at_home = reset_then_finalize_episode(
+                            robot=robot,
+                            reset_before_episode=cfg.reset_before_episode,
+                            home_action=home_action,
+                            fps=cfg.dataset.fps,
+                            home_duration_s=_home_duration,
+                            play_sounds=cfg.play_sounds,
+                            episode_label=episode_label,
+                            finalize=discard_episode,
+                        )
                         continue
 
-                    # ── 保存 ─────────────────────────────────────────────────
-                    if tactile_writer is not None:
-                        tactile_paths = tactile_writer.close_episode(discard=False)
-                        for camera_key, path in tactile_paths.items():
-                            dataset.register_external_video(
-                                f"{OBS_STR}.images.{camera_key}", path
-                            )
-                    dataset.save_episode()
-                    if tactile_writer is not None:
-                        tactile_writer.cleanup_staging()
+                    # ── 保存: 先复位，再提交内存中的 episode ──────────────────
+                    def save_episode() -> None:
+                        if tactile_writer is not None:
+                            tactile_paths = tactile_writer.close_episode(discard=False)
+                            for camera_key, path in tactile_paths.items():
+                                dataset.register_external_video(
+                                    f"{OBS_STR}.images.{camera_key}", path
+                                )
+                        dataset.save_episode()
+                        if tactile_writer is not None:
+                            tactile_writer.cleanup_staging()
+
+                    prepared_at_home = reset_then_finalize_episode(
+                        robot=robot,
+                        reset_before_episode=cfg.reset_before_episode,
+                        home_action=home_action,
+                        fps=cfg.dataset.fps,
+                        home_duration_s=_home_duration,
+                        play_sounds=cfg.play_sounds,
+                        episode_label=episode_label,
+                        finalize=save_episode,
+                    )
                     recorded_episodes += 1
         else:
             # stream 模式使用 sidecar 视频写入，不触碰 LeRobotDataset 计数逻辑
@@ -1045,6 +1100,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
                 recorded_episodes = 0
                 episode_index = episode_start
+                prepared_at_home = False
                 _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
                 home_action_stream: dict[str, float] = (
                     capture_home_action(robot) if cfg.reset_before_episode else {}
@@ -1066,8 +1122,11 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             if drag_mode and cfg.reset_before_episode
                             else None
                         ),
+                        already_at_home=prepared_at_home,
                     ):
+                        prepared_at_home = False
                         continue
+                    prepared_at_home = False
 
                     logging.info(f"开始录制 stream episode {episode_index + 1}")
                     stream_writer.start_episode(episode_index)
@@ -1103,23 +1162,49 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
 
-                    # ── 重录: 丢弃本次视频, 回到复位等待 ─────────────────────
+                    episode_label = f"Stream episode {episode_index + 1}"
+
+                    # ── 重录: 先复位，再丢弃本次视频 ─────────────────────────
                     if events["rerecord_episode"]:
-                        events["rerecord_episode"] = False
-                        events["exit_early"] = False
-                        stream_writer.close_episode(discard=True)
-                        if tactile_writer is not None:
-                            tactile_writer.close_episode(discard=True)
+                        def discard_stream_episode() -> None:
+                            events["rerecord_episode"] = False
+                            events["exit_early"] = False
+                            stream_writer.close_episode(discard=True)
+                            if tactile_writer is not None:
+                                tactile_writer.close_episode(discard=True)
+
+                        prepared_at_home = reset_then_finalize_episode(
+                            robot=robot,
+                            reset_before_episode=cfg.reset_before_episode,
+                            home_action=home_action_stream,
+                            fps=cfg.dataset.fps,
+                            home_duration_s=_home_duration_s,
+                            play_sounds=cfg.play_sounds,
+                            episode_label=episode_label,
+                            finalize=discard_stream_episode,
+                        )
                         continue
 
-                    # ── 保存 ─────────────────────────────────────────────────
-                    stream_writer.close_episode(discard=False)
-                    if tactile_writer is not None:
-                        tactile_paths = tactile_writer.close_episode(discard=False)
-                        _publish_stream_tactile_videos(
-                            resolve_dataset_root(cfg.dataset), episode_index, tactile_paths
-                        )
-                        tactile_writer.cleanup_staging()
+                    # ── 保存: 先复位，再提交视频 ──────────────────────────────
+                    def save_stream_episode() -> None:
+                        stream_writer.close_episode(discard=False)
+                        if tactile_writer is not None:
+                            tactile_paths = tactile_writer.close_episode(discard=False)
+                            _publish_stream_tactile_videos(
+                                resolve_dataset_root(cfg.dataset), episode_index, tactile_paths
+                            )
+                            tactile_writer.cleanup_staging()
+
+                    prepared_at_home = reset_then_finalize_episode(
+                        robot=robot,
+                        reset_before_episode=cfg.reset_before_episode,
+                        home_action=home_action_stream,
+                        fps=cfg.dataset.fps,
+                        home_duration_s=_home_duration_s,
+                        play_sounds=cfg.play_sounds,
+                        episode_label=episode_label,
+                        finalize=save_stream_episode,
+                    )
                     recorded_episodes += 1
                     episode_index += 1
     finally:

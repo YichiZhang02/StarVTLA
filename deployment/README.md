@@ -1,328 +1,241 @@
 # Deployment
 
-`deployment/` 负责睿尔曼 RM75b 双臂的数据采集、硬件自检和 policy 推理。所有命令默认从仓库根目录运行；根目录脚本会自动切换到正确工作目录。
+`deployment/` 提供完整机器人配置、硬件封装、数据采集、硬件自检和 policy 推理。命令均从仓库根目录运行。
 
-## 目录
+## 机器人注册表
+
+目前支持两个机器人类型：
+
+| `robot_type` | 臂布局 | `kinematics_force_type` | `teleop_type` |
+| --- | --- | --- | --- |
+| `rm_base_umi_dual` | `("right", "left")` | `base` | `bi_realman_ugripper_leader` |
+| `rm_isf_umi_left` | `("left",)` | `isf` | `left_realman_ugripper_leader` |
+
+注册信息由具体 RobotConfig 自己声明：
 
 ```text
-deployment/
-├── hardware/       # 机械臂、夹爪、相机和触觉设备封装
-├── robots/         # RobotConfig 与整机组合
-├── teleoperators/  # 主臂遥操作配置
-├── sdk/            # 厂商 SDK，本地放置
-├── tools/          # 硬件检查和辅助命令
-├── collect.py      # 数据采集入口
-└── inference.py    # Policy 推理入口
+deployment/robots/<robot_type>/
+├── config_<robot_type>.py
+└── <robot_type>.py
 ```
+
+每个新机器人必须：
+
+1. 使用 `@RobotConfig.register_subclass("<robot_type>")` 注册唯一名称。
+2. 声明 `kinematics_force_type`，用于选择 RealMan FK/IK。
+3. 声明 `kinematics_sides`，用于校验数据集的单臂或双臂 feature 布局。
+4. 声明 `teleop_type`，并确保对应 TeleoperatorConfig 已注册。
+5. 在 `deployment/robots/__init__.py` 导入配置，使注册在 CLI 解析前完成。
+
+采集端不会维护另一份机器人名称列表。`deployment.collect` 直接查询 RobotConfig 注册表，并在连接硬件前拒绝未注册类型、缺失遥操作器或显式错配的遥操作器。`drag` 模式不创建遥操作器。
+
+## Robot Type 数据契约
+
+`robot_type` 是物理构型和运动学的唯一公开参数：
+
+```text
+robot.type
+  -> collect 写入 meta/info.json
+  -> joint-to-EE 读取并选择 B/ISF FK
+  -> train 写入 checkpoint config.json
+  -> inference 读取并选择 RobotConfig + B/ISF FK/IK
+```
+
+不支持旧名称兼容、默认构型或基于数据集名称的猜测。以下情况都会立即失败：
+
+- 数据集缺少 `robot_type`。
+- `robot_type` 不在 RobotConfig 运动学注册表中。
+- 单臂/双臂 feature 与 `kinematics_sides` 不一致。
+- checkpoint 缺少或包含未知 `robot_type`。
 
 ## 厂商 SDK
 
-硬件封装通过 `hardware/_sdk_paths.py` 将本地 SDK 加入 Python import path。目录约定：
+硬件模块通过 `deployment/hardware/_sdk_paths.py` 加载本地 SDK：
 
 ```text
 deployment/sdk/
-├── Robotic_Arm/          # 睿尔曼机械臂 SDK
-│   └── libs/linux_x86/libapi_c.so
-├── dm_lingkong_grip/     # 领控电爪客户端
-├── fish_camera_client/   # 鱼眼相机 gRPC 客户端
-└── dmrobotics/           # Flux 触觉传感器 SDK
+├── Robotic_Arm/          RealMan SDK 和 libs/linux_x86/libapi_c.so
+├── dm_lingkong_grip/     领控电爪客户端
+├── fish_camera_client/   鱼眼相机 gRPC 客户端
+└── dmrobotics/           Flux 触觉传感器 SDK
 ```
 
-仓库环境已包含 `Robotic_Arm`。其余 SDK 需要按上述目录名放置；目录不存在时不会在启动阶段自动下载，而会在对应硬件模块 import 时报告错误。
+SDK 不会自动下载。缺少某个 SDK 时，对应硬件模块会在导入或连接阶段报错。
 
-## Robot Config
+## 硬件配置
 
-机器人配置位于：
+双臂配置见 [config_rm_base_umi_dual.py](robots/rm_base_umi_dual/config_rm_base_umi_dual.py)，单左臂配置见 [config_rm_isf_umi_left.py](robots/rm_isf_umi_left/config_rm_isf_umi_left.py)。上机前应逐项核对：
 
-```text
-deployment/robots/<robot_type>/config_<robot_type>.py
-```
+- 从臂 IP、TCP 端口和左右臂物理对应关系。
+- 末端板 IP、夹爪行程和 CAN 参数。
+- 本机触觉 UDP 回传 IP 与端口。
+- 腕部相机、顶部相机和触觉开关。
+- `home_joints`、复位时间和 EE 单步安全限制。
 
-通过 `@RobotConfig.register_subclass("<robot_type>")` 注册，并使用以下参数选择：
-
-```bash
---robot.type=<robot_type>
-```
-
-`realman_ugripper_dual` 的配置见 [config_realman_ugripper_dual.py](robots/realman_ugripper_dual/config_realman_ugripper_dual.py)。上机前重点确认：
-
-- 左右从臂 IP 和 TCP 端口。
-- 左右控制板 IP。
-- 本机触觉 UDP 回传 IP。
-- 左右夹爪满行程。
-- 触觉图像尺寸、深度和形变编码范围。
-- 启用的机械臂、顶部相机、腕部相机和触觉开关。
-
-触觉 `uint16` 采集、精确字节平面和线性 `uint8` 派生格式统一遵循
-[Flux 触觉数据编码与转换标准](TACTILE_ENCODING_STANDARD.md)。
-
-配置字段可以通过命令行覆盖：
-
-```bash
---robot.use_tactile=false
---robot.left_follower_ip=192.168.1.200
-```
-
-机器人标定文件按 `robot.type` 隔离，默认位于
-`$HF_LEROBOT_CALIBRATION/robots/<robot_type>/calibration.json`。
-
-单左臂新硬件使用 `realman_ugripper_left`：
-
-```bash
---robot.type=realman_ugripper_left
-```
-
-该类型固定启用逻辑左臂，默认连接从臂 `192.168.1.201:8080` 和末端板
-`192.168.1.10`，且默认不连接额外的顶部 USB 相机。
-
-单左臂配置使用独立字段，不接受 dual 的 `arms`、`left_*_ip` 或 `right_*_ip` 参数：
-
-```bash
---robot.follower_ip=192.168.1.201
---robot.board_ip=192.168.1.10
---robot.pc_host=192.168.1.102
-```
-
-安全检查：
-
-```bash
-python -m deployment.tools.hardware_check \
-  --robot-type realman_ugripper_left \
-  --stage existence
-```
-
-采集时使用独立的左主臂类型，使动作字段与机器人 `left_*` 特征一致：
-
-该主臂默认串口为 `/dev/ttyRealmanUGripperLeftLeader`，通过 USB 设备序列号绑定，
-不会占用旧双臂 rig 的 `/dev/ttyLeaderL`。
+配置字段可通过 CLI 覆盖。例如：
 
 ```bash
 python -m deployment.collect \
-  --robot.type=realman_ugripper_left \
-  --teleop.type=left_realman_ugripper_leader \
-  --dataset.repo_id=local/left_test \
+  --robot.type=rm_isf_umi_left \
+  --robot.follower_ip=192.168.1.201 \
+  --robot.board_ip=192.168.1.10 \
+  --robot.pc_host=192.168.1.102 \
+  --robot.use_tactile=false \
+  --mode=drag \
+  --dataset.repo_id=local/hardware_test \
   --dataset.single_task="hardware validation" \
   --dataset.num_episodes=1 \
   --dataset.push_to_hub=false
 ```
 
+机器人标定默认保存在 `$HF_LEROBOT_CALIBRATION/robots/<robot_type>/calibration.json`，不同构型不会共享标定文件。
+
 ## 硬件自检
 
-先运行不连接硬件的存在性检查：
+存在性检查不驱动机器人：
 
 ```bash
-python -m deployment.tools.hardware_check
+python -m deployment.tools.hardware_check \
+  --robot-type rm_isf_umi_left \
+  --stage existence
 ```
 
-连接相机和触觉并抓取一帧：
+连接相机和触觉并显示一帧：
 
 ```bash
-python -m deployment.tools.hardware_check --stage camera --show
+python -m deployment.tools.hardware_check \
+  --robot-type rm_isf_umi_left \
+  --stage camera \
+  --show
 ```
 
-主从同步会实际驱动从臂，必须确认机器人周围安全、急停可用，并显式传入确认参数：
+遥操作检查会实际驱动从臂。确认工作区清空、急停可用后再运行：
 
 ```bash
-python -m deployment.tools.hardware_check --stage teleop --confirm-move
+python -m deployment.tools.hardware_check \
+  --robot-type rm_isf_umi_left \
+  --stage teleop \
+  --confirm-move
 ```
 
 ## 数据采集
 
-推荐通过根目录包装脚本启动：
+在 [collect.sh](../collect.sh) 顶部设置 `robot_type`，然后运行：
 
 ```bash
-bash collect.sh <name> <single_task> <num_episodes>
+bash collect.sh <name> <task_text> <num_episodes> [teleop|drag] \
+  [drag_gripper_close_value] [reset_before_episode]
 ```
 
 示例：
 
 ```bash
-bash collect.sh rm_tactile_demo "抓笔" 30
+bash collect.sh insert_easy \
+  "insert the object to the hole" 25 drag 0.3 true
 ```
 
-脚本自动生成带时间戳的 repo ID。默认输出：
+输出目录为：
 
 ```text
-playground/data/<timestamp>_<name>/
+playground/data/<robot_type>_<YYYYMMDD>_<name>/
 ```
 
-启用触觉时，触觉会和 wrist camera 一样注册为数据集 video feature。权威
-`uint16` 帧使用无损 FFV1 Matroska，保存在同一个 `videos/` 层级：
+采集引擎把 `robot.robot_type` 原样写入 `meta/info.json.robot_type`。不要在采集后通过目录名推断类型。
 
-```text
-playground/data/<timestamp>_<name>/
-├── videos/
-│   ├── observation.images.left_cam_wrist/chunk-000/file-000.mp4
-│   ├── observation.images.left_cam_finger0/chunk-000/file-000.mkv
-│   ├── observation.images.left_cam_finger1/chunk-000/file-000.mkv
-│   ├── observation.images.right_cam_finger0/chunk-000/file-000.mkv
-│   └── observation.images.right_cam_finger1/chunk-000/file-000.mkv
-└── meta/
-    ├── info.json
-    ├── tactile_encoding.json
-    └── episodes/...
-```
+两种模式的区别：
 
-### 触觉采集编码
+| 模式 | 控制来源 | 遥操作器 |
+| --- | --- | --- |
+| `teleop` | RobotConfig 声明的 leader | 自动创建并校验 |
+| `drag` | 人工拖动从臂 | 不连接 leader |
 
-dmrobotics Flux SDK 的 `getDepth()` 和 `getDeformation2D()` 返回 `float32`。采集进程按
-固定比例和偏置编码成 HWC `uint16`，不根据单个数据集动态计算 min/max：
+`reset_before_episode=true` 时，首个 episode 开始前回到固定 home。录制中按左键重录或右键保存时，会先停止拖动并复位，再清空或提交内存中的 episode；由于机器人已经在 home，下一轮开始前不会重复复位。collect 和 inference 共用这一顺序。`home_joints` 为空时，连接后读取当前关节位置并在本次运行中固定使用；上机前先确认该姿态安全。
+
+## 触觉采集编码
+
+Flux SDK 输出 `float32` depth 和二维 deformation。采集时使用固定比例和偏置编码为 HWC `uint16`：
 
 ```python
-U16[..., 0] = clip(rint(depth    * 1000),         0, 65535)
-U16[..., 1] = clip(rint(deform_x * 1000 + 30000), 0, 65535)
-U16[..., 2] = clip(rint(deform_y * 1000 + 30000), 0, 65535)
+u16[..., 0] = clip(round(depth * 1000), 0, 65535)
+u16[..., 1] = clip(round(deform_x * 1000 + 30000), 0, 65535)
+u16[..., 2] = clip(round(deform_y * 1000 + 30000), 0, 65535)
 ```
 
-通道索引固定为 `0=depth`、`1=deform_x`、`2=deform_y`。物理值解码为：
+固定通道语义为 `depth, deform_x, deform_y`。反解公式为：
 
 ```python
-depth    = U16[..., 0] / 1000
-deform_x = (U16[..., 1] - 30000) / 1000
-deform_y = (U16[..., 2] - 30000) / 1000
+depth = u16[..., 0] / 1000
+deform_x = (u16[..., 1] - 30000) / 1000
+deform_y = (u16[..., 2] - 30000) / 1000
 ```
 
-权威视频格式固定为：
+权威存储格式为：
 
 ```text
-container: Matroska (.mkv)
-codec: FFV1
-pixel format: gbrp16le
-decode format: rgb48le
-dtype/layout: uint16 / HWC
-encoding: tactile_u16_fixed_v1
+encoding:    tactile_u16_fixed_v1
+container:   Matroska (.mkv)
+codec:       FFV1
+pixel format:gbrp16le
+decode:      rgb48le, uint16 HWC
 ```
 
-FFV1 MKV 是后续审计、重新量化和转换的权威数据。解码为 `rgb48le` 后的三个数组通道
-才是上述语义顺序；不要按播放器显示颜色推断通道。`meta/info.json` 会记录触觉 feature、
-codec、pixel format、storage dtype 和视频路径，`meta/tactile_encoding.json` 记录固定比例、
-偏置及通道定义；episode parquet 会像 wrist video 一样记录文件编号和时间范围。
-
-训练前通过 `scripts/process_joint_data.sh` 将权威 MKV 转换成线性 `uint8` MP4，完整步骤、
-量化公式和最终 YUV420 存储约定见 [Workflow Scripts](../scripts/README.md#触觉处理流程)。
-
-重录时尚未提交的触觉 MKV 会一起删除。
-触觉源端推送率由独立的 `--robot.tactile_max_fps` 控制，默认与采集频率一致为 30，
-不会再受鱼眼 `stream_max_fps` 的限速策略影响。
-
-也可以直接调用 Python 入口：
-
-```bash
-python -m deployment.collect \
-  --robot.type=realman_ugripper_dual \
-  --teleop.type=bi_realman_ugripper_leader \
-  --dataset.repo_id=local/$(date +%Y%m%d_%H%M%S)_grab_pen \
-  --dataset.single_task="抓笔" \
-  --dataset.num_episodes=50 \
-  --dataset.fps=30 \
-  --dataset.episode_time_s=60 \
-  --dataset.reset_time_s=15 \
-  --robot.use_tactile=true \
-  --dataset.push_to_hub=false
-```
-
-采集过程中可以提前结束并保存当前 episode。`episode_time_s` 是单集最长时间，`reset_time_s` 是 episode 间人工复位场景的时间。
+不要根据播放器显示颜色判断通道。`meta/info.json` 记录 feature 和视频编码，`meta/tactile_encoding.json` 记录比例、偏置和通道定义。训练前由 `scripts/process_joint_data.sh` 生成 `tactile_u8_linear_v1` 派生视频；原始 MKV 是唯一可用于数值审计和重新量化的来源。
 
 ## Policy 推理
 
 推荐入口：
 
 ```bash
-bash inference.sh \
-  <pretrained_id> <step> [n_action_steps] [action_start_offset]
+bash inference.sh <run_id> <step> [n_action_steps] [action_start_offset]
 ```
 
-`pretrained_id` 是 `playground/results/models/` 下的 run 目录名。脚本加载：
+脚本加载：
 
 ```text
-playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained_model
+playground/results/models/<run_id>/checkpoints/<step_6_digits>/pretrained_model
 ```
 
-示例：
+例如 `step=3000` 会读取 `checkpoints/003000/pretrained_model`。推理录像默认写入 `playground/eval/`。
 
-```bash
-bash inference.sh \
-  rm_umi_dual_pen_open_diffusion_wristonly_false_tactile_none_state_joint \
-  5000
-```
+机器人身份始终归 checkpoint 所有。`deployment.inference` 会在连接硬件前：
 
-Action chunk 覆盖参数：
+1. 读取 checkpoint 的 `robot_type`。
+2. 将启动时的 RobotConfig 替换成对应的注册类型。
+3. 选择匹配的 B/ISF 在线 FK/IK。
+4. 根据 action representation 选择 `joint` 或 `ee` 动作空间。
+5. 在 `match_policy=true` 时同步触觉、额外相机、任务文本和腕部去畸变配置。
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `n_action_steps` | checkpoint 配置 | 每次规划后执行的 action 数量 |
-| `action_start_offset` | checkpoint 配置 | 执行前丢弃的陈旧 action 数量 |
+即使设置 `match_policy=false`，第 1 至 3 步也不会关闭。缺失 `robot_type` 的 checkpoint 不可用于当前真机链路。
 
-实际执行区间为：
+Action chunk 实际执行范围为：
 
 ```text
 chunk[action_start_offset : action_start_offset + n_action_steps]
 ```
 
-必须满足两者之和不大于训练时的 `chunk_size`。
+两者之和必须不超过 checkpoint 的 `chunk_size`。
 
-```bash
-# 执行前 8 个 action
-bash inference.sh <id> 5000 8
+## 腕部去畸变
 
-# 丢弃前 4 个，再执行 8 个
-bash inference.sh <id> 5000 8 4
+采集保存原始鱼眼图像；离线处理先在原始分辨率去畸变并中心裁剪，再缩放到训练尺寸。推理时 `match_policy=true` 根据训练配置启用相同变换，默认裁剪尺寸为 `896`。
+
+标定文件位于：
+
+```text
+tools/calib/x5_left_intrinsics.json
+tools/calib/x5_right_intrinsics.json
 ```
 
-直接调用并自动匹配 checkpoint 的硬件和任务配置：
-
-```bash
-python -m deployment.inference \
-  --robot.type=realman_ugripper_dual \
-  --policy.path=<path_to_pretrained_model> \
-  --dataset.repo_id=local/eval_$(date +%Y%m%d_%H%M%S)_pen \
-  --match_policy=true
-```
-
-推理录制默认保存到 `playground/eval/`。
-
-## Home Joints
-
-连接双臂并读取当前关节位置：
-
-```bash
-python -m deployment.tools.read_home_joints
-```
-
-只读取单臂：
-
-```bash
-python -m deployment.tools.read_home_joints --side left
-python -m deployment.tools.read_home_joints --side right
-```
-
-覆盖 IP：
-
-```bash
-python -m deployment.tools.read_home_joints \
-  --left-ip 192.168.1.200 \
-  --right-ip 192.168.1.201
-```
-
-stdout 输出可以直接用于 `--robot.home_joints` 的参数字符串；逐关节统计写入 stderr。
-
-离线从数据集估计 home joints 的方式见 [scripts/README.md](../scripts/README.md#state-均值)。
-
-## 腕部鱼眼去畸变
-
-如果训练数据经过鱼眼去畸变，推理必须执行相同几何变换。`--match_policy=true` 按以下顺序判定：
-
-1. 读取训练数据集 `meta/info.json` 中的 `undistort` marker 和 crop。
-2. 训练数据不可访问时，根据数据集名称是否包含 `undist` 兜底。
-3. 两者均不满足时关闭去畸变。
-
-在线变换位于 `hardware/wrist_cameras/undistort.py`，标定文件位于同目录的 `calib/`。
-
-手动覆盖：
+手动覆盖仅用于明确知道 checkpoint 图像几何契约的场景：
 
 ```bash
 --robot.undistort_wrist=true
 --robot.undistort_crop=896
 ```
 
-采集阶段没有 policy 可以用于自动判断，因此默认保存原始鱼眼图像。不要在采集端丢弃原始视场；训练前使用 [离线去畸变工具](../tools/README.md#鱼眼去畸变) 生成副本。
+## 安全
+
+- 首次连接使用硬件自检，不直接启动 policy。
+- 复位或遥操作前确认急停有效，机械臂工作区无人且无障碍物。
+- EE 推理初次运行使用较小的 `max_ee_pos_step_m`，观察轨迹后再调整。
+- 不要让 B checkpoint 控制 ISF 机器人，或让单臂 checkpoint 控制双臂机器人；代码会阻止这种错配，不应绕过校验。

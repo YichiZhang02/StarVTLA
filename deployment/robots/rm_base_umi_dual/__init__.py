@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .config_realman_ugripper_dual import RealmanUGripperDualConfig
-from .realman_ugripper_dual import RealmanUGripperDual
+from .config_rm_base_umi_dual import RmBaseUmiDualConfig
+from .rm_base_umi_dual import RmBaseUmiDual
 
-__all__ = ["RealmanUGripperDualConfig", "RealmanUGripperDual"]
+__all__ = ["RmBaseUmiDualConfig", "RmBaseUmiDual"]

@@ -19,11 +19,12 @@
 
 最小命令 (--match-policy 默认开, 硬件与任务自动对齐 checkpoint):
     python -m deployment.inference \
-        --robot.type=realman_ugripper_dual \
+        --robot.type=rm_base_umi_dual \
         --policy.path=playground/results/models/xxx/checkpoints/005000/pretrained_model \
         --dataset.repo_id=eval_pen
 
 --match-policy 会自动:
+    - 机器人类型: 按 checkpoint 的 robot_type 选择 rm_base_umi_dual/rm_isf_umi_left
     - 触觉: 模型用触觉则 use_tactile=true, 否则 false (不连触觉)
     - 相机: 只保留模型实际消费的本地相机 (如模型 wrist_only 则丢掉 cam_top, 不连它)
     - single_task: 从 checkpoint 的 train_config.json -> 训练集 meta/tasks.parquet 自动取
@@ -37,10 +38,11 @@ import logging
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 from deployment._record_engine import RecordConfig, StickyHint, run_record  # noqa: E402
+from deployment.robots import RobotConfig
 from vtla.engine.configs import parser
 
 logger = logging.getLogger(__name__)
@@ -149,8 +151,43 @@ def _resolve_undistort(cfg: InferenceConfig) -> None:
                 f"(crop={cfg.robot.undistort_crop}) <- {why}")
 
 
+def _replace_robot_config(cfg: InferenceConfig, target_cls) -> None:
+    """Replace robot config while retaining type-compatible shared CLI settings."""
+    source = cfg.robot
+    source_fields = {field.name: field for field in fields(source)}
+    kwargs = {}
+    for target_field in fields(target_cls):
+        source_field = source_fields.get(target_field.name)
+        if (
+            target_field.init
+            and source_field is not None
+            and source_field.type == target_field.type
+        ):
+            kwargs[target_field.name] = getattr(source, target_field.name)
+    cfg.robot = target_cls(**kwargs)
+
+
+def _resolve_robot_type(cfg: InferenceConfig) -> None:
+    """Match the robot adapter and B/ISF kinematics to checkpoint robot_type."""
+    checkpoint_type = getattr(cfg.policy, "robot_type", None)
+    target_cls = RobotConfig.get_kinematics_config_class(checkpoint_type)
+    old_type = cfg.robot.type
+    if not isinstance(cfg.robot, target_cls):
+        _replace_robot_config(cfg, target_cls)
+        logger.info(
+            "[match-policy] robot.type: %s -> %s <- checkpoint",
+            old_type,
+            cfg.robot.type,
+        )
+    logger.info(
+        "[match-policy] kinematics=%s <- checkpoint robot_type=%s",
+        RobotConfig.get_kinematics_force_type(checkpoint_type).upper(),
+        checkpoint_type,
+    )
+
+
 def _apply_match_policy(cfg: InferenceConfig) -> None:
-    """按 checkpoint 把机器人硬件 + single_task 对齐到模型实际所需。"""
+    """按 checkpoint 把传感器、任务和动作空间对齐到模型实际所需。"""
     in_feats = set(cfg.policy.input_features or {})
     uses = lambda sub: any(sub in k for k in in_feats)  # noqa: E731
 
@@ -212,7 +249,7 @@ def _resolve_action_space(cfg: InferenceConfig) -> None:
             raise ValueError(
                 f"checkpoint 的 action_representation={representation} 需要 EE 动作空间, 但机器人 "
                 f"'{getattr(cfg.robot, 'type', cfg.robot)}' 不支持 action_space 字段。"
-                "请使用支持 EE 的机器人 (如 realman_ugripper_dual/realman_ugripper_left)。"
+                "请使用支持 EE 的机器人 (rm_base_umi_dual/rm_isf_umi_left)。"
             )
         return
     cfg.robot.action_space = "ee" if needs_ee else "joint"
@@ -227,6 +264,9 @@ def inference(cfg: InferenceConfig):
         raise ValueError("inference 需要模型: 请指定 --policy.path=.../pretrained_model")
     if cfg.teleop is not None:
         raise ValueError("inference 是纯推理入口, 不要 --teleop.*; 采数据请用 `python -m deployment.collect`")
+    # Robot identity is always checkpoint-owned. It cannot be disabled through
+    # match_policy because a B/ISF mismatch changes both online FK and IK.
+    _resolve_robot_type(cfg)
     if cfg.match_policy:
         _apply_match_policy(cfg)
 

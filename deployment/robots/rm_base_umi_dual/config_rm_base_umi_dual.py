@@ -32,16 +32,21 @@ observation / action 字段统一加 left_ / right_ 前缀:
 """
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from deployment.hardware.top_cameras import OpenCVTopCameraConfig
 
 from ..config import RobotConfig
 
 
-@RobotConfig.register_subclass("realman_ugripper_dual")
+@RobotConfig.register_subclass("rm_base_umi_dual")
 @dataclass
-class RealmanUGripperDualConfig(RobotConfig):
+class RmBaseUmiDualConfig(RobotConfig):
     """睿尔曼 RM75b 双臂 (ugripper) 配置。"""
+
+    kinematics_force_type: ClassVar[str] = "base"
+    kinematics_sides: ClassVar[tuple[str, ...]] = ("right", "left")
+    teleop_type: ClassVar[str] = "bi_realman_ugripper_leader"
 
     # ============ 启用的手臂 ============
     # 可选 ["left"], ["right"], 或 ["left", "right"]
@@ -179,3 +184,8 @@ class RealmanUGripperDualConfig(RobotConfig):
     # 需要做"中心裁剪到 4:3"的相机名 (居中裁出 宽:高 = 4:3 的区域)。
     # cam_top 1920x1080 -> 1440x1080。
     crop_4_3_cameras: list[str] = field(default_factory=lambda: ["cam_top"])
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.arms != ["left", "right"]:
+            raise ValueError("rm_base_umi_dual requires arms=['left', 'right']")

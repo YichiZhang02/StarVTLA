@@ -18,7 +18,7 @@
 睿尔曼 RM75b 双臂主臂遥操作器配置
 
 两条主臂通过 USB 串口读取关节位置, 输出加 left_ / right_ 前缀的动作,
-与 realman_ugripper_dual 机器人的 action 字段对齐。
+与 rm_base_umi_dual 机器人的 action 字段对齐。
 
 夹爪: 主臂原始读数 (约 [min, max], min=夹紧 / max=张开) 归一化到 [0,1] (1=张开),
 与机器人 *_main_gripper 同坐标系。

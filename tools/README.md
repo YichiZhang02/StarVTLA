@@ -1,124 +1,156 @@
 # Offline Tools
 
-`tools/` 保存可以单独运行的数据和模型准备工具。除特别说明外，命令均从仓库根目录执行。
+`tools/` 包含可独立调用的数据集和模型准备工具。命令均从仓库根目录运行；日常完整流程优先使用 [scripts/README.md](../scripts/README.md) 中的包装脚本。
 
 ## 工具索引
 
 | 工具 | 用途 |
 | --- | --- |
-| `undistort_dataset_videos.py` | 腕部鱼眼视频去畸变和中心裁剪 |
-| `downscale_dataset_videos.py` | 降低 RGB 视频分辨率，保留触觉无损视频 |
-| `convert_joints_to_eepose.py` | 通过 FK 为关节数据集生成 EE 列 |
-| `convert_umi_to_eepose.py` | 为 UMI pose 数据生成统一 EE 列 |
+| `undistort_dataset_videos.py` | 腕部鱼眼去畸变和中心裁剪 |
+| `tactile_uint16_to_uint8.py` | 权威 `uint16` 触觉转训练用 `uint8` |
+| `downscale_dataset_videos.py` | 缩放视觉和训练用触觉视频 |
+| `convert_joints_to_eepose.py` | 根据严格 `robot_type` 使用 FK 生成 EE 列 |
+| `convert_umi_to_eepose.py` | 从已有 UMI pose 生成统一 EE 列 |
 | `merge_datasets.py` | 对齐公共 feature 并合并 LeRobot 数据集 |
-| `compute_dataset_mean_state.py` | 统计 state 均值和范围 |
-| `generate_interpolated_dit.py` | 从本地 Wan2.2 Video DiT 生成插值 DiT 骨干 |
-| `precompute_world_model_text_embeddings.py` | 为 FastWAM 数据集预计算文本 embedding |
+| `compute_dataset_mean_state.py` | 统计 state 和 home joint 候选 |
+| `generate_interpolated_dit.py` | 从 Wan2.2 权重生成插值 DiT |
+| `precompute_world_model_text_embeddings.py` | 预计算 FastWAM 文本 embedding |
 
-## 推荐数据处理顺序
+## 推荐顺序
 
-腕部相机使用鱼眼镜头时，应先在原始分辨率去畸变和裁剪，再降低分辨率：
+关节采集数据：
 
 ```text
-原始数据集
-  -> undistort_dataset_videos.py
+undistort_dataset_videos.py
+  -> tactile_uint16_to_uint8.py（有 raw 触觉时）
   -> downscale_dataset_videos.py
-  -> convert_joints_to_eepose.py 或 convert_umi_to_eepose.py
+  -> convert_joints_to_eepose.py
 ```
 
-不要先把全幅鱼眼图像缩到 `256x256` 再去畸变，否则会损失细节并改变中心裁剪视场。
-
-日常使用可以直接运行封装后的 [scripts/process_joint_data.sh](../scripts/process_joint_data.sh) 或 [scripts/process_umi_data.sh](../scripts/process_umi_data.sh)。
+UMI pose 数据将最后一步替换为 `convert_umi_to_eepose.py`。鱼眼视频必须先在原始分辨率去畸变和裁剪，再缩放；反向顺序会改变视场并损失细节。
 
 ## 鱼眼去畸变
 
-该工具只重编码指定的腕部 RGB 相机。触觉 finger 视频和其他相机原样复制，同时更新目标数据集的图像 feature 信息。
-
-快速视觉检查：
-
 ```bash
 python tools/undistort_dataset_videos.py \
-  --src playground/data/rm_umi_dual_pen_open \
-  --test
-```
-
-完整处理：
-
-```bash
-python tools/undistort_dataset_videos.py \
-  --src playground/data/rm_umi_dual_pen_open \
-  --dst playground/data/rm_umi_dual_pen_open_undist \
+  --src playground/data/<dataset_id> \
+  --dst playground/data/<dataset_id>_undist \
   --crop 896 \
   --jobs 8 \
   --verify
 ```
 
-默认标定文件位于：
+默认只重编码腕部 RGB，相机以外的视频原样复制。标定文件为：
 
 ```text
 tools/calib/x5_left_intrinsics.json
 tools/calib/x5_right_intrinsics.json
 ```
 
-`--calib` 可以接收单个 JSON，也可以使用 `camera=path` 形式覆盖多路标定。常用参数还包括 `--cameras`、`--gop`、`--crf`、`--codec`、`--gpu-decode` 和 `--overwrite`。
+使用 `--test` 可只生成快速视觉检查，不写目标数据集。`--calib`、`--cameras`、`--gop`、`--crf`、`--codec` 和 `--gpu-decode` 可覆盖默认处理参数。
 
-工具需要 `ffmpeg`、`ffprobe` 和 OpenCV。
+## 触觉转换
 
-## 视频降分辨率
+原地转换：
 
-RGB 视频被重编码到指定正方形尺寸，帧数、fps 和时间戳保持不变。16-bit 无损触觉视频原样复制，避免量化损坏。
+```bash
+python tools/tactile_uint16_to_uint8.py \
+  --root playground/data/<dataset_id> \
+  --jobs 4
+```
+
+保留源数据并创建副本：
+
+```bash
+python tools/tactile_uint16_to_uint8.py \
+  --src playground/data/<dataset_id> \
+  --dst playground/data/<dataset_id>_uint8
+```
+
+工具只接受项目定义的 raw 触觉编码，按固定范围生成 `tactile_u8_linear_v1`，并更新数据集元数据。量化公式和可逆性说明见 [Workflow Scripts](../scripts/README.md#触觉处理标准)。
+
+## 视频缩放
+
+原地模式：
 
 ```bash
 python tools/downscale_dataset_videos.py \
-  --src playground/data/rm_umi_dual_pen_open_undist \
-  --dst playground/data/rm_umi_dual_pen_open_undist_256 \
+  --root playground/data/<dataset_id> \
   --size 256 \
   --jobs 8 \
   --verify
 ```
 
-默认使用 `libx264`、CRF 18 和 GOP 4。小 GOP 可以降低训练期间随机 seek 的成本。A100 等数据中心 GPU 通常没有 NVENC，保持 CPU 编码即可。
+副本模式：
 
-## 生成 EE Pose 列
+```bash
+python tools/downscale_dataset_videos.py \
+  --src playground/data/<dataset_id> \
+  --dst playground/data/<dataset_id>_256 \
+  --size 256
+```
 
-关节数据通过睿尔曼 FK 生成 EE pose：
+默认 RGB 编码为 `libx264`、CRF 18、GOP 4。raw `uint16` 触觉不会被当作普通 RGB 缩放；应先按触觉标准生成训练用 `uint8`。
+
+## Joint-to-EE
+
+原地生成：
 
 ```bash
 python tools/convert_joints_to_eepose.py \
-  --root playground/data/rm_umi_dual_pen_open \
+  --root playground/data/<dataset_id> \
   --horizon 32
 ```
 
-UMI 数据直接转换已有的末端位姿：
+副本模式：
+
+```bash
+python tools/convert_joints_to_eepose.py \
+  --src playground/data/<dataset_id> \
+  --dst playground/data/<dataset_id>_ee \
+  --horizon 32
+```
+
+FK 类型只从 `meta/info.json.robot_type` 读取。工具没有 `--robot-type` 参数，也不会从目录名、关节数或默认值猜测 B/ISF。它检测 feature 中完整的关节和夹爪并严格校验：
+
+| `robot_type` | 允许的臂 | joint 输入维度 | rot6d EE | quaternion EE |
+| --- | --- | ---: | ---: | ---: |
+| `rm_base_umi_dual` | right + left | 16 | 20 | 16 |
+| `rm_isf_umi_left` | left | 8 | 10 | 8 |
+
+每臂布局：
+
+```text
+joint:  [joint1..joint7, gripper]                    8
+rot6d:  [xyz, rotation_matrix_col0, col1, gripper] 10
+quat:   [xyz, qx, qy, qz, qw, gripper]              8
+```
+
+双臂输出顺序为 right 后 left。工具保留原关节列，并增加：
+
+| 列 | 语义 |
+| --- | --- |
+| `observation.state_episode_joint` | 相对 episode 首帧的 joint state |
+| `observation.state_episode_ee` | 相对 episode 首帧的 rot6d EE state |
+| `action_episode_ee` | episode 坐标系 rot6d action |
+| `observation.state_absolute_ee` | robot base 坐标系 rot6d EE state |
+| `action_absolute_ee` | robot base 坐标系 rot6d action |
+| `observation.state_episode_quat` | 相对 episode 首帧的 quaternion EE state |
+| `action_episode_quat` | episode 坐标系 quaternion action |
+| `observation.state_absolute_quat` | robot base 坐标系 quaternion EE state |
+| `action_absolute_quat` | robot base 坐标系 quaternion action |
+
+相对 action 的统计也会写入 `meta/stats.json` 和 episode metadata。`horizon` 必须覆盖训练时可能使用的 action chunk 长度。
+
+## UMI-to-EE
 
 ```bash
 python tools/convert_umi_to_eepose.py \
-  --root playground/data/rm_umi_dual_pen_open \
+  --root playground/data/<dataset_id> \
   --horizon 32
 ```
 
-使用 `--root` 会原地修改数据集。需要保留源副本时使用：
-
-```bash
-python tools/convert_joints_to_eepose.py \
-  --src playground/data/source \
-  --dst playground/data/source_with_ee
-```
-
-两种工具都会生成 rot6d 和 quaternion 表示及其归一化统计。主要列包括：
-
-| 列 | 维度 | 语义 |
-| --- | --- | --- |
-| `observation.state_episode_ee` | 20 | episode 相对 rot6d state |
-| `observation.state_absolute_ee` | 20 | base 坐标系 rot6d state |
-| `action_episode_ee` | 20 | episode 相对 rot6d action |
-| `observation.state_episode_quat` | 16 | episode 相对 quaternion state |
-| `observation.state_absolute_quat` | 16 | base 坐标系 quaternion state |
-| `action_episode_quat` | 16 | episode 相对 quaternion action |
-| `action_relative_ee` | 20 | rot6d 相对 action 的统计列 |
-| `action_relative_quat` | 16 | quaternion 相对 action 的统计列 |
-
-这些列对应的训练配置见 [vtla/README.md 的 EE 模式](../vtla/README.md#ee-模式)。
+该工具读取已有末端位姿，不调用 RealMan FK。它生成与 joint-to-EE 相同的 rot6d/quaternion 数据契约，适用于真正的 UMI pose 数据，不用于当前 8/16 维 joint 采集数据。
 
 ## 合并数据集
 
@@ -129,13 +161,11 @@ python tools/merge_datasets.py \
   --repo-id A_B_merged
 ```
 
-工具先计算所有输入数据集的公共 feature，创建临时对齐副本，再合并为一个 LeRobot 数据集。默认拒绝覆盖已有输出。
-
-固定批次工作流也可以通过 [scripts/merge_datasets.sh](../scripts/merge_datasets.sh) 执行。
+工具以 dtype 和 shape 为准取公共 feature，为有额外 feature 的输入创建临时对齐副本，再执行聚合。源数据不修改，已有输出不会被覆盖。聚合要求输入的 `fps` 和 `robot_type` 完全一致，因此不能混合 B/ISF 或单/双臂数据。
 
 ## State 统计
 
-按 episode 首帧统计 home pose 候选：
+各 episode 首帧：
 
 ```bash
 python tools/compute_dataset_mean_state.py \
@@ -143,7 +173,7 @@ python tools/compute_dataset_mean_state.py \
   --frames first
 ```
 
-统计全部帧：
+所有帧和指定 feature：
 
 ```bash
 python tools/compute_dataset_mean_state.py \
@@ -152,14 +182,11 @@ python tools/compute_dataset_mean_state.py \
   --state-key observation.state
 ```
 
-## 生成插值 DiT
+对 joint state 使用 `first` 时，stdout 输出可作为 `--robot.home_joints`；详细均值、标准差和范围写入 stderr。
 
-该工具只读取本地官方 Wan2.2 Video DiT 分片，不下载或处理 VAE、T5 和 tokenizer。
+## FastWAM 资产
 
-输入目录必须包含：
-
-- 三个 `diffusion_pytorch_model-*-of-*.safetensors` 分片。
-- 记录官方 repo 和 commit 的 `fastwam_source.json`。
+从本地 Wan2.2 Video DiT 生成插值骨干：
 
 ```bash
 python tools/generate_interpolated_dit.py \
@@ -168,18 +195,9 @@ python tools/generate_interpolated_dit.py \
   --dtype bfloat16
 ```
 
-默认输出：
+默认输出到输入目录的 `interpolated_dit/`。输入必须包含官方权重分片和记录来源的 `fastwam_source.json`；工具不下载 VAE、T5 或 tokenizer。
 
-```text
-playground/pretrained_models/Wan2.2-TI2V-5B/interpolated_dit/
-└── InterpolatedDiT_from_official_Wan2.2_alphascale_1024hdim.pt
-```
-
-已有输出需要重新生成时增加 `--overwrite`。默认启用 alpha scaling；`--no-alpha-scaling` 用于显式关闭。
-
-## 预计算文本 Embedding
-
-FastWAM 训练前，为数据集的任务文本生成 UMT5 embedding：
+为数据集任务文本生成 Wan2.2 embedding：
 
 ```bash
 python tools/precompute_world_model_text_embeddings.py \
@@ -188,10 +206,4 @@ python tools/precompute_world_model_text_embeddings.py \
   --device cuda
 ```
 
-输出位于：
-
-```text
-playground/data/<dataset_id>/text_embeddings/wan22/
-```
-
-`train.sh` 在 FastWAM 模式下会检查该缓存并在缺失时自动生成。任意任务文本推理仍需要加载文本 encoder。
+输出位于 `playground/data/<dataset_id>/text_embeddings/wan22/`。FastWAM 训练要求该目录中存在 manifest 和 safetensors 缓存。

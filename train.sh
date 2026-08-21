@@ -41,7 +41,7 @@ visualization_enabled=${VISUALIZATION_ENABLED:-true}
 # 保存的模型/日志名拼接规则
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_aug_${augmentation_mode}"
 # 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
-run_name="$(date +%Y%m%d_%H%M%S)_${dataset_id}_${policy_type}_${policy_suffix}"
+run_name="$(date +%Y%m%d)_${dataset_id}_${policy_type}_${policy_suffix}"
 
 # 路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)
 dataset_root=playground/data

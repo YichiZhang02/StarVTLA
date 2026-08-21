@@ -49,7 +49,7 @@ class _LeftLeaderReader(threading.Thread):
 
 
 class LeftRealmanUGripperLeader(Teleoperator):
-    """输出与 realman_ugripper_left 对齐的 8 维 left_* 动作。"""
+    """输出与 rm_isf_umi_left 对齐的 8 维 left_* 动作。"""
 
     config_class = LeftRealmanUGripperLeaderConfig
     name = "left_realman_ugripper_leader"

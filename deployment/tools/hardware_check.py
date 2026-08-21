@@ -43,8 +43,8 @@ import termios
 import time
 import tty
 
-from deployment.robots.realman_ugripper_dual import RealmanUGripperDualConfig
-from deployment.robots.realman_ugripper_left import RealmanUGripperLeftConfig
+from deployment.robots.rm_base_umi_dual import RmBaseUmiDualConfig
+from deployment.robots.rm_isf_umi_left import RmIsfUmiLeftConfig
 from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
 from deployment.teleoperators.left_realman_ugripper_leader import LeftRealmanUGripperLeaderConfig
 
@@ -70,25 +70,25 @@ def header(title):
 
 # ---------------- 按臂取配置 ----------------
 def follower_ip(cfg, side):
-    if isinstance(cfg, RealmanUGripperLeftConfig):
+    if isinstance(cfg, RmIsfUmiLeftConfig):
         return cfg.follower_ip
     return cfg.left_follower_ip if side == "left" else cfg.right_follower_ip
 
 
 def board_ip(cfg, side):
-    if isinstance(cfg, RealmanUGripperLeftConfig):
+    if isinstance(cfg, RmIsfUmiLeftConfig):
         return cfg.board_ip
     return cfg.left_board_ip if side == "left" else cfg.right_board_ip
 
 
 def fisheye_udp_port(cfg, side):
-    if isinstance(cfg, RealmanUGripperLeftConfig):
+    if isinstance(cfg, RmIsfUmiLeftConfig):
         return cfg.fisheye_udp_port
     return cfg.left_fisheye_udp_port if side == "left" else cfg.right_fisheye_udp_port
 
 
 def tactile_pc_ports(cfg, side):
-    if isinstance(cfg, RealmanUGripperLeftConfig):
+    if isinstance(cfg, RmIsfUmiLeftConfig):
         return cfg.tactile0_pc_port, cfg.tactile1_pc_port
     if side == "left":
         return cfg.left_tactile0_pc_port, cfg.left_tactile1_pc_port
@@ -96,7 +96,7 @@ def tactile_pc_ports(cfg, side):
 
 
 def gripper_itinerary(cfg, side):
-    if isinstance(cfg, RealmanUGripperLeftConfig):
+    if isinstance(cfg, RmIsfUmiLeftConfig):
         return cfg.gripper_itinerary
     return cfg.left_gripper_itinerary if side == "left" else cfg.right_gripper_itinerary
 
@@ -440,8 +440,8 @@ def main():
     ap = argparse.ArgumentParser(description="睿尔曼 ugripper 硬件自检")
     ap.add_argument(
         "--robot-type",
-        choices=["realman_ugripper_dual", "realman_ugripper_left"],
-        default="realman_ugripper_dual",
+        choices=["rm_base_umi_dual", "rm_isf_umi_left"],
+        default="rm_base_umi_dual",
     )
     ap.add_argument("--stage", choices=["existence", "camera", "teleop", "all"], default="existence")
     ap.add_argument("--arms", default=None, help="逗号分隔, 如 left,right (默认取 config)")
@@ -456,10 +456,10 @@ def main():
     ap.add_argument("--no-gripper", action="store_true", help="阶段3 不连/不同步从臂夹爪")
     args = ap.parse_args()
 
-    cfg = (RealmanUGripperLeftConfig() if args.robot_type == "realman_ugripper_left"
-           else RealmanUGripperDualConfig())
+    cfg = (RmIsfUmiLeftConfig() if args.robot_type == "rm_isf_umi_left"
+           else RmBaseUmiDualConfig())
     tcfg = (LeftRealmanUGripperLeaderConfig()
-            if isinstance(cfg, RealmanUGripperLeftConfig)
+            if isinstance(cfg, RmIsfUmiLeftConfig)
             else BiRealmanUGripperLeaderConfig())
     if args.left_port:
         if isinstance(tcfg, LeftRealmanUGripperLeaderConfig):
@@ -468,10 +468,10 @@ def main():
             tcfg.left_port = args.left_port
     if args.right_port and isinstance(tcfg, BiRealmanUGripperLeaderConfig):
         tcfg.right_port = args.right_port
-    default_arms = ["left"] if isinstance(cfg, RealmanUGripperLeftConfig) else list(cfg.arms)
+    default_arms = ["left"] if isinstance(cfg, RmIsfUmiLeftConfig) else list(cfg.arms)
     arms = args.arms.split(",") if args.arms else default_arms
-    if isinstance(cfg, RealmanUGripperLeftConfig) and arms != ["left"]:
-        ap.error("realman_ugripper_left 只支持 --arms left")
+    if isinstance(cfg, RmIsfUmiLeftConfig) and arms != ["left"]:
+        ap.error("rm_isf_umi_left 只支持 --arms left")
     use_tactile = cfg.use_tactile and not args.no_tactile
 
     print(f"自检目标: arms={arms}, use_tactile={use_tactile}, stage={args.stage}")

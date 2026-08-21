@@ -88,6 +88,10 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # VLA 语言指令, 不再依赖训练数据集是否还在。多任务/旧 checkpoint 为 None。
     single_task: str | None = None
 
+    # Physical robot/kinematics identity copied from dataset meta/info.json during training.
+    # Inference uses it to select both the robot adapter and the matching RealMan B/ISF FK.
+    robot_type: str | None = None
+
     # 执行 action chunk 时跳过的前 N 个动作: 实际执行 chunk[offset : offset + n_action_steps]。
     # 0 = 现有行为 (从 chunk 头部取)。用于丢掉 chunk 前段还没"跟上"当前观测的动作 (推理专用旋钮,
     # 训练无关)。仅 chunking 类策略消费。老 checkpoint 的 config.json 无此字段时由此默认值补 0,

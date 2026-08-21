@@ -7,10 +7,14 @@ import pyarrow.parquet as pq
 import torch
 from scipy.spatial.transform import Rotation as R
 
-from deployment.robots.realman_ugripper_left.config_realman_ugripper_left import (
-    RealmanUGripperLeftConfig,
+from deployment.robots.rm_isf_umi_left.config_rm_isf_umi_left import (
+    RmIsfUmiLeftConfig,
 )
-from deployment.robots.realman_ugripper_left.realman_ugripper_left import RealmanUGripperLeft
+from deployment.robots.rm_base_umi_dual.config_rm_base_umi_dual import (
+    RmBaseUmiDualConfig,
+)
+from deployment.robots.rm_isf_umi_left.rm_isf_umi_left import RmIsfUmiLeft
+from deployment.robots import RobotConfig
 from vtla.engine.processor.relative_action_processor import (
     ACTION_ANCHOR,
     AbsoluteActionsProcessorStep,
@@ -72,6 +76,8 @@ class InferenceRobotActionTest(unittest.TestCase):
                     state_feature_names=self.state_names,
                     representation=representation,
                     n_arms=1,
+                    # This legacy fixture's EE columns were generated with B FK.
+                    robot_type=RobotConfig.get_choice_name(RmBaseUmiDualConfig),
                 )
                 observation = anchor_step.observation({OBS_STATE: raw_state.clone()})
                 anchor = observation[ACTION_ANCHOR].unsqueeze(0)
@@ -102,7 +108,7 @@ class InferenceRobotActionTest(unittest.TestCase):
     def test_all_dataset_ee_targets_have_valid_realman_ik(self):
         from Robotic_Arm.rm_ctypes_wrap import rm_inverse_kinematics_params_t
 
-        algo = make_realman_algo()
+        algo = make_realman_algo("base")
         max_position_error = 0.0
         max_rotation_error = 0.0
 
@@ -145,8 +151,8 @@ class InferenceRobotActionTest(unittest.TestCase):
                 return 0
 
         row = self.rows[0]
-        robot = RealmanUGripperLeft(
-            RealmanUGripperLeftConfig(
+        robot = RmIsfUmiLeft(
+            RmIsfUmiLeftConfig(
                 action_space="ee",
                 use_tactile=False,
                 max_ee_pos_step_m=None,
@@ -161,7 +167,7 @@ class InferenceRobotActionTest(unittest.TestCase):
         robot._send_action_ee(action)
 
         target_joints = np.asarray(row[ACTION][:7], dtype=np.float64)
-        expected_pose = make_realman_algo().rm_algo_forward_kinematics(
+        expected_pose = make_realman_algo("base").rm_algo_forward_kinematics(
             np.degrees(target_joints).tolist(), flag=0
         )
         np.testing.assert_allclose(follower.pose, expected_pose, atol=2e-6, rtol=2e-6)

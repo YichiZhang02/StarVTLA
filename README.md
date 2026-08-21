@@ -1,29 +1,55 @@
 # StarVTLA
 
-VTLA 训练与部署基础设施，覆盖触觉 backbone 预训练、机器人数据处理、ACT/Diffusion/pi05/StarVLA-GR00T/DINOAlign/FastWAM 策略训练，以及真机采集和推理。
+StarVTLA 是面向视觉、触觉和机器人动作学习的训练与真机部署仓库。它包含 LeRobot 数据采集与处理、ACT/Diffusion/pi05/StarVLA-GR00T/FastWAM 策略训练、触觉 MAE 预训练，以及 RealMan 机械臂的在线推理。
 
-## Repository Layout
+## 支持的机器人
+
+机器人身份是数据和模型契约的一部分。目前只支持以下两个严格名称：
+
+| `robot_type` | 构型 | RealMan FK/IK | 遥操作器 |
+| --- | --- | --- | --- |
+| `rm_base_umi_dual` | base/B 版双臂 + UMI 夹爪 | `RM_MODEL_RM_B_E` | `bi_realman_ugripper_leader` |
+| `rm_isf_umi_left` | ISF 版单左臂 + UMI 夹爪 | `RM_MODEL_RM_ISF_E` | `left_realman_ugripper_leader` |
+
+旧名称、缺失值和未知名称不会被猜测或自动迁移。B 与 ISF 的 FK/IK 不同，错误的 `robot_type` 会产生错误的 EE 数据或动作，因此整个链路只允许一个权威来源：
 
 ```text
-.
-├── vtla/          # 数据、配置、处理管线和 policy 实现
-├── deployment/    # 硬件、采集和推理
-├── scripts/       # 训练与数据处理工作流
-├── tools/         # 可独立运行的离线工具
-├── playground/    # 数据、权重、训练结果和评测录制
-├── train.sh       # VTLA policy 训练入口
-├── collect.sh     # 真机数据采集入口
-└── inference.sh   # 真机 policy 推理入口
+collect: robot config.type
+  -> dataset meta/info.json: robot_type
+  -> process_joint_data: 选择 B/ISF FK，并校验单臂/双臂布局
+  -> train: 写入 checkpoint config.json: robot_type
+  -> inference: 从 checkpoint 选择 RobotConfig、FK 和 IK
 ```
 
-所有运行时路径都相对于仓库根目录，并统一放在 `playground/`。`scripts/*.sh` 会自动切换到仓库根后再执行。
+## 目录
 
-## Quick Start
+```text
+deployment/   真机配置、硬件接口、采集和推理
+scripts/      数据处理和训练工作流脚本
+tools/        可独立调用的离线数据工具
+vtla/         数据集、processor 和 policy 实现
+playground/   本地数据、预训练权重、训练结果和评测录像
+collect.sh    采集入口
+train.sh      policy 训练入口
+inference.sh  真机推理入口
+```
 
-创建环境并安装依赖：
+所有仓库脚本都以仓库根目录为运行基准。运行资产默认位于：
+
+```text
+playground/data/<dataset_id>
+playground/pretrained_models/<model>
+playground/results/models/<run_id>
+playground/results/backbones/<run_id>
+playground/eval/<eval_id>
+```
+
+## 环境
+
+建议使用 Python 3.11 或更高版本。Python 3.10 仍可能运行，但部分依赖会发出版本警告。
 
 ```bash
-conda create -n vtla python=3.10 -y
+conda create -n vtla python=3.11 -y
 conda activate vtla
 
 pip install torch torchvision torchaudio \
@@ -31,94 +57,85 @@ pip install torch torchvision torchaudio \
 pip install -r requirements.txt
 ```
 
+真机运行还需要把厂商 SDK 放到 `deployment/sdk/`；具体目录见 [Deployment](deployment/README.md#厂商-sdk)。视频处理依赖 `ffmpeg` 和 `ffprobe`。
 
+## 完整工作流
 
+### 1. 采集
 
-将数据和预训练权重放入 `playground/`。完整目录和文件约定见 [playground/README.md](playground/README.md)。
-
-## Tactile Data
-
-Flux 触觉采集首先将 SDK 的 `float32` depth/deformation 固定编码为 HWC `uint16`：depth
-乘 `1000`，两路 deformation 乘 `1000` 后加 `30000`。权威数据使用无损
-`FFV1/gbrp16le` MKV，与 wrist camera 一样保存在数据集 `videos/` 下。
-
-训练前运行 `scripts/process_joint_data.sh`：它将 depth `0..1000` 和 deformation
-`30000 ± 1000` 线性量化到 uint8，先生成无损 RGB 中间 MP4，再与视觉视频一起 resize，
-最终保存为便于训练和播放的 H.264/YUV420 MP4。最终 uint8 是近似派生数据，不替代原始
-uint16 MKV。采集格式见 [Deployment](deployment/README.md#触觉采集编码)，处理细节见
-[Workflow Scripts](scripts/README.md#触觉处理流程)。
-
-
-## Training
-预处理数据：
-```bash
-# 关节数据：去畸变、触觉 uint8、缩放所有视频、生成 EE 列
-bash scripts/process_joint_data.sh <dataset_id>
-
-# UMI 数据：去畸变、缩放、生成 EE 列
-bash scripts/process_umi_data.sh <dataset_id>
-```
-
-训练触觉 Backbone：
+先在 [collect.sh](collect.sh) 中设置唯一的 `robot_type`，再运行：
 
 ```bash
-bash scripts/train_enc.sh <dataset_id> <init_mode> <model size>
+bash collect.sh <name> <task_text> <num_episodes> [teleop|drag]
 ```
 
-训练 VTLA：
+`deployment.collect` 从 RobotConfig 注册表校验类型，并自动选择该机器人声明的遥操作器。采集结果的 `meta/info.json` 会记录完全相同的 `robot_type`。
+
+### 2. 处理关节数据
+
+```bash
+bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
+```
+
+脚本保留原始数据，依次执行鱼眼去畸变、触觉 `uint16 -> uint8` 派生转换、视频缩放和 joint-to-EE。FK 类型只能来自数据集的 `robot_type`，没有命令行覆盖参数。
+
+当前两个 ISF 数据集已经使用新名称，可直接处理：
+
+```bash
+bash scripts/process_joint_data.sh \
+  rm_isf_umi_left_20260820_insert_easy_precise 256 32
+
+bash scripts/process_joint_data.sh \
+  rm_isf_umi_left_20260820_insert_easy_robust 256 32
+```
+
+### 3. 训练
 
 ```bash
 bash train.sh \
-  <dataset_id> <poilcy_type> <num_gpu> <batch_size> <training step>
+  <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
+  <wrist_only> <tactile_mode> <state_mode> <action_mode> \
+  <augmentation_mode>
 ```
 
-`train.sh` 的第 8、9 个参数分别控制 state/action 数据契约：
-
-```text
-state_mode:  none | absolute_joint | episode_joint | absolute_rot6d |
-             episode_rot6d | absolute_quat | episode_quat
-action_mode: absolute_joint | relative_joint | absolute_rot6d |
-             relative_rot6d | absolute_quat | relative_quat
-```
-
-例如，无 proprioception 输入、预测相对当前观测的 rot6d EE 动作：
+关节动作示例：
 
 ```bash
-bash train.sh <dataset_id> pi05 1 32 10000 false none none relative_rot6d
+bash train.sh <dataset_id> starvla_groot 1 4 10000 \
+  true none absolute_joint absolute_joint none
 ```
 
-## Collection and Inference
-硬件检查：
+相对 EE 动作示例：
 
 ```bash
-python -m deployment.tools.hardware_check
+bash train.sh <processed_dataset_id> starvla_groot 1 4 10000 \
+  true none absolute_rot6d relative_rot6d none
 ```
 
-采集真机数据：
+训练会校验数据集的臂布局，并把 `robot_type` 写入每个 checkpoint 的 policy config。
+
+### 4. 推理
+
 ```bash
-bash collect.sh <name> <single_task> <num_episodes>
+bash inference.sh <run_id> <step> [n_action_steps] [action_start_offset]
 ```
 
-真机推理：
-```bash
-bash inference.sh <pretrained_id> <step>
-```
+`inference.sh` 中的初始 `--robot.type` 只是 Draccus 解析所需的启动配置。实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。EE checkpoint 会自动启用与其 B/ISF 构型匹配的在线 FK/IK。
 
-## Detailed Documentation
+## 文档
 
-| 任务 | 入口 | 文档 |
-| --- | --- | --- |
-| 准备数据和权重 | `playground/` | [Runtime layout](playground/README.md) |
-| 训练 VTLA policy | `train.sh` | [VTLA training](vtla/README.md) |
-| 训练触觉 backbone | `scripts/train_enc.sh` | [Workflow scripts](scripts/README.md#触觉-backbone-训练) |
-| 处理关节或 UMI 数据 | `scripts/process_*_data.sh` | [Workflow scripts](scripts/README.md) |
-| 运行单项离线工具 | `tools/*.py` | [Offline tools](tools/README.md) |
-| 硬件检查与数据采集 | `deployment/`、`collect.sh` | [Deployment](deployment/README.md) |
-| Policy 推理 | `inference.sh` | [Policy inference](deployment/README.md#policy-推理) |
+| 内容 | 文档 |
+| --- | --- |
+| 本地数据、权重和输出布局 | [playground/README.md](playground/README.md) |
+| 机器人、SDK、采集、推理和安全 | [deployment/README.md](deployment/README.md) |
+| 数据处理和训练脚本 | [scripts/README.md](scripts/README.md) |
+| 独立离线工具 | [tools/README.md](tools/README.md) |
+| Policy、state/action 和触觉路由 | [vtla/README.md](vtla/README.md) |
+| StarVLA-GR00T | [vtla/frameworks/starvla_groot/README.md](vtla/frameworks/starvla_groot/README.md) |
+| StarVLA-GR00T DINOAlign | [vtla/frameworks/starvla_groot_dinoalign/README.md](vtla/frameworks/starvla_groot_dinoalign/README.md) |
+| 触觉 MAE | [vtla/tac_encoder/tactile_mae/README.md](vtla/tac_encoder/tactile_mae/README.md) |
 
-
-## Git Workflow
-
+## Git Usage
 ```bash
 git pull --rebase origin main
 
@@ -126,12 +143,4 @@ git add .
 git commit -m "..."
 git push origin main
 ```
-
-运行数据、模型权重和训练结果不进入 Git，具体忽略范围见 [.gitignore](.gitignore)。
-
-## TODO List
-```bash
-采集代码优化
-推理速度可选择
-多机和cotraining
-```
+数据集、模型权重、训练结果和评测录像属于本地运行资产，不应加入提交；具体忽略范围见 [.gitignore](.gitignore)。

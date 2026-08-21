@@ -13,7 +13,15 @@
 # limitations under the License.
 
 from .config import RobotConfig
+from .rm_base_umi_dual.config_rm_base_umi_dual import RmBaseUmiDualConfig
+from .rm_isf_umi_left.config_rm_isf_umi_left import RmIsfUmiLeftConfig
 from .robot import Robot
 from .utils import make_robot_from_config
 
-__all__ = ["Robot", "RobotConfig", "make_robot_from_config"]
+__all__ = [
+    "RmBaseUmiDualConfig",
+    "RmIsfUmiLeftConfig",
+    "Robot",
+    "RobotConfig",
+    "make_robot_from_config",
+]

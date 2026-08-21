@@ -47,13 +47,19 @@ def _ensure_sdk_on_path() -> None:
         sys.path.insert(0, str(_SDK_PATH))
 
 
-def make_realman_algo():
-    """Return an Algo instance for the RM-75-E arm (offline FK only, no arm connection)."""
+def make_realman_algo(force_type: str):
+    """Return an RM-75-E Algo configured for a concrete robot's EE variant."""
     _ensure_sdk_on_path()
     from Robotic_Arm.rm_ctypes_wrap import rm_force_type_e, rm_robot_arm_model_e
     from Robotic_Arm.rm_robot_interface import Algo
 
-    return Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, rm_force_type_e.RM_MODEL_RM_B_E)
+    force_types = {
+        "base": rm_force_type_e.RM_MODEL_RM_B_E,
+        "isf": rm_force_type_e.RM_MODEL_RM_ISF_E,
+    }
+    if force_type not in force_types:
+        raise ValueError(f"Unsupported RealMan kinematics force_type={force_type!r}")
+    return Algo(rm_robot_arm_model_e.RM_MODEL_RM_75_E, force_types[force_type])
 
 
 def joint_indices(names: list[str]) -> dict:

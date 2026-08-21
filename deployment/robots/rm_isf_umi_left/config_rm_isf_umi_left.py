@@ -3,16 +3,21 @@
 """睿尔曼 RM75b 单左臂 ugripper 配置。"""
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from deployment.hardware.top_cameras import OpenCVTopCameraConfig
 
 from ..config import RobotConfig
 
 
-@RobotConfig.register_subclass("realman_ugripper_left")
+@RobotConfig.register_subclass("rm_isf_umi_left")
 @dataclass
-class RealmanUGripperLeftConfig(RobotConfig):
+class RmIsfUmiLeftConfig(RobotConfig):
     """机械臂、夹爪、腕部相机和两路触觉组成的独立单左臂配置。"""
+
+    kinematics_force_type: ClassVar[str] = "isf"
+    kinematics_sides: ClassVar[tuple[str, ...]] = ("left",)
+    teleop_type: ClassVar[str] = "left_realman_ugripper_leader"
 
     use_tactile: bool = True
 

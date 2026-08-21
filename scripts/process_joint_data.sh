@@ -191,6 +191,7 @@ if [ -d "${final_with_tactile}" ] || [ -d "${final_without_tactile}" ]; then
 fi
 
 # =================== 4) 关节 -> 末端位姿 (就地, 幂等) ===================
+# convert_joints_to_eepose 从 meta/info.json 的 robot_type 自动选择 B/ISF FK。
 echo "[4/4] convert_joints_to_eepose (就地) -> ${final}"
 python tools/convert_joints_to_eepose.py \
   --root "${final}" \

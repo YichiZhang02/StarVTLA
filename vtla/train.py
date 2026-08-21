@@ -282,6 +282,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         for_training=True,
     )
 
+    if is_main_process:
+        logging.info(f"记录 robot_type 到 checkpoint: {policy.config.robot_type!r}")
+
     # 把训练集任务文字写进 policy config, 使 checkpoint 自包含 (inference --match-policy 直接
     # 从 config.json 读 single_task, 不再依赖训练数据集是否还在)。仅单任务数据集写入。
     try:
