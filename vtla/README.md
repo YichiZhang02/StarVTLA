@@ -19,7 +19,8 @@
 bash train.sh \
   <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
-  <augmentation_mode> [tactile_encoder_path] [tactile_insert_location]
+  [action_gap] <augmentation_mode> \
+  [tactile_encoder_path] [tactile_insert_location]
 ```
 
 | 位置 | 参数 | 脚本默认值 | 可选值或含义 |
@@ -33,15 +34,16 @@ bash train.sh \
 | 7 | `tactile_mode` | `none` | `none`、`as_image`、`encode` |
 | 8 | `state_mode` | `absolute_joint` | 见下文 |
 | 9 | `action_mode` | `absolute_joint` | 见下文 |
-| 10 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
-| 11 | `tactile_encoder_path` | AnyTouch 本地目录 | 仅 `encode` 使用 |
-| 12 | `tactile_insert_location` | `encoder` | `encoder`、`decoder` |
+| 10 | `action_gap` | `6` | GT action 起点相对当前观测向未来偏移的帧数 |
+| 11 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
+| 12 | `tactile_encoder_path` | AnyTouch 本地目录 | 仅 `encode` 使用 |
+| 13 | `tactile_insert_location` | `encoder` | `encoder`、`decoder` |
 
 关节训练示例：
 
 ```bash
 bash train.sh <dataset_id> starvla_groot 1 4 10000 \
-  true none absolute_joint absolute_joint none
+  true none absolute_joint absolute_joint 6 none
 ```
 
 输出为：
@@ -106,10 +108,10 @@ state 和 action 使用 EE 时应采用相同旋转表示。例如：
 
 ```bash
 bash train.sh <processed_dataset_id> pi05 1 32 10000 \
-  false none absolute_rot6d relative_rot6d none
+  false none absolute_rot6d relative_rot6d 6 none
 ```
 
-`relative_*` action 在训练时以当前观测为锚点；推理 postprocessor 将其恢复为可执行的绝对目标。EE action 会让部署端自动选择 `robot.action_space=ee`，joint action 则选择 `joint`。
+第 10 个参数是 `action_gap`。`chunk_size=32, action_gap=6` 时，GT 时间窗口为 `t+6 ... t+37`。`relative_*` action 仍以当前观测 `S(t)` 为 pose anchor；推理 postprocessor 将其恢复为可执行的绝对目标。EE action 会让部署端自动选择 `robot.action_space=ee`，joint action 则选择 `joint`。
 
 ## 相机路由
 
@@ -202,7 +204,7 @@ TACTILE_INSERT_LOCATION=decoder \
 TACTILE_NUM_FRAMES=3 \
 VISUALIZATION_ENABLED=true \
   bash train.sh <dataset_id> fastwam 1 1 50000 \
-  true encode absolute_joint absolute_joint none
+  true encode absolute_joint absolute_joint 6 none
 ```
 
 ## 专项文档

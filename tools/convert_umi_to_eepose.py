@@ -41,7 +41,7 @@ Output uses per arm ``[xyz(3), rot6d(6), gripper(1)]`` for rot6d (20 = 2 * 10) a
 Gripper is kept absolute. This matches ``convert_joints_to_eepose.py`` byte-for-byte, so the
 existing ``state_mode='episode_ee'`` / ``action_mode='relative_ee'`` path consumes it unchanged.
 
-At train time the action chunk (future action_episode_ee values, delta_indices 1..chunk) is
+At train time the action chunk (action_episode_ee values selected by action_gap and chunk_size) is
 relativized against the current state_episode_ee anchor S_t, giving ``S_t^{-1} · A_{t+k}`` (T0
 cancels): the commanded future pose relative to the current observed pose. See
 ``vtla/engine/utils/ee_transforms.py``.
@@ -443,33 +443,37 @@ def compute_baselines(data_files: list[Path], st_idx: dict) -> dict[int, tuple]:
     return baselines
 
 
-def compute_relative_ee_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
+def compute_relative_ee_stats(
+    per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
+) -> dict:
     """Stats of the RELATIVE action ``S_t^{-1}·A_{t+k}`` over all valid (t, k) within episodes.
 
     This is what action_mode='relative_ee' feeds the model: the current STATE pose S_t is the
-    anchor and the future ACTION pose A_{t+k} is the target. ``k`` ranges 1..horizon (chunk starts
-    at t+1); chunk_size must be <= horizon at train time (else re-run with a larger --horizon).
+    anchor and ACTION pose A_{t+k} is the target. ``k`` ranges from ``action_gap`` through
+    ``action_gap + horizon - 1``, matching the training target window.
     """
     rels = []
     for d in per_ep.values():
         S = torch.from_numpy(np.stack(d["s"]).astype(np.float32))  # (L, EE_DIM) state
         A = torch.from_numpy(np.stack(d["a"]).astype(np.float32))  # (L, EE_DIM) action
         L = S.shape[0]
-        for k in range(1, horizon + 1):
+        for k in range(action_gap, action_gap + horizon):
             if L - k <= 0:
                 break
             rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms).numpy())
     return feature_stats(np.concatenate(rels))
 
 
-def compute_relative_quat_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
+def compute_relative_quat_stats(
+    per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
+) -> dict:
     """Stats of the RELATIVE quat action ``S_t^{-1}·A_{t+k}`` (quat format, 16-dim for 2 arms)."""
     rels = []
     for d in per_ep.values():
         S = torch.from_numpy(np.stack(d["s_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT) state
         A = torch.from_numpy(np.stack(d["a_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT) action
         L = S.shape[0]
-        for k in range(1, horizon + 1):
+        for k in range(action_gap, action_gap + horizon):
             if L - k <= 0:
                 break
             rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms, rot_mode="quat").numpy())
@@ -511,10 +515,17 @@ def main():
     ap.add_argument("--dst", type=Path, help="Destination dataset (copy of --src, then modify)")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--horizon", type=int, default=32,
-                    help="Max action chunk horizon for action_relative_ee stats; train chunk_size must be <= this.")
+                    help="Number of action steps used for relative-action statistics.")
+    ap.add_argument("--action-gap", type=int, default=0,
+                    help="First GT action offset; stats cover gap .. gap+horizon-1.")
     ap.add_argument("--frame-eps", type=float, default=0.05,
                     help="Max |action_pos - state_pos| at episode start to assert same world frame (metres).")
     args = ap.parse_args()
+
+    if args.horizon <= 0:
+        ap.error("--horizon must be positive")
+    if args.action_gap < 0:
+        ap.error("--action-gap must be non-negative")
 
     if args.src and args.dst:
         if args.dst.exists():
@@ -643,8 +654,15 @@ def main():
     # ---- meta/stats.json (global) ----
     stats_path = root / "meta" / "stats.json"
     stats = json.loads(stats_path.read_text())
-    rel_stats      = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
-    rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=EE_DIM_QUAT // PER_ARM_DIM_QUAT)
+    rel_stats = compute_relative_ee_stats(
+        per_ep, horizon=args.horizon, n_arms=n_arms, action_gap=args.action_gap
+    )
+    rel_quat_stats = compute_relative_quat_stats(
+        per_ep,
+        horizon=args.horizon,
+        n_arms=EE_DIM_QUAT // PER_ARM_DIM_QUAT,
+        action_gap=args.action_gap,
+    )
     stat_sources = (
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
         ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
@@ -663,7 +681,7 @@ def main():
         stats[feat] = {k: (v.astype(np.int64).tolist() if k == "count" else v.astype(np.float32).tolist())
                        for k, v in st.items()}
     stats_path.write_text(json.dumps(stats, indent=4, ensure_ascii=False))
-    print(f"      action_relative_ee stats over horizon={args.horizon} "
+    print(f"      action_relative_ee stats over gap={args.action_gap}, horizon={args.horizon} "
           f"(q01..q99 range example dim0: {rel_stats['q01'][0]:.4f}..{rel_stats['q99'][0]:.4f})")
 
     # ---- meta/episodes/*.parquet (per-episode stats) ----

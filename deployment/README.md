@@ -186,7 +186,9 @@ decode:      rgb48le, uint16 HWC
 推荐入口：
 
 ```bash
-bash inference.sh <pretrained_id> <step> [n_action_steps] [action_start_offset]
+bash inference.sh \
+  <pretrained_id> <step> [n_action_steps] [action_start_offset] \
+  [control_fps] [reset_before_episode] [single_task]
 ```
 
 脚本加载：
@@ -196,6 +198,18 @@ playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained
 ```
 
 例如 `step=3000` 会读取 `checkpoints/003000/pretrained_model`。推理录像默认写入 `playground/eval/`。
+
+`control_fps` 控制机器人 action 下发和推理录像的目标频率，必须为正整数，默认 `30 Hz`。例如下面以 `20 Hz` 下发 16 个 action，并从 chunk 的第 6 个位置开始执行：
+
+```bash
+pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
+bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
+  "Grasp the cap and pull it off the pen."
+```
+
+训练数据的时间基准是 `30 Hz`；降低下发频率会放慢真实轨迹，实际可达到的频率还受新 chunk 的同步推理耗时限制。
+
+`single_task` 默认留空，由 `match_policy` 从 checkpoint 自动读取。多数据集混合训练的多任务模型可以显式传入任务文本；该文本会作为本次推理运行的语言语义输入，并且不会被 `match_policy` 覆盖。
 
 机器人身份始终归 checkpoint 所有。`deployment.inference` 会在连接硬件前：
 
@@ -214,6 +228,13 @@ chunk[action_start_offset : action_start_offset + n_action_steps]
 ```
 
 两者之和必须不超过 checkpoint 的 `chunk_size`。
+
+`action_gap` 是训练时写入 checkpoint 的 GT 时间偏移，不是在线切片参数。若训练使用
+`action_gap=6`，模型 chunk 第 0 项对应 `t+6`；推理再设置 `action_start_offset=4` 时，实际首先执行的目标对应 `t+10`。因此有效首目标偏移为：
+
+```text
+action_gap + action_start_offset
+```
 
 ## 腕部去畸变
 

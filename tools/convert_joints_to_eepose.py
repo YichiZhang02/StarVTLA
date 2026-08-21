@@ -287,51 +287,58 @@ def compute_joint_baselines(data_files: list[Path]) -> dict[int, np.ndarray]:
     return baselines
 
 
-def compute_relative_ee_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
+def compute_relative_ee_stats(
+    per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
+) -> dict:
     """Stats of the RELATIVE action ``S_t^{-1}·S_{t+k}`` over all valid (t, k) within episodes.
 
     This is what action_mode='relative_ee' feeds the model (the per-frame stored episode_ee is
     absolute-in-episode, but training relativizes it). Stored under ``action_relative_ee`` and used
-    for action normalization. ``k`` ranges 1..horizon (chunk starts at t+1); chunk_size must be
-    <= horizon at train time (otherwise re-run with a larger --horizon).
+    for action normalization. ``k`` ranges from ``action_gap`` through
+    ``action_gap + horizon - 1``, matching the training target window.
     """
     rels = []
     for d in per_ep.values():
         S = torch.from_numpy(np.stack(d["s_abs"]).astype(np.float32))
         A = torch.from_numpy(np.stack(d["a_abs"]).astype(np.float32))
         L = S.shape[0]
-        for k in range(1, horizon + 1):
+        for k in range(action_gap, action_gap + horizon):
             if L - k <= 0:
                 break
             rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms).numpy())
     return feature_stats(np.concatenate(rels))
 
 
-def compute_relative_quat_stats(per_ep: dict, horizon: int, n_arms: int) -> dict:
+def compute_relative_quat_stats(
+    per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
+) -> dict:
     """Stats of the RELATIVE quat action ``S_t^{-1}·S_{t+k}`` (quat format, 16-dim for 2 arms)."""
     rels = []
     for d in per_ep.values():
         S = torch.from_numpy(np.stack(d["s_abs_quat"]).astype(np.float32))
         A = torch.from_numpy(np.stack(d["a_abs_quat"]).astype(np.float32))
         L = S.shape[0]
-        for k in range(1, horizon + 1):
+        for k in range(action_gap, action_gap + horizon):
             if L - k <= 0:
                 break
             rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms, rot_mode="quat").numpy())
     return feature_stats(np.concatenate(rels))
 
 
-def compute_relative_joint_stats(per_ep: dict, horizon: int, relative_mask: np.ndarray) -> dict:
+def compute_relative_joint_stats(
+    per_ep: dict, horizon: int, relative_mask: np.ndarray, action_gap: int = 0
+) -> dict:
     """Stats for future absolute joint commands relative to the current observed joints."""
     rels = []
     for d in per_ep.values():
         state = np.stack(d["joint_state"]).astype(np.float32)
         action = np.stack(d["joint_action"]).astype(np.float32)
-        for k in range(1, horizon + 1):
-            if len(state) - k <= 0:
+        for k in range(action_gap, action_gap + horizon):
+            valid = len(state) - k
+            if valid <= 0:
                 break
-            rel = action[k:].copy()
-            rel[:, relative_mask] -= state[:-k, relative_mask]
+            rel = action[k : k + valid].copy()
+            rel[:, relative_mask] -= state[:valid, relative_mask]
             rels.append(rel)
     return feature_stats(np.concatenate(rels))
 
@@ -365,8 +372,15 @@ def main():
     ap.add_argument("--dst", type=Path, help="Destination dataset (copy of --src, then modify)")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--horizon", type=int, default=32,
-                    help="Max action chunk horizon for action_relative_ee stats; train chunk_size must be <= this.")
+                    help="Number of action steps used for relative-action statistics.")
+    ap.add_argument("--action-gap", type=int, default=0,
+                    help="First GT action offset; stats cover gap .. gap+horizon-1.")
     args = ap.parse_args()
+
+    if args.horizon <= 0:
+        ap.error("--horizon must be positive")
+    if args.action_gap < 0:
+        ap.error("--action-gap must be non-negative")
 
     if args.src and args.dst:
         if args.dst.exists():
@@ -518,9 +532,15 @@ def main():
     stats_path = root / "meta" / "stats.json"
     stats = json.loads(stats_path.read_text())
     # action_relative_ee: stats of the relativized action the model actually trains on.
-    rel_stats = compute_relative_ee_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
-    rel_quat_stats = compute_relative_quat_stats(per_ep, horizon=args.horizon, n_arms=n_arms)
-    relative_joint_stats = compute_relative_joint_stats(per_ep, args.horizon, joint_mask)
+    rel_stats = compute_relative_ee_stats(
+        per_ep, horizon=args.horizon, n_arms=n_arms, action_gap=args.action_gap
+    )
+    rel_quat_stats = compute_relative_quat_stats(
+        per_ep, horizon=args.horizon, n_arms=n_arms, action_gap=args.action_gap
+    )
+    relative_joint_stats = compute_relative_joint_stats(
+        per_ep, args.horizon, joint_mask, action_gap=args.action_gap
+    )
     stat_sources = (
         ("observation.state_episode_joint", feature_stats(np.concatenate(all_state_joint_episode))),
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
@@ -541,7 +561,7 @@ def main():
         stats[feat] = {k: (v.astype(np.int64).tolist() if k == "count" else v.astype(np.float32).tolist())
                        for k, v in st.items()}
     stats_path.write_text(json.dumps(stats, indent=4, ensure_ascii=False))
-    print(f"      action_relative_ee stats over horizon={args.horizon} "
+    print(f"      action_relative_ee stats over gap={args.action_gap}, horizon={args.horizon} "
           f"(q01..q99 range example dim0: {rel_stats['q01'][0]:.4f}..{rel_stats['q99'][0]:.4f})")
 
     # ---- meta/episodes/*.parquet (per-episode stats) ----

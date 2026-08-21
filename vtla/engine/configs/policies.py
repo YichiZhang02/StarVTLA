@@ -98,7 +98,14 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # 行为与改动前完全一致。约束 (chunk_size 或 horizon 边界) 由各框架 __post_init__ 校验。
     action_start_offset: int = 0
 
+    # 训练 target 相对当前观测向未来平移的帧数。对于长度为 N 的 action chunk，监督窗口为
+    # [t + action_gap, ..., t + action_gap + N - 1]。该值会保存进 checkpoint，供离线评估
+    # 使用同一时间对齐；在线执行不额外切片，模型输出本身已经对应这个未来窗口。
+    action_gap: int = 0
+
     def __post_init__(self) -> None:
+        if self.action_gap < 0:
+            raise ValueError(f"action_gap must be non-negative, got {self.action_gap}")
         if not self.device or not is_torch_device_available(self.device):
             auto_device = auto_select_torch_device()
             logger.warning(f"Device '{self.device}' is not available. Switching to '{auto_device}'.")

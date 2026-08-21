@@ -128,7 +128,7 @@ bash train.sh <dataset_id> starvla_groot_dinoalign
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 COLOR_TEMP_RANGE='[0,0]' \
   bash train.sh <dataset_id> starvla_groot_dinoalign 4 16 30000 \
-  true none absolute_joint absolute_joint none
+  true none absolute_joint absolute_joint 6 none
 ```
 
 常用 override：

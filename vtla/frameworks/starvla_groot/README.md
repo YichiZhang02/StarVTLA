@@ -30,14 +30,14 @@
 
 ```bash
 bash train.sh <dataset_id> starvla_groot 1 4 20000 \
-  true none absolute_joint absolute_joint none
+  true none absolute_joint absolute_joint 6 none
 ```
 
 EE action 示例：
 
 ```bash
 bash train.sh <processed_dataset_id> starvla_groot 1 4 20000 \
-  true none absolute_rot6d relative_rot6d none
+  true none absolute_rot6d relative_rot6d 6 none
 ```
 
 基础 VLM 默认读取：
@@ -68,7 +68,7 @@ TACTILE_NUM_FRAMES=3 \
 TACTILE_FRAME_OFFSET=2 \
 TACTILE_ENCODER_PATH=playground/pretrained_models/AnyTouch-ViT-L-16 \
   bash train.sh <dataset_id> starvla_groot 1 4 20000 \
-  true encode absolute_joint absolute_joint none
+  true encode absolute_joint absolute_joint 6 none
 ```
 
 ## Transformers 兼容性

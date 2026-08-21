@@ -20,14 +20,15 @@ bash scripts/<script>.sh ...
 ## 关节数据处理
 
 ```bash
-bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
+bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
 
 | 参数 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `dataset_id` | 脚本内默认值 | `playground/data/` 下的源数据集 |
 | `size` | `256` | 最终视频边长 |
-| `horizon` | `32` | 相对 action 统计的最大时间步 |
+| `horizon` | `32` | 相对 action 统计包含的动作数量，通常等于训练 `chunk_size` |
+| `action_gap` | `0` | 相对 action 统计的第一个 GT 偏移，必须与训练一致 |
 
 环境变量：
 
@@ -85,7 +86,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
 
 ```bash
 bash scripts/process_joint_data.sh \
-  rm_isf_umi_left_20260820_insert_easy_precise 256 32
+  rm_isf_umi_left_20260820_insert_easy_precise 256 32 6
 ```
 
 ## 触觉处理标准
@@ -125,7 +126,7 @@ u8_deformation = where(
 ## UMI Pose 数据处理
 
 ```bash
-bash scripts/process_umi_data.sh <dataset_id> [size] [horizon]
+bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
 
 该流程适用于数据中已经保存末端位姿的 UMI 数据：

@@ -79,8 +79,10 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
 
 ```bash
 dataset_id=rm_isf_umi_left_20260820_insert_easy_precise
-bash scripts/process_joint_data.sh "${dataset_id}" 256 32
+bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
 ```
+
+最后一个参数是 relative-action 统计使用的 `action_gap`；训练 relative 模型时必须与 `train.sh` 的值一致。absolute action 不使用这组 relative 统计。
 
 ### 3. 训练
 
@@ -88,7 +90,7 @@ bash scripts/process_joint_data.sh "${dataset_id}" 256 32
 bash train.sh \
   <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
-  <augmentation_mode>
+  [action_gap] <augmentation_mode>
 ```
 
 关节动作示例：
@@ -96,7 +98,7 @@ bash train.sh \
 ```bash
 dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
 bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
-  true none absolute_joint absolute_joint none
+  true none absolute_joint absolute_joint 0 none
 ```
 
 相对 EE 动作示例：
@@ -104,8 +106,10 @@ bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
 ```bash
 dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
 bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
-  true none absolute_rot6d relative_rot6d none
+  true none absolute_rot6d relative_rot6d 6 none
 ```
+
+`action_gap` 默认为 `6`。当 `chunk_size=32` 时，`action_gap=6` 使用 `t+6 ... t+37` 作为 GT；relative action 的 pose anchor 仍是当前观测 `S(t)`。
 
 训练会校验数据集的臂布局，并把 `robot_type` 写入每个 checkpoint 的 policy config。
 
@@ -131,15 +135,22 @@ bash scripts/evaluate_policy_offline.sh \
 ### 5. 在线推理（真机）
 
 ```bash
-bash inference.sh <pretrained_id> <step> [n_action_steps] [action_start_offset]
+bash inference.sh \
+  <pretrained_id> <step> [n_action_steps] [action_start_offset] \
+  [control_fps] [reset_before_episode] [single_task]
 ```
 
 推理示例：
 
 ```bash
 pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
-bash inference.sh "${pretrained_id}" 3000 16 6
+bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
+  "Grasp the cap and pull it off the pen."
 ```
+
+`control_fps` 是机器人动作下发目标频率，默认 `30 Hz`。模型按 `30 Hz` 数据训练，降低该值会按比例放慢轨迹的真实执行速度；实际频率仍受新 chunk 推理耗时限制。
+
+`single_task` 默认为空，此时 `match_policy` 从 checkpoint 自动读取任务；多任务模型可以显式传入任务文本，控制本次推理的语言语义输入。
 
 `inference.sh` 中的初始 `--robot.type` 只是 Draccus 解析所需的启动配置。实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。EE checkpoint 会自动启用与其 B/ISF 构型匹配的在线 FK/IK。
 
@@ -165,3 +176,11 @@ git commit -m "..."
 git push origin main
 ```
 数据集、模型权重、训练结果和评测录像属于本地运行资产，不应加入提交；具体忽略范围见 [.gitignore](.gitignore)。
+
+## TODO List
+```bash
+1 relative_state的实现
+2 DAgger的采集
+3 controller实现与异步推理
+4 Backbone重构
+```

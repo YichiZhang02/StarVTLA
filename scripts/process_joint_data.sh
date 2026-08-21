@@ -1,6 +1,6 @@
 #!/bin/bash
 # 关节数据集离线预处理流水线: 去畸变 -> 触觉 uint8 -> 全视频 resize -> 关节转末端位姿。
-# 用法: bash process_joint_data.sh <dataset_id> [size] [horizon]
+# 用法: bash process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 #   只需指定 dataset_id, 其余参数全部自动 (与 train.sh 同风格)。
 # 只有 undist 创建副本；后续均在原目录处理，成功后追加后缀并改名:
 #   有触觉: <id> -> <id>_undist -> <id>_undist_uint8 -> <id>_undist_uint8_<size>
@@ -13,7 +13,8 @@ REPO_ROOT="$(pwd)"
 # =================== 配置 (只有 dataset_id 必填) ===================
 dataset_id=${1:-rm_umi_dual_260711_pen_in_case}
 size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
-horizon=${3:-32}      # action_relative_ee 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
+horizon=${3:-32}      # relative action 统计包含的动作数量，通常等于训练 chunk_size
+action_gap=${4:-0}    # 必须与 train.sh 的 action_gap 一致
 
 # 可选 env 覆盖 (一般不用动)
 crop=${CROP:-896}     # 去畸变后居中裁剪边长 (须与训练/推理一致)
@@ -76,7 +77,7 @@ echo "关节数据预处理: ${dataset_id}"
 echo "  1) undist : ${src} -> ${undist}   (crop ${crop})"
 echo "  2) tactile uint16_to_uint8 (有触觉时, 就地): ${undist} -> ${uint8}"
 echo "  3) resize 所有 MP4 (就地): -> *_${size}"
-echo "  4) joint2ee (就地, FK 加 EE 列, horizon ${horizon})"
+echo "  4) joint2ee (就地, FK 加 EE 列, gap ${action_gap}, horizon ${horizon})"
 echo "==================================================================="
 
 if [ ! -d "${src}" ]; then
@@ -195,9 +196,10 @@ fi
 echo "[4/4] convert_joints_to_eepose (就地) -> ${final}"
 python tools/convert_joints_to_eepose.py \
   --root "${final}" \
-  --horizon "${horizon}"
+  --horizon "${horizon}" \
+  --action-gap "${action_gap}"
 
 echo "==================================================================="
 echo "完成: 训练数据集: ${final}"
-echo "  训练示例: bash train.sh $(basename "${final}") pi05 1 32 10000 false none episode_rot6d relative_rot6d"
+echo "  训练示例: bash train.sh $(basename "${final}") pi05 1 32 10000 false none episode_rot6d relative_rot6d ${action_gap} none"
 echo "==================================================================="

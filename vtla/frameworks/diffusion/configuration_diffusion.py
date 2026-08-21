@@ -277,9 +277,8 @@ class DiffusionConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        if self.action_reference == "relative":
-            return list(range(1, self.horizon + 1))
-        return list(range(1 - self.n_obs_steps, 1 - self.n_obs_steps + self.horizon))
+        start = 1 - self.n_obs_steps + self.action_gap
+        return list(range(start, start + self.horizon))
 
     @property
     def reward_delta_indices(self) -> None:

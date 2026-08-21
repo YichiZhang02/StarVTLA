@@ -330,6 +330,8 @@ class DatasetRecordConfig:
 
     def __post_init__(self):
         # single_task 的必填校验移到各入口 (collect 必填; inference 可由 --match-policy 自动填)。
+        if self.fps <= 0:
+            raise ValueError(f"`dataset.fps` must be a positive integer, got: {self.fps}")
         if self.save not in {"episode", "stream"}:
             raise ValueError(f"`dataset.save` must be one of ['episode', 'stream'], got: {self.save}")
 

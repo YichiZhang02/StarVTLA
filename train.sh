@@ -19,14 +19,15 @@ wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
 state_mode=${8:-absolute_joint}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d | absolute_quat | episode_quat
 action_mode=${9:-absolute_joint}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d | absolute_quat | relative_quat
+action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
 
 # 数据增强
-augmentation_mode=${10:-none}  # none | mild | strong
+augmentation_mode=${11:-none}  # none | mild | strong
 color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}  # 色温增强 [min,max] (逗号后不要空格)
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
-tactile_encoder_path=${TACTILE_ENCODER_PATH:-${11:-playground/pretrained_models/AnyTouch-ViT-L-16}}
-tactile_insert_location=${TACTILE_INSERT_LOCATION:-${12:-encoder}}  # 触觉插入位置 encoder | decoder
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${12:-playground/pretrained_models/AnyTouch-ViT-L-16}}
+tactile_insert_location=${TACTILE_INSERT_LOCATION:-${13:-encoder}}  # 触觉插入位置 encoder | decoder
 tactile_num_tokens=${TACTILE_NUM_TOKENS:-16}  # 触觉 tokens / per image
 tactile_num_frames=${TACTILE_NUM_FRAMES:-1}  # 每步输入的触觉帧数（含当前帧）
 tactile_frame_offset=${TACTILE_FRAME_OFFSET:-1}  # 相邻两个触觉帧的采样间隔（帧数）
@@ -39,7 +40,7 @@ visualization_enabled=${VISUALIZATION_ENABLED:-true}
 
 # =================== 不是很需要改动的配置 ===================
 # 保存的模型/日志名拼接规则
-policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_aug_${augmentation_mode}"
+policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_gap_${action_gap}_aug_${augmentation_mode}"
 # 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
 run_name="$(date +%Y%m%d)_${dataset_id}_${policy_type}_${policy_suffix}"
 
@@ -142,7 +143,7 @@ fi
 # tactile_mode=encode 时追加 tactile encoder 相关参数（四个 framework 通用）
 if [ "${tactile_mode}" = "encode" ]; then
   if [ -z "${tactile_encoder_path}" ]; then
-    echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 9 个位置参数）指向 tactile-MAE 权重"; exit 1
+    echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 12 个位置参数）指向 tactile-MAE 权重"; exit 1
   fi
   extra_args="${extra_args} --policy.tactile_encoder_path=${tactile_encoder_path}"
   extra_args="${extra_args} --policy.tactile_num_tokens=${tactile_num_tokens}"
@@ -165,6 +166,7 @@ echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<no
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
 echo "Policy device: ${policy_device}"
 echo "Wrist only: $wrist_only | Tactile mode: $tactile_mode | State mode: $state_mode | Action mode: $action_mode | Augmentation mode: $augmentation_mode"
+echo "Action gap: ${action_gap} frame(s)"
 echo "Color temp range: ${color_temp_range:-<off>}"
 echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
@@ -206,6 +208,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --policy.tactile_mode=${tactile_mode} \
     --policy.state_mode=${state_mode} \
     --policy.action_mode=${action_mode} \
+    --policy.action_gap=${action_gap} \
     --policy.top_camera_keys="${top_cam}" \
     --policy.wrist_camera_keys="${wrist_cam}" \
     --policy.tactile_keys="${tactile_keys}" \

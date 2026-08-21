@@ -1,6 +1,6 @@
 #!/bin/bash
 # UMI 数据集离线预处理流水线: 去畸变(undist) -> 降分辨率(resize) -> UMI 位姿转末端位姿(umi2ee)。
-# 用法: bash process_umi_data.sh <dataset_id> [size] [horizon]
+# 用法: bash process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
 #   只需指定 dataset_id, 其余参数全部自动 (与 train.sh 同风格)。
 # 与 process_joint_data.sh 的唯一区别: 第 3 步用 convert_umi_to_eepose (UMI 已存末端位姿, 跳过 FK;
 # 并在 meta/episodes 缺失时自动重建)。
@@ -14,9 +14,10 @@ cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
 
 # =================== 配置 (只有 dataset_id 必填) ===================
-dataset_id=${1:?"用法: bash process_umi_data.sh <dataset_id> [size] [horizon]"}
+dataset_id=${1:?"用法: bash process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]"}
 size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
-horizon=${3:-32}      # action_relative_ee 统计的最大 chunk 步长; 训练 chunk_size 须 <= 该值
+horizon=${3:-32}      # relative action 统计包含的动作数量，通常等于训练 chunk_size
+action_gap=${4:-0}    # 必须与 train.sh 的 action_gap 一致
 
 # 可选 env 覆盖 (一般不用动)
 crop=${CROP:-896}     # 去畸变后居中裁剪边长 (须与训练/推理一致)
@@ -37,7 +38,7 @@ echo "==================================================================="
 echo "UMI 数据预处理: ${dataset_id}"
 echo "  1) undist : ${src} -> ${undist}   (crop ${crop})"
 echo "  2) resize : ${undist} -> ${final}   (size ${size})"
-echo "  3) umi2ee (就地, 无 FK, 加 EE 列): ${final}   (horizon ${horizon})"
+echo "  3) umi2ee (就地, 无 FK, 加 EE 列): ${final}   (gap ${action_gap}, horizon ${horizon})"
 echo "==================================================================="
 
 if [ ! -d "${src}" ]; then
@@ -75,9 +76,10 @@ fi
 echo "[3/3] convert_umi_to_eepose (就地) -> ${final}"
 python tools/convert_umi_to_eepose.py \
   --root "${final}" \
-  --horizon "${horizon}"
+  --horizon "${horizon}" \
+  --action-gap "${action_gap}"
 
 echo "==================================================================="
 echo "完成 ✅  训练数据集: ${final}"
-echo "  训练示例: bash train.sh ${dataset_id}_undist_${size} pi05 1 32 10000 false none episode_rot6d relative_rot6d"
+echo "  训练示例: bash train.sh ${dataset_id}_undist_${size} pi05 1 32 10000 false none episode_rot6d relative_rot6d ${action_gap} none"
 echo "==================================================================="

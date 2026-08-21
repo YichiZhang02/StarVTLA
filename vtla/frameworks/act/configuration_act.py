@@ -194,11 +194,7 @@ class ACTConfig(SensorRoutingMixin, PreTrainedConfig):
 
     @property
     def action_delta_indices(self) -> list:
-        # relative_ee predicts the future trajectory relative to the current observation, so the
-        # chunk starts at t+1 (k=0 would be the current pose => identity). Joint keeps the t convention.
-        if self.action_reference == "relative":
-            return list(range(1, self.chunk_size + 1))
-        return list(range(self.chunk_size))
+        return list(range(self.action_gap, self.action_gap + self.chunk_size))
 
     @property
     def reward_delta_indices(self) -> None:

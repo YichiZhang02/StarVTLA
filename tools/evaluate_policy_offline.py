@@ -572,6 +572,7 @@ def evaluate(args: argparse.Namespace) -> Path:
         "robot_type": checkpoint_robot_type,
         "policy_type": policy_cfg.type,
         "action_mode": policy_cfg.action_mode,
+        "action_gap": policy_cfg.action_gap,
         "action_source": action_source,
         "action_mode_dimension_names": mode_names,
         "robot_command_dimension_names": robot_names,
