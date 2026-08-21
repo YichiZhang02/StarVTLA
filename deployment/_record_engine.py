@@ -150,38 +150,39 @@ def busy_wait(seconds: float) -> None:
 
 
 def capture_home_action(robot: Robot) -> dict[str, float]:
-    """构建复位目标字典 (关节 + 夹爪)。
-
-    优先从 robot._home_joints (connect() 时由 config 或启动位置确定) + config.home_gripper
-    构建，保证每次复位都回到同一个固定位置。
-    robot._home_joints 不可用时回退到读当前观测。
-    """
-    home: dict[str, float] = {}
-
-    home_joints: dict[str, list[float]] = getattr(robot, "_home_joints", {})
+    """Capture one fixed startup reset target after the robot connects."""
+    config = getattr(robot, "config", None)
+    configured_home: dict[str, float] | None = getattr(config, "home_joints", None)
     joint_names: list[str] = getattr(robot, "JOINT_NAMES", [])
+    sides = list(getattr(robot, "_arms", {}))
     gripper_name: str = getattr(robot, "GRIPPER_NAME", "gripper")
-    home_gripper: float = getattr(getattr(robot, "config", None), "home_gripper", 1.0)
+    home_gripper: float = getattr(config, "home_gripper", 1.0)
+    if not joint_names or not sides:
+        raise RuntimeError(
+            f"robot {getattr(robot, 'name', type(robot).__name__)!r} does not expose "
+            "JOINT_NAMES and active arms for startup home capture"
+        )
 
-    if home_joints and joint_names:
-        for side, joint_values in home_joints.items():
-            if joint_values is None:
-                continue
-            for i, jname in enumerate(joint_names):
-                if i < len(joint_values):
-                    home[f"{side}_{jname}"] = float(joint_values[i])
-            home[f"{side}_{gripper_name}"] = float(home_gripper)
-        logging.info(f"[home] 复位目标来自 robot._home_joints ({len(home)} dof, gripper={home_gripper})")
-        return home
+    observation = None if configured_home is not None else robot.get_observation()
+    source = configured_home if configured_home is not None else observation
+    assert source is not None
 
-    # 回退: robot 不暴露 _home_joints 时读当前观测
-    obs = robot.get_observation()
-    for key in robot.action_features:
-        if key in obs:
-            home[key] = float(obs[key])
-        else:
-            logging.warning(f"capture_home_action: 观测中缺少动作键 '{key}', 跳过")
-    logging.info(f"[home] 复位目标从当前观测捕获 ({len(home)} dof)")
+    joint_keys = [f"{side}_{joint}" for side in sides for joint in joint_names]
+    missing = [key for key in joint_keys if key not in source]
+    if missing:
+        source_name = "config.home_joints" if configured_home is not None else "startup observation"
+        raise RuntimeError(f"{source_name} is missing home joint(s): {missing}")
+
+    home = {key: float(source[key]) for key in joint_keys}
+    for side in sides:
+        home[f"{side}_{gripper_name}"] = float(home_gripper)
+    source_name = "config.home_joints" if configured_home is not None else "程序启动时关节观测"
+    logging.info(
+        "[home] 固定复位目标来自%s，仅捕获一次: joints=%s, gripper=%.3f",
+        source_name,
+        {key: home[key] for key in joint_keys},
+        home_gripper,
+    )
     return home
 
 
@@ -192,6 +193,7 @@ def move_to_home_smooth(
     duration_s: float,
 ) -> None:
     """从当前姿态在 duration_s 内线性插值平滑移动到 home, 逐帧通过 send_action 下发。"""
+    logging.info("[home] 本次复位使用固定启动目标: %s", dict(home_action))
     obs = robot.get_observation()
     start = {k: float(obs[k]) for k in home_action if k in obs}
 
@@ -934,6 +936,9 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
         )
 
     robot.connect()
+    startup_home_action: dict[str, float] = (
+        capture_home_action(robot) if cfg.reset_before_episode else {}
+    )
     if teleop is not None:
         teleop.connect()
 
@@ -975,9 +980,6 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                 recorded_episodes = 0
                 prepared_at_home = False
                 _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
-                home_action: dict[str, float] = (
-                    capture_home_action(robot) if cfg.reset_before_episode else {}
-                )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
@@ -990,7 +992,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         fps=cfg.dataset.fps,
                         play_sounds=cfg.play_sounds,
                         reset_before_episode=cfg.reset_before_episode,
-                        home_action=home_action,
+                        home_action=startup_home_action,
                         home_duration_s=_home_duration,
                         on_prepared=(
                             start_force_drag
@@ -1051,7 +1053,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         prepared_at_home = reset_then_finalize_episode(
                             robot=robot,
                             reset_before_episode=cfg.reset_before_episode,
-                            home_action=home_action,
+                            home_action=startup_home_action,
                             fps=cfg.dataset.fps,
                             home_duration_s=_home_duration,
                             play_sounds=cfg.play_sounds,
@@ -1075,7 +1077,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     prepared_at_home = reset_then_finalize_episode(
                         robot=robot,
                         reset_before_episode=cfg.reset_before_episode,
-                        home_action=home_action,
+                        home_action=startup_home_action,
                         fps=cfg.dataset.fps,
                         home_duration_s=_home_duration,
                         play_sounds=cfg.play_sounds,
@@ -1102,9 +1104,6 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                 episode_index = episode_start
                 prepared_at_home = False
                 _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
-                home_action_stream: dict[str, float] = (
-                    capture_home_action(robot) if cfg.reset_before_episode else {}
-                )
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
@@ -1115,7 +1114,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         fps=cfg.dataset.fps,
                         play_sounds=cfg.play_sounds,
                         reset_before_episode=cfg.reset_before_episode,
-                        home_action=home_action_stream,
+                        home_action=startup_home_action,
                         home_duration_s=_home_duration_s,
                         on_prepared=(
                             start_force_drag
@@ -1176,7 +1175,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         prepared_at_home = reset_then_finalize_episode(
                             robot=robot,
                             reset_before_episode=cfg.reset_before_episode,
-                            home_action=home_action_stream,
+                            home_action=startup_home_action,
                             fps=cfg.dataset.fps,
                             home_duration_s=_home_duration_s,
                             play_sounds=cfg.play_sounds,
@@ -1198,7 +1197,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                     prepared_at_home = reset_then_finalize_episode(
                         robot=robot,
                         reset_before_episode=cfg.reset_before_episode,
-                        home_action=home_action_stream,
+                        home_action=startup_home_action,
                         fps=cfg.dataset.fps,
                         home_duration_s=_home_duration_s,
                         play_sounds=cfg.play_sounds,

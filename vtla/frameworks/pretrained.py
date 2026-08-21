@@ -33,6 +33,7 @@ from torch import Tensor, nn
 
 from vtla.engine.configs import PreTrainedConfig
 from vtla.engine.configs.train import TrainPipelineConfig
+from vtla.engine.utils.constants import ACTION
 from vtla.engine.utils.hub import HubMixin
 
 from .utils import log_model_loading_keys
@@ -209,6 +210,24 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
         with caching.
         """
         raise NotImplementedError
+
+    def is_action_queue_empty(self) -> bool:
+        """Return whether the next ``select_action`` call will predict a new chunk.
+
+        Most chunking policies use ``_action_queue``. Diffusion uses an action
+        deque inside ``_queues``; policies without a queue predict on every call.
+        Keeping this query on the policy lets inference synchronize stateful
+        postprocessing with the policy's actual chunk lifetime.
+        """
+        action_queue = getattr(self, "_action_queue", None)
+        if action_queue is not None:
+            return len(action_queue) == 0
+
+        queues = getattr(self, "_queues", None)
+        if isinstance(queues, dict) and ACTION in queues:
+            return len(queues[ACTION]) == 0
+
+        return True
 
     def push_model_to_hub(
         self,

@@ -189,6 +189,7 @@ class RelativeActionsProcessorStep(ProcessorStep):
     rot_mode: str = "rot6d"
     state_key: str = ACTION_ANCHOR
     _last_state: torch.Tensor | None = field(default=None, init=False, repr=False)
+    _locked_state: torch.Tensor | None = field(default=None, init=False, repr=False)
 
     def _build_mask(self, action_dim: int) -> list[bool]:
         if not self.exclude_joints or self.action_names is None:
@@ -249,8 +250,28 @@ class RelativeActionsProcessorStep(ProcessorStep):
         return new_transition
 
     def get_cached_state(self) -> torch.Tensor | None:
-        """Return the cached ``observation.state`` used as the reference point for relative/absolute action conversions."""
-        return self._last_state
+        """Return the anchor used to decode relative actions.
+
+        Online inference locks one anchor when a new action chunk is predicted. The
+        preprocessor may continue observing newer robot states while the chunk is
+        consumed, but every queued action must still be decoded against that fixed
+        chunk anchor. Training and full-chunk offline inference do not explicitly
+        lock an anchor and therefore use the latest state directly.
+        """
+        return self._locked_state if self._locked_state is not None else self._last_state
+
+    def lock_action_anchor(self) -> None:
+        """Lock the latest state as the anchor for the next action chunk."""
+        if self._last_state is None:
+            raise RuntimeError(
+                "Cannot lock a relative-action anchor before the preprocessor has observed a state."
+            )
+        self._locked_state = self._last_state.detach().clone()
+
+    def reset(self) -> None:
+        """Clear both the latest observation and the active chunk anchor."""
+        self._last_state = None
+        self._locked_state = None
 
     def get_config(self) -> dict[str, Any]:
         return {

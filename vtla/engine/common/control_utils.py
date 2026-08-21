@@ -40,7 +40,21 @@ if TYPE_CHECKING:
     from vtla.datasets.lerobot_dataset import LeRobotDataset
     from deployment.robots import Robot  # 仅类型检查，无运行时反向依赖
 from vtla.engine.processor.pipeline import PolicyProcessorPipeline
+from vtla.engine.processor.relative_action_processor import RelativeActionsProcessorStep
 from vtla.engine.types import PolicyAction
+
+
+def _lock_relative_action_anchor_for_new_chunk(
+    policy: PreTrainedPolicy,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+) -> None:
+    """Lock the latest relative-action anchor when ``policy`` is about to replan."""
+    if not policy.is_action_queue_empty():
+        return
+
+    for step in preprocessor.steps:
+        if isinstance(step, RelativeActionsProcessorStep) and step.enabled:
+            step.lock_action_anchor()
 
 
 @cache
@@ -112,6 +126,11 @@ def predict_action(
         # Convert to pytorch format: channel first and float32 in [0,1] with batch dimension
         observation = prepare_observation_for_inference(observation, device, task, robot_type)
         observation = preprocessor(observation)
+
+        # Relative actions in a predicted chunk are all expressed against the
+        # observation that generated that chunk. Lock it before select_action
+        # fills the queue, and keep it unchanged while queued actions are consumed.
+        _lock_relative_action_anchor_for_new_chunk(policy, preprocessor)
 
         # Compute the next action with the policy
         # based on the current observation

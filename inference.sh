@@ -3,11 +3,11 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260820_221144_20260820_202004_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong}
+pretrained_id=${1:-20260821_rm_isf_umi_left_20260820_insert_easy_robust_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong}
 step=${2:-3000}
 
 # 动作配置
-n_action_steps=${3:-}
+n_action_steps=${3:-26}
 action_start_offset=${4:-6}
 
 # 复位选项
@@ -17,7 +17,7 @@ home_duration_s=4.0                       # 平滑复位耗时（秒）
 # 显式 home 示例：
 # home_joints='{"left_main_joint1": -0.109262, "left_main_joint2": 0.235679, "left_main_joint3": 0.118975, "left_main_joint4": 1.265910, "left_main_joint5": 0.034194, "left_main_joint6": 1.589552, "left_main_joint7": -0.278270, "right_main_joint1": 0.041508, "right_main_joint2": 0.100594, "right_main_joint3": 0.046601, "right_main_joint4": 1.527823, "right_main_joint5": 0.011595, "right_main_joint6": 1.477732, "right_main_joint7": 0.472311}'
 
-max_ee_pos_step=0.01 # 关节角限速
+max_ee_pos_step=0.05 # 关节角限速
 
 
 # ===============================================
