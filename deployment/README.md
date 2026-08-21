@@ -186,13 +186,13 @@ decode:      rgb48le, uint16 HWC
 推荐入口：
 
 ```bash
-bash inference.sh <run_id> <step> [n_action_steps] [action_start_offset]
+bash inference.sh <pretrained_id> <step> [n_action_steps] [action_start_offset]
 ```
 
 脚本加载：
 
 ```text
-playground/results/models/<run_id>/checkpoints/<step_6_digits>/pretrained_model
+playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained_model
 ```
 
 例如 `step=3000` 会读取 `checkpoints/003000/pretrained_model`。推理录像默认写入 `playground/eval/`。

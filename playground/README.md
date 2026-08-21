@@ -108,9 +108,9 @@ playground/results/backbones/<timestamp>_tacmae_<arch>_from_<init_mode>/
 VTLA policy：
 
 ```text
-playground/results/models/<run_id>/
+playground/results/models/<pretrained_id>/
 ├── checkpoints/<step>/pretrained_model/
-└── <run_id>.log
+└── <pretrained_id>.log
 ```
 
 训练日志先写入系统临时目录。正常完成后才移动到 run 目录；失败或中断时临时日志会被清理。
@@ -120,7 +120,7 @@ checkpoint 的 policy `config.json` 应包含训练数据集的 `robot_type`，�
 ## 推理输出
 
 ```text
-playground/eval/eval_<timestamp>_<run_id>_step_<step>/
+playground/eval/eval_<timestamp>_<pretrained_id>_step_<step>/
 ```
 
 评测目录是新的 LeRobot 录制数据集。实际 RobotConfig、B/ISF FK/IK 和 action space 由 checkpoint 自动匹配，说明见 [Deployment](../deployment/README.md#policy-推理)。

@@ -13,6 +13,7 @@
 | `convert_umi_to_eepose.py` | 从已有 UMI pose 生成统一 EE 列 |
 | `merge_datasets.py` | 对齐公共 feature 并合并 LeRobot 数据集 |
 | `compute_dataset_mean_state.py` | 统计 state 和 home joint 候选 |
+| `evaluate_policy_offline.py` | 用完整 episode 离线对比模型预测与 GT |
 | `generate_interpolated_dit.py` | 从 Wan2.2 权重生成插值 DiT |
 | `precompute_world_model_text_embeddings.py` | 预计算 FastWAM 文本 embedding |
 
@@ -183,6 +184,42 @@ python tools/compute_dataset_mean_state.py \
 ```
 
 对 joint state 使用 `first` 时，stdout 输出可作为 `--robot.home_joints`；详细均值、标准差和范围写入 stderr。
+
+## Policy 离线评估
+
+```bash
+python tools/evaluate_policy_offline.py \
+  --dataset-root playground/data/<dataset_id> \
+  --checkpoint playground/results/models/<pretrained_id>/checkpoints/003000/pretrained_model \
+  --episodes 0-2 \
+  --device cuda
+```
+
+工具按时间顺序回放完整 episode，并对每个观测调用 `predict_action_chunk()`。结果同时包含 checkpoint
+训练时的 `action_mode` 空间（只反归一化）和机器人命令空间（完整 postprocessor）两套对比。
+每个 episode 保存两张逐维曲线图和包含完整 action chunk 的 NPZ；`metrics.json` 记录 episode
+级及全局 MAE/L1、RMSE、最大绝对误差和逐维指标。
+
+| action mode | `action_mode` 空间 | `robot_command` 空间 |
+| --- | --- | --- |
+| `absolute_joint` | 绝对关节角 | 绝对关节角，通常相同 |
+| `relative_joint` | 相对当前关节的增量 | 还原后的绝对关节角 |
+| `absolute_rot6d` | 基座系绝对 EE | 基座系绝对 EE，通常相同 |
+| `relative_rot6d` | 当前 EE 坐标系下的相对位姿 | 基座系绝对 EE |
+| `absolute_quat` | quaternion 绝对 EE | 转成 rot6d 的绝对 EE |
+| `relative_quat` | quaternion 相对 EE | 还原绝对位姿后转成 rot6d |
+
+`robot_command` 是完整 policy postprocessor 的输出，不包含机器人适配器的单步安全限幅、控制器
+IK 误差或真实机械臂的跟踪误差。
+
+默认输出到：
+
+```text
+<pretrained_id>/offline_eval/<step|last>/<dataset_id>/
+```
+
+checkpoint 与 dataset 必须具有完全相同且非空的 `robot_type`。`--stride` 默认是 `1`，增大后仍会
+顺序推进 processor 和模型历史状态，但只在每 N 帧运行一次预测。
 
 ## FastWAM 资产
 

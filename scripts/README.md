@@ -15,6 +15,7 @@ bash scripts/<script>.sh ...
 | `train_enc.sh` | 训练 AnyTouch stage-1 风格的触觉 MAE |
 | `compute_mean_state.sh` | 统计 home joint 候选或全局 state |
 | `merge_datasets.sh` | 合并脚本内配置的一组数据集 |
+| `evaluate_policy_offline.sh` | 按完整 episode 离线评估 checkpoint |
 
 ## 关节数据处理
 
@@ -213,3 +214,24 @@ python tools/merge_datasets.py \
   --out playground/data/A_B_merged \
   --repo-id A_B_merged
 ```
+
+## Policy 离线评估
+
+```bash
+bash scripts/evaluate_policy_offline.sh \
+  <dataset_id> <pretrained_id> <step|last> [episodes] [stride] [device]
+```
+
+示例：
+
+```bash
+bash scripts/evaluate_policy_offline.sh \
+  rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256 \
+  20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong \
+  3000 0-2 1 cuda
+```
+
+`episodes` 支持 `all`、`0,2,5` 或 `0-3`。输出位于对应 checkpoint 的
+`<pretrained_id>/offline_eval/<step|last>/<dataset_id>/`，其中 `offline_eval` 与 `checkpoints` 同级。目录中包含
+action mode 空间与机器人命令空间的完整 episode 曲线、NPZ
+预测数据及 episode/全局误差指标。
