@@ -23,7 +23,7 @@
     - 手腕鱼眼相机: fish_camera gRPC(50088) + UDP, 原生 1920x1080
     - 触觉传感器 x2: dmrobotics Flux gRPC(50051/50052), 输出 (288,384,3) uint16
 
-主臂 (Leader) 不在本机器人内, 由 bi_realman_ugripper_leader 遥操作器负责。
+主臂 (Leader) 不在本机器人内, 由 rm_leader_dual 遥操作器负责。
 
 observation / action 字段统一加 left_ / right_ 前缀:
     observation.state : left_main_joint1..7, left_main_gripper, right_...
@@ -46,7 +46,7 @@ class RmBaseUmiDualConfig(RobotConfig):
 
     kinematics_force_type: ClassVar[str] = "base"
     kinematics_sides: ClassVar[tuple[str, ...]] = ("right", "left")
-    teleop_type: ClassVar[str] = "bi_realman_ugripper_leader"
+    teleop_type: ClassVar[str] = "rm_leader_dual"
 
     # ============ 启用的手臂 ============
     # 可选 ["left"], ["right"], 或 ["left", "right"]

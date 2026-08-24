@@ -15,12 +15,14 @@
 from .config import RobotConfig
 from .rm_base_umi_dual.config_rm_base_umi_dual import RmBaseUmiDualConfig
 from .rm_isf_umi_left.config_rm_isf_umi_left import RmIsfUmiLeftConfig
+from .rm_isf_umi_right.config_rm_isf_umi_right import RmIsfUmiRightConfig
 from .robot import Robot
 from .utils import make_robot_from_config
 
 __all__ = [
     "RmBaseUmiDualConfig",
     "RmIsfUmiLeftConfig",
+    "RmIsfUmiRightConfig",
     "Robot",
     "RobotConfig",
     "make_robot_from_config",

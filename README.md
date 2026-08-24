@@ -4,12 +4,13 @@ StarVTLA 是面向视觉、触觉和机器人动作学习的训练与真机部�
 
 ## 支持的机器人
 
-机器人身份是数据和模型契约的一部分。目前只支持以下两个严格名称：
+机器人身份是数据和模型契约的一部分。目前支持以下严格名称：
 
 | `robot_type` | 构型 | RealMan FK/IK | 遥操作器 |
 | --- | --- | --- | --- |
-| `rm_base_umi_dual` | base/B 版双臂 + UMI 夹爪 | `RM_MODEL_RM_B_E` | `bi_realman_ugripper_leader` |
-| `rm_isf_umi_left` | ISF 版单左臂 + UMI 夹爪 | `RM_MODEL_RM_ISF_E` | `left_realman_ugripper_leader` |
+| `rm_base_umi_dual` | base/B 版双臂 + UMI 夹爪 | `RM_MODEL_RM_B_E` | `rm_leader_dual` |
+| `rm_isf_umi_left` | ISF 版单左臂 + UMI 夹爪 | `RM_MODEL_RM_ISF_E` | `rm_leader_left` |
+| `rm_isf_umi_right` | ISF 版单右臂 + UMI 夹爪 | `RM_MODEL_RM_ISF_E` | `rm_leader_right` |
 
 ## 目录
 
@@ -48,6 +49,50 @@ pip install -r requirements.txt
 ```
 
 真机运行还需要把厂商 SDK 放到 `deployment/sdk/`；具体目录见 [Deployment](deployment/README.md#厂商-sdk)。视频处理依赖 `ffmpeg` 和 `ffprobe`。
+
+## 硬件自检
+
+硬件自检支持 `rm_base_umi_dual`、`rm_isf_umi_left` 和 `rm_isf_umi_right`。
+先按当前 rig 设置机器人类型，后续三个阶段复用该变量：
+
+```bash
+robot_type=rm_isf_umi_right
+```
+
+第一步检查机械臂、末端板和主臂串口是否存在，不会驱动机械臂：
+
+```bash
+python -m deployment.tools.hardware_check \
+  --robot-type "${robot_type}" \
+  --stage existence
+```
+
+第二步连接腕部相机和触觉传感器并显示画面，不会驱动机械臂：
+
+```bash
+python -m deployment.tools.hardware_check \
+  --robot-type "${robot_type}" \
+  --stage camera \
+  --show
+```
+
+rig 没有触觉传感器时在命令末尾添加 `--no-tactile`；需要保存检查帧时添加 `--save`。
+
+第三步检查主从臂遥操作，会实际驱动从臂。确认主从臂初始姿态接近、工作区清空且
+急停可用后再运行。hardware check 使用 `2 deg/s` 的逐关节目标角速度限制：
+
+```bash
+python -m deployment.tools.hardware_check \
+  --robot-type "${robot_type}" \
+  --stage teleop \
+  --confirm-move \
+  --duration 5 \
+  --max-joint-speed-deg-s 2
+```
+
+`--max-joint-speed-deg-s` 未指定时默认为 `2 deg/s`。限速从从臂实测关节位置起步，
+并对每个关节独立生效。不需要检查夹爪时添加 `--no-gripper`。更完整的参数说明见
+[Deployment 硬件自检](deployment/README.md#硬件自检)。
 
 ## 完整工作流
 
@@ -161,6 +206,7 @@ bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
 | 本地数据、权重和输出布局 | [playground/README.md](playground/README.md) |
 | 机器人、SDK、采集、推理和安全 | [deployment/README.md](deployment/README.md) |
 | 数据处理和训练脚本 | [scripts/README.md](scripts/README.md) |
+| 对外数据采集、处理与交付规范 | [docs/data_collection_and_handoff_spec_cn.md](docs/data_collection_and_handoff_spec_cn.md) |
 | 独立离线工具 | [tools/README.md](tools/README.md) |
 | Policy、state/action 和触觉路由 | [vtla/README.md](vtla/README.md) |
 | StarVLA-GR00T | [vtla/frameworks/starvla_groot/README.md](vtla/frameworks/starvla_groot/README.md) |
@@ -179,8 +225,7 @@ git push origin main
 
 ## TODO List
 ```bash
-1 relative_state的实现
-2 DAgger的采集
-3 controller实现与异步推理
-4 Backbone重构
+1 DAgger的采集
+2 controller实现与异步推理
+3 Backbone重构
 ```

@@ -70,12 +70,11 @@ from deployment.hardware.tactile_sensors import TactileMkvWriter
 from deployment.robots import Robot, RobotConfig, make_robot_from_config
 from deployment.robots.rm_base_umi_dual import RmBaseUmiDual  # noqa: F401  注册 config 选项
 from deployment.robots.rm_isf_umi_left import RmIsfUmiLeft  # noqa: F401  注册 config 选项
+from deployment.robots.rm_isf_umi_right import RmIsfUmiRight  # noqa: F401  注册 config 选项
 from deployment.teleoperators import Teleoperator, TeleoperatorConfig, make_teleoperator_from_config
-from deployment.teleoperators.realman_rm75b_leader import RealmanRM75bLeader  # noqa: F401  注册 config 选项
-from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeader  # noqa: F401  注册 config 选项
-from deployment.teleoperators.left_realman_ugripper_leader import (  # noqa: F401
-    LeftRealmanUGripperLeader,
-)
+from deployment.teleoperators.rm_leader_dual import RmLeaderDual  # noqa: F401  注册 config 选项
+from deployment.teleoperators.rm_leader_left import RmLeaderLeft  # noqa: F401  注册 config 选项
+from deployment.teleoperators.rm_leader_right import RmLeaderRight  # noqa: F401  注册 config 选项
 from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
 
 # ---- 策略 / 数据集 / 处理管线 (复用本仓库 vtla) ----

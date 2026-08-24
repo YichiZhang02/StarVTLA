@@ -1,0 +1,2 @@
+# FTDI FT231X on the right RealMan ISF leader arm (serial: DU0E1ZZP).
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", ATTRS{serial}=="DU0E1ZZP", SYMLINK+="ttyRealmanISFLeaderR", MODE="0666"

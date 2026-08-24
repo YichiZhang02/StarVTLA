@@ -29,12 +29,13 @@
 
 常用覆盖:
     --arms left,right         要检查的臂 (默认取 config)
-    --left-port /dev/ttyLeaderL  --right-port /dev/ttyLeaderR   主臂串口
+    --left-port /dev/ttyRealmanBaseLeaderL  --right-port /dev/ttyRealmanBaseLeaderR
     --no-tactile              跳过触觉
 """
 
 import argparse
 import contextlib
+import math
 import os
 import select
 import subprocess
@@ -45,8 +46,10 @@ import tty
 
 from deployment.robots.rm_base_umi_dual import RmBaseUmiDualConfig
 from deployment.robots.rm_isf_umi_left import RmIsfUmiLeftConfig
-from deployment.teleoperators.bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
-from deployment.teleoperators.left_realman_ugripper_leader import LeftRealmanUGripperLeaderConfig
+from deployment.robots.rm_isf_umi_right import RmIsfUmiRightConfig
+from deployment.teleoperators.rm_leader_dual import RmLeaderDualConfig
+from deployment.teleoperators.rm_leader_left import RmLeaderLeftConfig
+from deployment.teleoperators.rm_leader_right import RmLeaderRightConfig
 
 # ---------------- 终端着色 ----------------
 _G, _R, _Y, _0 = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
@@ -70,25 +73,25 @@ def header(title):
 
 # ---------------- 按臂取配置 ----------------
 def follower_ip(cfg, side):
-    if isinstance(cfg, RmIsfUmiLeftConfig):
+    if hasattr(cfg, "follower_ip"):
         return cfg.follower_ip
     return cfg.left_follower_ip if side == "left" else cfg.right_follower_ip
 
 
 def board_ip(cfg, side):
-    if isinstance(cfg, RmIsfUmiLeftConfig):
+    if hasattr(cfg, "board_ip"):
         return cfg.board_ip
     return cfg.left_board_ip if side == "left" else cfg.right_board_ip
 
 
 def fisheye_udp_port(cfg, side):
-    if isinstance(cfg, RmIsfUmiLeftConfig):
+    if hasattr(cfg, "fisheye_udp_port"):
         return cfg.fisheye_udp_port
     return cfg.left_fisheye_udp_port if side == "left" else cfg.right_fisheye_udp_port
 
 
 def tactile_pc_ports(cfg, side):
-    if isinstance(cfg, RmIsfUmiLeftConfig):
+    if hasattr(cfg, "tactile0_pc_port"):
         return cfg.tactile0_pc_port, cfg.tactile1_pc_port
     if side == "left":
         return cfg.left_tactile0_pc_port, cfg.left_tactile1_pc_port
@@ -96,13 +99,13 @@ def tactile_pc_ports(cfg, side):
 
 
 def gripper_itinerary(cfg, side):
-    if isinstance(cfg, RmIsfUmiLeftConfig):
+    if hasattr(cfg, "gripper_itinerary"):
         return cfg.gripper_itinerary
     return cfg.left_gripper_itinerary if side == "left" else cfg.right_gripper_itinerary
 
 
 def leader_port(tcfg, side):
-    if isinstance(tcfg, LeftRealmanUGripperLeaderConfig):
+    if hasattr(tcfg, "port"):
         return tcfg.port
     return tcfg.left_port if side == "left" else tcfg.right_port
 
@@ -325,7 +328,31 @@ def _normalize_leader_gripper(raw: float, tcfg) -> float:
     return float(max(0.0, min(1.0, norm)))
 
 
-def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripper: bool) -> bool:
+def _limit_joint_velocity(previous, target, max_speed: float, dt: float):
+    """Limit every commanded joint delta to max_speed * dt."""
+    import numpy as np
+
+    previous = np.asarray(previous, dtype=float)
+    target = np.asarray(target, dtype=float)
+    if previous.shape != target.shape:
+        raise ValueError(f"joint shape mismatch: previous={previous.shape}, target={target.shape}")
+    if not np.all(np.isfinite(previous)) or not np.all(np.isfinite(target)):
+        raise ValueError("joint positions must be finite")
+    if not np.isfinite(max_speed) or not np.isfinite(dt) or max_speed <= 0 or dt <= 0:
+        raise ValueError("max_speed and dt must be positive")
+    max_step = float(max_speed) * float(dt)
+    return previous + np.clip(target - previous, -max_step, max_step)
+
+
+def stage_teleop(
+    cfg,
+    tcfg,
+    arms,
+    duration: float,
+    confirm_move: bool,
+    use_gripper: bool,
+    max_joint_speed_deg_s: float,
+) -> bool:
     header("阶段 3 / 主从同步 (⚠️ 从臂会跟随主臂运动!)")
     import numpy as np
     from deployment.hardware.leader_arms import RealmanLeader
@@ -371,17 +398,37 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
                 except Exception as e:
                     warn(f"{side} 夹爪异常 ({e}), 该臂只测手臂关节")
 
-        # 安全提示: 先比较初始位姿, 警告首帧跳变
-        print("\n初始位姿对比 (主臂目标 vs 从臂当前, 弧度):")
+        # 从实测从臂位置起步；后续目标每周期做逐关节速度限制。
+        commanded = {}
+        print("\n初始位姿对比 (主臂目标 vs 从臂当前):")
         for side in arms:
-            lpos = leaders[side].read_position()[:7]
+            lpos = np.asarray(leaders[side].read_position()[:7], dtype=float)
+            if cfg.use_degrees:
+                lpos = np.rad2deg(lpos)
             fpos = followers[side].read_joints_now()
-            if fpos is not None:
-                gap = float(np.max(np.abs(np.asarray(lpos) - fpos)))
-                msg = f"{side}: 最大关节差 {gap:.3f} rad"
-                (warn if gap > 0.3 else ok)(msg + ("  ⚠️ 首帧跳变大, 请先把主臂摆到接近从臂的位姿!" if gap > 0.3 else ""))
+            if fpos is None:
+                fpos = followers[side].read_joints()
+            fpos = np.asarray(fpos, dtype=float)
+            if fpos.shape != (7,) or not np.all(np.isfinite(fpos)):
+                raise RuntimeError(f"[{side}] 无法读取有效的 7 维从臂初始关节位置: {fpos}")
+            commanded[side] = fpos.copy()
+            gap = float(np.max(np.abs(lpos - fpos)))
+            gap_deg = gap if cfg.use_degrees else float(np.rad2deg(gap))
+            msg = f"{side}: 最大关节差 {gap_deg:.1f} deg"
+            (warn if gap_deg > 15.0 else ok)(
+                msg + ("；将从当前从臂姿态按限速平滑追赶" if gap_deg > 15.0 else "")
+            )
 
         unit = "度" if cfg.use_degrees else "弧度"
+        max_joint_speed = (
+            max_joint_speed_deg_s
+            if cfg.use_degrees
+            else float(np.deg2rad(max_joint_speed_deg_s))
+        )
+        print(
+            f"{_Y}逐关节目标限速: {max_joint_speed_deg_s:.1f} deg/s "
+            f"(控制周期最多按 50ms 计算){_0}"
+        )
         print(f"\n{_Y}3 秒后开始主从同步: 手动操作主臂, 从臂跟随。按 q / ESC 结束 (Ctrl-C 也可)。{_0}")
         if duration > 0:
             print(f"{_Y}(最长 {duration:.0f}s 后自动停止){_0}")
@@ -391,6 +438,7 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
 
         # 同步循环: 一直跑到按键 (或到达可选上限 duration)
         t0 = time.time()
+        last_command_time = time.monotonic()
         max_gap = {side: 0.0 for side in arms}
         n_iter = 0
         with _raw_stdin():
@@ -402,9 +450,20 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
                 if duration > 0 and time.time() - t0 > duration:
                     print("\n  到达最长时长, 自动停止")
                     break
+                now = time.monotonic()
+                # Cap dt so a debugger pause or serial stall cannot authorize one large jump.
+                dt = min(max(now - last_command_time, 1e-3), 0.05)
+                last_command_time = now
                 for side in arms:
                     pos = leaders[side].read_position()
-                    followers[side].send_joints(pos[:7])
+                    target = np.asarray(pos[:7], dtype=float)
+                    if cfg.use_degrees:
+                        target = np.rad2deg(target)
+                    limited = _limit_joint_velocity(
+                        commanded[side], target, max_joint_speed, dt
+                    )
+                    if followers[side].send_joints(limited) == 0:
+                        commanded[side] = limited
                     # 夹爪: 主臂第 8 个读数归一化后下发
                     if side in grippers:
                         grippers[side].move_norm(_normalize_leader_gripper(pos[7], tcfg))
@@ -413,6 +472,8 @@ def stage_teleop(cfg, tcfg, arms, duration: float, confirm_move: bool, use_gripp
                 for side in arms:
                     fnow = followers[side].read_joints()
                     tgt = np.asarray(leaders[side].read_position()[:7])
+                    if cfg.use_degrees:
+                        tgt = np.rad2deg(tgt)
                     max_gap[side] = max(max_gap[side], float(np.max(np.abs(tgt - fnow))))
                 n_iter += 1
 
@@ -440,7 +501,7 @@ def main():
     ap = argparse.ArgumentParser(description="睿尔曼 ugripper 硬件自检")
     ap.add_argument(
         "--robot-type",
-        choices=["rm_base_umi_dual", "rm_isf_umi_left"],
+        choices=["rm_base_umi_dual", "rm_isf_umi_left", "rm_isf_umi_right"],
         default="rm_base_umi_dual",
     )
     ap.add_argument("--stage", choices=["existence", "camera", "teleop", "all"], default="existence")
@@ -454,24 +515,42 @@ def main():
                     help="阶段3 最长秒数; 0=一直跟随到按 q/ESC (默认)")
     ap.add_argument("--confirm-move", action="store_true", help="阶段3 必须显式确认 (会驱动从臂)")
     ap.add_argument("--no-gripper", action="store_true", help="阶段3 不连/不同步从臂夹爪")
+    ap.add_argument(
+        "--max-joint-speed-deg-s",
+        type=float,
+        default=2.0,
+        help="阶段3每个关节的最大目标角速度 deg/s (默认 2)",
+    )
     args = ap.parse_args()
+    if not math.isfinite(args.max_joint_speed_deg_s) or args.max_joint_speed_deg_s <= 0:
+        ap.error("--max-joint-speed-deg-s 必须是大于 0 的有限值")
 
-    cfg = (RmIsfUmiLeftConfig() if args.robot_type == "rm_isf_umi_left"
-           else RmBaseUmiDualConfig())
-    tcfg = (LeftRealmanUGripperLeaderConfig()
-            if isinstance(cfg, RmIsfUmiLeftConfig)
-            else BiRealmanUGripperLeaderConfig())
+    config_by_type = {
+        "rm_base_umi_dual": (RmBaseUmiDualConfig, RmLeaderDualConfig),
+        "rm_isf_umi_left": (RmIsfUmiLeftConfig, RmLeaderLeftConfig),
+        "rm_isf_umi_right": (RmIsfUmiRightConfig, RmLeaderRightConfig),
+    }
+    robot_config_cls, teleop_config_cls = config_by_type[args.robot_type]
+    cfg = robot_config_cls()
+    tcfg = teleop_config_cls()
     if args.left_port:
-        if isinstance(tcfg, LeftRealmanUGripperLeaderConfig):
+        if args.robot_type == "rm_isf_umi_left":
             tcfg.port = args.left_port
-        else:
+        elif isinstance(tcfg, RmLeaderDualConfig):
             tcfg.left_port = args.left_port
-    if args.right_port and isinstance(tcfg, BiRealmanUGripperLeaderConfig):
-        tcfg.right_port = args.right_port
-    default_arms = ["left"] if isinstance(cfg, RmIsfUmiLeftConfig) else list(cfg.arms)
+        else:
+            ap.error("rm_isf_umi_right 不接受 --left-port；请使用 --right-port")
+    if args.right_port:
+        if args.robot_type == "rm_isf_umi_right":
+            tcfg.port = args.right_port
+        elif isinstance(tcfg, RmLeaderDualConfig):
+            tcfg.right_port = args.right_port
+        else:
+            ap.error("rm_isf_umi_left 不接受 --right-port；请使用 --left-port")
+    default_arms = list(cfg.kinematics_sides) if not hasattr(cfg, "arms") else list(cfg.arms)
     arms = args.arms.split(",") if args.arms else default_arms
-    if isinstance(cfg, RmIsfUmiLeftConfig) and arms != ["left"]:
-        ap.error("rm_isf_umi_left 只支持 --arms left")
+    if not hasattr(cfg, "arms") and tuple(arms) != cfg.kinematics_sides:
+        ap.error(f"{args.robot_type} 只支持 --arms {','.join(cfg.kinematics_sides)}")
     use_tactile = cfg.use_tactile and not args.no_tactile
 
     print(f"自检目标: arms={arms}, use_tactile={use_tactile}, stage={args.stage}")
@@ -482,8 +561,15 @@ def main():
     if args.stage in ("camera", "all"):
         results["camera"] = stage_camera(cfg, arms, use_tactile, args.save, args.show)
     if args.stage in ("teleop", "all"):
-        results["teleop"] = stage_teleop(cfg, tcfg, arms, args.duration, args.confirm_move,
-                                         use_gripper=not args.no_gripper)
+        results["teleop"] = stage_teleop(
+            cfg,
+            tcfg,
+            arms,
+            args.duration,
+            args.confirm_move,
+            use_gripper=not args.no_gripper,
+            max_joint_speed_deg_s=args.max_joint_speed_deg_s,
+        )
 
     header("汇总")
     for k, v in results.items():

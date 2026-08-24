@@ -249,7 +249,8 @@ def _resolve_action_space(cfg: InferenceConfig) -> None:
             raise ValueError(
                 f"checkpoint 的 action_representation={representation} 需要 EE 动作空间, 但机器人 "
                 f"'{getattr(cfg.robot, 'type', cfg.robot)}' 不支持 action_space 字段。"
-                "请使用支持 EE 的机器人 (rm_base_umi_dual/rm_isf_umi_left)。"
+                "请使用支持 EE 的机器人 "
+                "(rm_base_umi_dual/rm_isf_umi_left/rm_isf_umi_right)。"
             )
         return
     cfg.robot.action_space = "ee" if needs_ee else "joint"

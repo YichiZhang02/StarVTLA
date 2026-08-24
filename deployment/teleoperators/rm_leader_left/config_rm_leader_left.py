@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from deployment.teleoperators.config import TeleoperatorConfig
 
 
-@TeleoperatorConfig.register_subclass("left_realman_ugripper_leader")
+@TeleoperatorConfig.register_subclass("rm_leader_left")
 @dataclass
-class LeftRealmanUGripperLeaderConfig(TeleoperatorConfig):
+class RmLeaderLeftConfig(TeleoperatorConfig):
     """通过一个串口读取单左主臂的独立配置。"""
 
-    port: str = "/dev/ttyRealmanUGripperLeftLeader"
+    port: str = "/dev/ttyRealmanISFLeaderL"
     baudrate: int = 460800
     hex_data: str = "55 AA 02 00 00 67"
 
@@ -24,7 +24,7 @@ class LeftRealmanUGripperLeaderConfig(TeleoperatorConfig):
     leader_gripper_max: float = 0.971
     gripper_gain: float = 1.0
 
-    id: str | None = "left_realman_ugripper_leader"
+    id: str | None = "rm_leader_left"
 
     def __post_init__(self) -> None:
         if self.leader_gripper_max <= self.leader_gripper_min:

@@ -124,8 +124,7 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
 
     sides = getattr(cfg.robot, "arms", None)
     if sides is None:
-        # rm_isf_umi_left always controls logical left.
-        sides = ("left",)
+        sides = cfg.robot.kinematics_sides
     expected = {
         f"{side}_main_joint{joint_index}"
         for side in sides

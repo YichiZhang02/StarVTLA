@@ -64,7 +64,7 @@ class RealmanLeader(LeaderArmBase):
         初始化主臂通信
 
         Args:
-            port: 串口路径，如 /dev/ttyLeaderR
+            port: 串口路径，如 /dev/ttyRealmanISFLeaderR
             baudrate: 波特率，默认 460800
             hex_data: 请求指令 (hex 字符串)
             timeout: 读取超时 (秒)

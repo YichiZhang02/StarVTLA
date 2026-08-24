@@ -32,18 +32,18 @@ class TeleopEvents(Enum):
 
 
 def make_teleoperator_from_config(config: TeleoperatorConfig) -> Teleoperator:
-    if config.type == "realman_rm75b_leader":
-        from .realman_rm75b_leader import RealmanRM75bLeader
+    if config.type == "rm_leader_dual":
+        from .rm_leader_dual import RmLeaderDual
 
-        return RealmanRM75bLeader(config)
-    elif config.type == "bi_realman_ugripper_leader":
-        from .bi_realman_ugripper_leader import BiRealmanUGripperLeader
+        return RmLeaderDual(config)
+    elif config.type == "rm_leader_left":
+        from .rm_leader_left import RmLeaderLeft
 
-        return BiRealmanUGripperLeader(config)
-    elif config.type == "left_realman_ugripper_leader":
-        from .left_realman_ugripper_leader import LeftRealmanUGripperLeader
+        return RmLeaderLeft(config)
+    elif config.type == "rm_leader_right":
+        from .rm_leader_right import RmLeaderRight
 
-        return LeftRealmanUGripperLeader(config)
+        return RmLeaderRight(config)
     else:
         try:
             return cast(Teleoperator, make_device_from_device_class(config))

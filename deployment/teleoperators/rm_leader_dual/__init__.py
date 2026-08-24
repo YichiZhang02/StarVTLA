@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .bi_realman_ugripper_leader import BiRealmanUGripperLeader
-from .config_bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
+from .config_rm_leader_dual import RmLeaderDualConfig
+from .rm_leader_dual import RmLeaderDual
 
-__all__ = ["BiRealmanUGripperLeaderConfig", "BiRealmanUGripperLeader"]
+__all__ = ["RmLeaderDualConfig", "RmLeaderDual"]

@@ -18,7 +18,7 @@
 睿尔曼 RM75b 双臂 (ugripper 集成版) LeRobot 适配器
 
 每条手臂: 从臂(TCP) + 领控电爪(gRPC/CAN) + 手腕鱼眼相机(gRPC/UDP) + 2 路触觉(gRPC)。
-主臂由 bi_realman_ugripper_leader 遥操作器负责, 本机器人只管从臂侧设备。
+主臂由 rm_leader_dual 遥操作器负责, 本机器人只管从臂侧设备。
 
 数据格式 (每条启用的手臂, side ∈ {left, right}):
     observation.state:

@@ -29,19 +29,17 @@ from dataclasses import dataclass, field
 from deployment.teleoperators.config import TeleoperatorConfig
 
 
-@TeleoperatorConfig.register_subclass("bi_realman_ugripper_leader")
+@TeleoperatorConfig.register_subclass("rm_leader_dual")
 @dataclass
-class BiRealmanUGripperLeaderConfig(TeleoperatorConfig):
+class RmLeaderDualConfig(TeleoperatorConfig):
     """双臂主臂遥操作器配置。"""
-
-    type: str = "bi_realman_ugripper_leader"
 
     # 启用的手臂
     arms: list[str] = field(default_factory=lambda: ["left", "right"])
 
     # ============ 主臂串口 ============
-    left_port: str = "/dev/ttyLeaderL"
-    right_port: str = "/dev/ttyLeaderR"
+    left_port: str = "/dev/ttyRealmanBaseLeaderL"
+    right_port: str = "/dev/ttyRealmanBaseLeaderR"
     baudrate: int = 460800
     hex_data: str = "55 AA 02 00 00 67"
 
@@ -61,4 +59,4 @@ class BiRealmanUGripperLeaderConfig(TeleoperatorConfig):
     # 以中点 0.5 为中心的增益放大, 让夹爪行程更"满"
     gripper_gain: float = 1.0
 
-    id: str | None = "bi_realman_ugripper_leader"
+    id: str | None = "rm_leader_dual"

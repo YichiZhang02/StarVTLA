@@ -15,17 +15,18 @@ from deployment.hardware.leader_arms import RealmanLeader
 from deployment.teleoperators.teleoperator import Teleoperator
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
-from .config_left_realman_ugripper_leader import LeftRealmanUGripperLeaderConfig
+from .config_rm_leader_left import RmLeaderLeftConfig
 
 logger = logging.getLogger(__name__)
 
 
-class _LeftLeaderReader(threading.Thread):
-    """持续读取单左主臂，向采集循环提供最新位置。"""
+class _LeaderReader(threading.Thread):
+    """持续读取单主臂，向采集循环提供最新位置。"""
 
-    def __init__(self, leader: RealmanLeader):
-        super().__init__(daemon=True, name="LeftLeaderReader")
+    def __init__(self, leader: RealmanLeader, side: str):
+        super().__init__(daemon=True, name=f"{side.title()}LeaderReader")
         self._leader = leader
+        self._side = side
         self._running = True
         self._lock = threading.Lock()
         self._positions = leader.read_position()
@@ -37,7 +38,7 @@ class _LeftLeaderReader(threading.Thread):
                 with self._lock:
                     self._positions = positions
             except Exception as exc:  # noqa: BLE001
-                logger.debug("左主臂异步读取失败: %s", exc)
+                logger.debug("%s 主臂异步读取失败: %s", self._side, exc)
             time.sleep(0.001)
 
     def get_position(self) -> np.ndarray:
@@ -48,25 +49,27 @@ class _LeftLeaderReader(threading.Thread):
         self._running = False
 
 
-class LeftRealmanUGripperLeader(Teleoperator):
+class RmLeaderLeft(Teleoperator):
     """输出与 rm_isf_umi_left 对齐的 8 维 left_* 动作。"""
 
-    config_class = LeftRealmanUGripperLeaderConfig
-    name = "left_realman_ugripper_leader"
+    config_class = RmLeaderLeftConfig
+    name = "rm_leader_left"
+    SIDE = "left"
+    SIDE_LABEL = "左"
 
     JOINT_NAMES = [f"main_joint{i}" for i in range(1, 8)]
     GRIPPER_NAME = "main_gripper"
 
-    def __init__(self, config: LeftRealmanUGripperLeaderConfig):
+    def __init__(self, config: RmLeaderLeftConfig):
         super().__init__(config)
         self.config = config
         self._leader: RealmanLeader | None = None
-        self._reader: _LeftLeaderReader | None = None
+        self._reader: _LeaderReader | None = None
 
     @cached_property
     def action_features(self) -> dict[str, type]:
-        features = {f"left_{joint}": float for joint in self.JOINT_NAMES}
-        features[f"left_{self.GRIPPER_NAME}"] = float
+        features = {f"{self.SIDE}_{joint}": float for joint in self.JOINT_NAMES}
+        features[f"{self.SIDE}_{self.GRIPPER_NAME}"] = float
         return features
 
     @cached_property
@@ -86,7 +89,7 @@ class LeftRealmanUGripperLeader(Teleoperator):
             raise DeviceAlreadyConnectedError(f"{self} 已连接")
         if not os.path.exists(self.config.port):
             raise ConnectionError(
-                f"左主臂串口 {self.config.port} 不存在，请检查 USB 连接和 udev 规则"
+                f"{self.SIDE_LABEL}主臂串口 {self.config.port} 不存在，请检查 USB 连接和 udev 规则"
             )
 
         leader = RealmanLeader(
@@ -98,7 +101,7 @@ class LeftRealmanUGripperLeader(Teleoperator):
             leader.connect()
             self._leader = leader
             if self.config.async_read:
-                self._reader = _LeftLeaderReader(leader)
+                self._reader = _LeaderReader(leader, self.SIDE)
                 self._reader.start()
                 time.sleep(0.1)
             self.configure()
@@ -114,7 +117,7 @@ class LeftRealmanUGripperLeader(Teleoperator):
             self._reader = None
             raise
 
-        logger.info("左主臂已连接: %s", self.config.port)
+        logger.info("%s主臂已连接: %s", self.SIDE_LABEL, self.config.port)
 
     def disconnect(self) -> None:
         if not self.is_connected:
@@ -129,10 +132,10 @@ class LeftRealmanUGripperLeader(Teleoperator):
                 self._leader.disconnect()
             finally:
                 self._leader = None
-        logger.info("左主臂已断开")
+        logger.info("%s主臂已断开", self.SIDE_LABEL)
 
     def calibrate(self) -> None:
-        logger.info("左主臂出厂已校准，跳过")
+        logger.info("%s主臂出厂已校准，跳过", self.SIDE_LABEL)
 
     def configure(self) -> None:
         pass
@@ -154,13 +157,19 @@ class LeftRealmanUGripperLeader(Teleoperator):
             else self._leader.read_position()
         )
         if len(positions) < 8:
-            raise RuntimeError(f"左主臂返回 {len(positions)} 维位置，期望至少 8 维")
+            raise RuntimeError(
+                f"{self.SIDE_LABEL}主臂返回 {len(positions)} 维位置，期望至少 8 维"
+            )
 
         action: dict[str, Any] = {}
         for index, joint in enumerate(self.JOINT_NAMES):
             value = float(positions[index])
-            action[f"left_{joint}"] = float(np.rad2deg(value)) if self.config.use_degrees else value
-        action[f"left_{self.GRIPPER_NAME}"] = self._normalize_gripper(float(positions[7]))
+            action[f"{self.SIDE}_{joint}"] = (
+                float(np.rad2deg(value)) if self.config.use_degrees else value
+            )
+        action[f"{self.SIDE}_{self.GRIPPER_NAME}"] = self._normalize_gripper(
+            float(positions[7])
+        )
         return action
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:

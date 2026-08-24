@@ -33,7 +33,7 @@ import numpy as np
 from deployment.teleoperators.teleoperator import Teleoperator
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
-from .config_bi_realman_ugripper_leader import BiRealmanUGripperLeaderConfig
+from .config_rm_leader_dual import RmLeaderDualConfig
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +66,17 @@ class _AsyncLeaderReader(threading.Thread):
         self.running = False
 
 
-class BiRealmanUGripperLeader(Teleoperator):
+class RmLeaderDual(Teleoperator):
     """睿尔曼 RM75b 双臂主臂遥操作器。"""
 
-    config_class = BiRealmanUGripperLeaderConfig
-    name = "bi_realman_ugripper_leader"
+    config_class = RmLeaderDualConfig
+    name = "rm_leader_dual"
 
     DOF = 7
     JOINT_NAMES = [f"main_joint{i}" for i in range(1, 8)]
     GRIPPER_NAME = "main_gripper"
 
-    def __init__(self, config: BiRealmanUGripperLeaderConfig):
+    def __init__(self, config: RmLeaderDualConfig):
         super().__init__(config)
         self.config = config
 

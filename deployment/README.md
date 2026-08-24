@@ -4,12 +4,38 @@
 
 ## 机器人注册表
 
-目前支持两个机器人类型：
+目前支持以下机器人类型：
 
 | `robot_type` | 臂布局 | `kinematics_force_type` | `teleop_type` |
 | --- | --- | --- | --- |
-| `rm_base_umi_dual` | `("right", "left")` | `base` | `bi_realman_ugripper_leader` |
-| `rm_isf_umi_left` | `("left",)` | `isf` | `left_realman_ugripper_leader` |
+| `rm_base_umi_dual` | `("right", "left")` | `base` | `rm_leader_dual` |
+| `rm_isf_umi_left` | `("left",)` | `isf` | `rm_leader_left` |
+| `rm_isf_umi_right` | `("right",)` | `isf` | `rm_leader_right` |
+
+主臂串口使用与 rig 构型绑定的稳定 udev 名称：
+
+| `teleop_type` | 左主臂串口 | 右主臂串口 |
+| --- | --- | --- |
+| `rm_leader_dual` | `/dev/ttyRealmanBaseLeaderL` | `/dev/ttyRealmanBaseLeaderR` |
+| `rm_leader_left` | `/dev/ttyRealmanISFLeaderL` | - |
+| `rm_leader_right` | - | `/dev/ttyRealmanISFLeaderR` |
+
+`rm_isf_umi_right` 默认连接机械臂 `192.168.1.200:8080`、末端板/夹爪
+`192.168.1.11:55551`，右主臂串口使用 `/dev/ttyRealmanISFLeaderR`。仓库中的
+`udev/99-realman-isf-right-leader.rules` 按 FTDI 序列号创建该软链接。
+
+首次在一台机器上使用时安装并触发规则：
+
+```bash
+sudo install -m 0644 deployment/udev/99-realman-isf-right-leader.rules \
+  /etc/udev/rules.d/99-realman-isf-right-leader.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=tty --action=add
+sudo udevadm settle
+ls -l /dev/ttyRealmanISFLeaderR
+```
+
+该规则将串口权限设置为 `0666`，无需额外加入 `dialout` 组。
 
 注册信息由具体 RobotConfig 自己声明：
 
@@ -109,13 +135,15 @@ python -m deployment.tools.hardware_check \
   --show
 ```
 
-遥操作检查会实际驱动从臂。确认工作区清空、急停可用后再运行：
+遥操作检查会实际驱动从臂。确认工作区清空、急停可用后再运行。hardware check
+使用 `2 deg/s` 的逐关节目标角速度限制，参数未指定时也默认 `2 deg/s`：
 
 ```bash
 python -m deployment.tools.hardware_check \
   --robot-type rm_isf_umi_left \
   --stage teleop \
-  --confirm-move
+  --confirm-move \
+  --max-joint-speed-deg-s 2
 ```
 
 ## 数据采集
