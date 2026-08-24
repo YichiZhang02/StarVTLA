@@ -11,7 +11,7 @@ policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | st
 num_processes=${3:-4}
 batch_size=${4:-16}
 steps=${5:-40_000}
-save_freq=10_000
+save_freq=5_000
 log_freq=100
 
 # 数据配置
