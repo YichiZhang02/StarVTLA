@@ -3,12 +3,12 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260821_rm_isf_umi_left_20260820_insert_easy_robust_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong}
-step=${2:-3000}
+pretrained_id=${1:-20260824_rm_isf_umi_right_20260822_wipe_board_undist_uint8_256_starvla_groot_wristonly_true_tactile_as_image_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
+step=${2:-10000}
 
 # 动作配置
-n_action_steps=${3:-26}
-action_start_offset=${4:-6}
+n_action_steps=${3:-16}
+action_start_offset=${4:-0}
 control_fps=${5:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
 
 # 复位选项
@@ -21,7 +21,7 @@ home_duration_s=4.0                       # 平滑复位耗时（秒）
 # 任务描述
 single_task=${7:-}                        # 任务描述，留空则自动匹配
 
-max_ee_pos_step=0.05                      # 关节角限速
+max_ee_pos_step=0.1                      # 关节角限速
 # ===============================================
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
 step=$(printf "%06d" "$(expr "$step" + 0)")

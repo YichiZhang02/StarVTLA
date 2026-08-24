@@ -21,21 +21,35 @@
 | `rm_leader_right` | - | `/dev/ttyRealmanISFLeaderR` |
 
 `rm_isf_umi_right` 默认连接机械臂 `192.168.1.200:8080`、末端板/夹爪
-`192.168.1.11:55551`，右主臂串口使用 `/dev/ttyRealmanISFLeaderR`。仓库中的
-`udev/99-realman-isf-right-leader.rules` 按 FTDI 序列号创建该软链接。
+`192.168.1.11:55551`，右主臂串口使用 `/dev/ttyRealmanISFLeaderR`。
 
-首次在一台机器上使用时安装并触发规则：
+仓库不保存与某台主机或某个 USB 设备绑定的 udev 规则。首次在一台机器上使用时，
+需要根据该机器实际连接的主臂创建本地规则：
 
-```bash
-sudo install -m 0644 deployment/udev/99-realman-isf-right-leader.rules \
-  /etc/udev/rules.d/99-realman-isf-right-leader.rules
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=tty --action=add
-sudo udevadm settle
-ls -l /dev/ttyRealmanISFLeaderR
-```
+1. 每次只连接一条主臂，确认当前串口节点，并查看设备的唯一属性：
 
-该规则将串口权限设置为 `0666`，无需额外加入 `dialout` 组。
+   ```bash
+   ls -l /dev/serial/by-id/
+   udevadm info --attribute-walk --name=/dev/ttyUSB0
+   ```
+
+   将 `/dev/ttyUSB0` 替换为实际节点，记录可稳定区分设备的 `idVendor`、
+   `idProduct` 和 `serial`。如果设备没有唯一序列号，不要仅按临时的
+   `/dev/ttyUSB*` 编号绑定；应结合物理 USB 端口属性区分。
+
+/
+
+3. 重载规则、重新触发设备并检查软链接：
+
+   ```bash
+   sudo udevadm control --reload-rules
+   sudo udevadm trigger --subsystem-match=tty --action=add
+   sudo udevadm settle
+   ls -l /dev/ttyRealman*
+   ```
+
+规则只存在于本机的 `/etc/udev/rules.d/`，不会随仓库同步。更换主机、USB 转串口设备
+或主臂后，应重新读取设备属性并配置，不能直接复用其他机器的序列号。
 
 注册信息由具体 RobotConfig 自己声明：
 

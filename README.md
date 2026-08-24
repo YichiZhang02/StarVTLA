@@ -56,7 +56,7 @@ pip install -r requirements.txt
 先按当前 rig 设置机器人类型，后续三个阶段复用该变量：
 
 ```bash
-robot_type=rm_isf_umi_right
+robot_type=rm_isf_umi_left
 ```
 
 第一步检查机械臂、末端板和主臂串口是否存在，不会驱动机械臂：
