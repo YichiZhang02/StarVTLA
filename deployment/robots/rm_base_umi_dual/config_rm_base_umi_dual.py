@@ -168,6 +168,9 @@ class RmBaseUmiDualConfig(RobotConfig):
     home_gripper: float = 1.0
     # 复位运动总耗时 (秒), 使用 cosine ease-in/out 插值
     home_duration_s: float = 4.0
+    # 插值结束后以关节反馈确认到位；容差统一用角度表示。
+    home_joint_tolerance_deg: float = 1.0
+    home_settle_timeout_s: float = 2.0
 
     # ============ 额外本地 USB 相机 ============
     # 顶部全景相机 (cam_top), 参考 realman_tactile_shandd_hd_tac16

@@ -54,6 +54,7 @@ _init_x11_threads()
 
 import contextlib
 import logging
+import math
 import platform
 import shutil
 import threading
@@ -191,24 +192,73 @@ def move_to_home_smooth(
     fps: int,
     duration_s: float,
     record_step: Callable[[RobotObservation, RobotAction], None] | None = None,
-) -> None:
-    """从当前姿态在 duration_s 内线性插值平滑移动到 home, 逐帧通过 send_action 下发。"""
+) -> bool:
+    """从当前姿态余弦插值到 home，然后根据关节反馈等待实际到位。"""
     logging.info("[home] 本次复位使用固定启动目标: %s", dict(home_action))
     first_obs = robot.get_observation()
     start = {k: float(first_obs[k]) for k in home_action if k in first_obs}
+
+    config = getattr(robot, "config", None)
+    tolerance_deg = float(getattr(config, "home_joint_tolerance_deg", 1.0))
+    use_degrees = bool(getattr(config, "use_degrees", False))
+    tolerance = tolerance_deg if use_degrees else math.radians(tolerance_deg)
+    settle_timeout_s = float(getattr(config, "home_settle_timeout_s", 2.0))
+    joint_targets = {
+        key: float(value) for key, value in home_action.items() if "joint" in key
+    }
+
+    def send_and_record(obs: RobotObservation, target: RobotAction) -> None:
+        sent_action = robot.send_action(target)
+        if record_step is not None:
+            record_step(obs, sent_action if isinstance(sent_action, dict) else target)
 
     steps = max(1, int(duration_s * fps))
     for i in range(1, steps + 1):
         t0 = time.perf_counter()
         obs = first_obs if i == 1 else robot.get_observation()
-        alpha = i / steps
+        progress = i / steps
+        alpha = 0.5 * (1.0 - math.cos(math.pi * progress))
         target = {
             k: start.get(k, home_action[k]) * (1 - alpha) + home_action[k] * alpha
             for k in home_action
         }
-        robot.send_action(target)
-        if record_step is not None:
-            record_step(obs, target)
+        send_and_record(obs, target)
+        busy_wait(1 / fps - (time.perf_counter() - t0))
+
+    settle_start = time.perf_counter()
+    while True:
+        t0 = time.perf_counter()
+        obs = robot.get_observation()
+        send_and_record(obs, home_action)
+        errors = {
+            key: abs(float(obs[key]) - target)
+            for key, target in joint_targets.items()
+            if key in obs
+        }
+        all_joints_at_home = len(errors) == len(joint_targets) and all(
+            error <= tolerance for error in errors.values()
+        )
+        if all_joints_at_home:
+            logging.info(
+                "[home] 关节反馈已到位: max_error=%.3f°, tolerance=%.3f°",
+                math.degrees(max(errors.values(), default=0.0))
+                if not use_degrees
+                else max(errors.values(), default=0.0),
+                tolerance_deg,
+            )
+            return True
+        if time.perf_counter() - settle_start >= settle_timeout_s:
+            max_error = max(errors.values(), default=float("inf"))
+            max_error_deg = (
+                max_error if use_degrees else math.degrees(max_error)
+            )
+            logging.warning(
+                "[home] 等待关节到位超时 %.2fs: max_error=%.3f°, tolerance=%.3f°",
+                settle_timeout_s,
+                max_error_deg,
+                tolerance_deg,
+            )
+            return False
         busy_wait(1 / fps - (time.perf_counter() - t0))
 
 
@@ -238,9 +288,13 @@ def wait_for_episode_start(
     if reset_before_episode:
         if not home_action:
             raise RuntimeError("reset_before_episode=True requires a non-empty home action")
-        if not already_at_home:
+        at_home = already_at_home
+        if not at_home:
             log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
-            move_to_home_smooth(robot, home_action, fps, home_duration_s)
+            at_home = move_to_home_smooth(robot, home_action, fps, home_duration_s)
+        if not at_home:
+            log_say("复位未完全到位，将重试；按 ESC 可退出", play_sounds)
+            return False
         if on_prepared is not None:
             on_prepared()
         log_say("复位完成 按↑开始", play_sounds)
@@ -283,11 +337,12 @@ def reset_then_finalize_episode(
     record_step: Callable[[RobotObservation, RobotAction], None] | None = None,
 ) -> bool:
     """Return home before discarding or saving the recorded in-memory episode."""
+    at_home = False
     if reset_before_episode:
         if not home_action:
             raise RuntimeError("reset_before_episode=True requires a non-empty home action")
         log_say(f"{episode_label}: 机械臂复位中...", play_sounds)
-        move_to_home_smooth(
+        at_home = move_to_home_smooth(
             robot,
             home_action,
             fps,
@@ -297,7 +352,7 @@ def reset_then_finalize_episode(
         log_say("复位完成", play_sounds)
 
     finalize()
-    return reset_before_episode
+    return at_home
 
 
 @dataclass

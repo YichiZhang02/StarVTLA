@@ -84,6 +84,8 @@ class RmIsfUmiLeftConfig(RobotConfig):
     home_joints: dict[str, float] | None = None
     home_gripper: float = 1.0
     home_duration_s: float = 4.0
+    home_joint_tolerance_deg: float = 1.0
+    home_settle_timeout_s: float = 2.0
 
     # 额外本地 USB 相机；新 rig 默认没有顶部相机。
     cameras: dict[str, OpenCVTopCameraConfig] = field(default_factory=dict)

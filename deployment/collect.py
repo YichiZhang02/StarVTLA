@@ -115,6 +115,16 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
     if not cfg.reset_before_episode:
         return
 
+    home_duration_s = float(getattr(cfg.robot, "home_duration_s", 4.0))
+    tolerance_deg = float(getattr(cfg.robot, "home_joint_tolerance_deg", 1.0))
+    settle_timeout_s = float(getattr(cfg.robot, "home_settle_timeout_s", 2.0))
+    if not math.isfinite(home_duration_s) or home_duration_s <= 0:
+        raise ValueError("--robot.home_duration_s 必须大于 0")
+    if not math.isfinite(tolerance_deg) or tolerance_deg <= 0:
+        raise ValueError("--robot.home_joint_tolerance_deg 必须大于 0")
+    if not math.isfinite(settle_timeout_s) or settle_timeout_s < 0:
+        raise ValueError("--robot.home_settle_timeout_s 不能小于 0")
+
     home_joints = getattr(cfg.robot, "home_joints", None)
     if home_joints is None:
         # The robot captures its connection-time pose as a fixed home target.
@@ -149,8 +159,6 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
     )
     if non_finite:
         raise ValueError(f"--robot.home_joints 包含非有限值: {non_finite}")
-    if float(getattr(cfg.robot, "home_duration_s", 4.0)) <= 0:
-        raise ValueError("--robot.home_duration_s 必须大于 0")
 
 
 @parser.wrap()

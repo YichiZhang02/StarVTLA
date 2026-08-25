@@ -6,22 +6,30 @@ from deployment import _record_engine
 
 
 class FakeRobot:
-    def __init__(self):
+    def __init__(self, *, settle_timeout_s=2.0):
         self.observation_count = 0
         self.actions = []
+        self.joint = 4.0
+        self.config = SimpleNamespace(
+            home_joint_tolerance_deg=1.0,
+            home_settle_timeout_s=settle_timeout_s,
+            use_degrees=False,
+        )
 
     def get_observation(self):
         self.observation_count += 1
         return {
-            "joint": 4.0,
+            "joint": self.joint,
             "camera": np.full((2, 2, 3), self.observation_count, dtype=np.uint8),
         }
 
     def send_action(self, action):
         self.actions.append(action.copy())
+        self.joint = action["joint"]
+        return action.copy()
 
 
-def test_reset_then_finalize_records_every_interpolated_step(monkeypatch):
+def test_reset_then_finalize_records_interpolation_and_confirmed_home(monkeypatch):
     robot = FakeRobot()
     recorded = []
     finalized_at = []
@@ -40,10 +48,63 @@ def test_reset_then_finalize_records_every_interpolated_step(monkeypatch):
     )
 
     assert prepared_at_home is True
-    assert robot.observation_count == 4
-    assert [action["joint"] for action in robot.actions] == [3.0, 2.0, 1.0, 0.0]
+    assert robot.observation_count == 5
+    np.testing.assert_allclose(
+        [action["joint"] for action in robot.actions],
+        [3.41421356, 2.0, 0.58578644, 0.0, 0.0],
+    )
     assert [action for _, action in recorded] == robot.actions
-    assert finalized_at == [4]
+    assert finalized_at == [5]
+
+
+def test_reset_timeout_still_finalizes_and_warns(monkeypatch, caplog):
+    robot = FakeRobot(settle_timeout_s=0.0)
+    robot.send_action = lambda action: robot.actions.append(action.copy()) or action.copy()
+    monkeypatch.setattr(_record_engine, "busy_wait", lambda _seconds: None)
+    finalized = []
+
+    prepared_at_home = _record_engine.reset_then_finalize_episode(
+        robot=robot,
+        reset_before_episode=True,
+        home_action={"joint": 0.0},
+        fps=2,
+        home_duration_s=0.5,
+        play_sounds=False,
+        episode_label="Episode 1",
+        finalize=lambda: finalized.append(True),
+    )
+
+    assert prepared_at_home is False
+    assert finalized == [True]
+    assert "等待关节到位超时" in caplog.text
+
+
+def test_episode_does_not_start_after_incomplete_reset(monkeypatch):
+    events = {
+        "start_episode": True,
+        "exit_early": False,
+        "rerecord_episode": False,
+        "toggle_gripper": 0,
+        "stop_recording": False,
+    }
+    prepared = []
+    monkeypatch.setattr(_record_engine, "move_to_home_smooth", lambda *_args: False)
+    monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
+
+    started = _record_engine.wait_for_episode_start(
+        robot=FakeRobot(),
+        events=events,
+        episode_label="Episode 1",
+        fps=30,
+        play_sounds=False,
+        reset_before_episode=True,
+        home_action={"joint": 0.0},
+        home_duration_s=2.0,
+        on_prepared=lambda: prepared.append(True),
+    )
+
+    assert started is False
+    assert prepared == []
 
 
 def test_record_reset_frame_appends_dataset_state_action_and_raw_tactile():
