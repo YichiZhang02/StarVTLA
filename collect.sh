@@ -12,9 +12,9 @@ mode=${4:-drag}                          # teleop | drag
 drag_gripper_close_value=${5:-0.3}         # 0=最紧, 1=全开
 
 # 复位选项
-reset_before_episode=${6:-true}           # 与 mode 独立: true=每个 episode 前复位
+reset_before_episode=${6:-true}           # true=保存前复位，并把复位过程追加到当前 episode
 home_joints=                              # 留空：连接时读取当前关节角作为本次采集的固定复位点
-home_duration_s=4.0                       # 平滑复位耗时（秒）
+home_duration_s=2.0                       # 平滑复位耗时（秒）
 
 # 按时间命名: local/<时间戳>_<基础名>
 repo_id="local/${robot_type}_$(date +%Y%m%d)_${name}"
