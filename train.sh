@@ -4,7 +4,7 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
-dataset_id=${1:-rm_umi_dual_260708_pen_in_case_notac_undist_256}  # 数据集名
+dataset_id=${1:-260821_boarderaser_to_cup_trainready_rgb640x480_camlr_egor}  # 数据集名
 policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam
 
 # 训练配置

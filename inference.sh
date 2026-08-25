@@ -6,20 +6,22 @@ cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效,
 pretrained_id=${1:-20260824_rm_isf_umi_right_20260822_wipe_board_undist_uint8_256_starvla_groot_wristonly_true_tactile_as_image_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
 step=${2:-10000}
 
+robot_type=${3:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
+
 # 动作配置
-n_action_steps=${3:-16}
-action_start_offset=${4:-0}
-control_fps=${5:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
+n_action_steps=${4:-16}
+action_start_offset=${5:-0}
+control_fps=${6:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
 
 # 复位选项
-reset_before_episode=${6:-true}           # 与其他参数独立: true=每个 episode 前复位
+reset_before_episode=${7:-true}           # 与其他参数独立: true=每个 episode 前复位
 home_joints=                              # 留空：连接时读取当前关节角作为本次推理的固定复位点
 home_duration_s=4.0                       # 平滑复位耗时（秒）
 # 显式 home 示例：
 # home_joints='{"left_main_joint1": -0.109262, "left_main_joint2": 0.235679, "left_main_joint3": 0.118975, "left_main_joint4": 1.265910, "left_main_joint5": 0.034194, "left_main_joint6": 1.589552, "left_main_joint7": -0.278270, "right_main_joint1": 0.041508, "right_main_joint2": 0.100594, "right_main_joint3": 0.046601, "right_main_joint4": 1.527823, "right_main_joint5": 0.011595, "right_main_joint6": 1.477732, "right_main_joint7": 0.472311}'
 
 # 任务描述
-single_task=${7:-}                        # 任务描述，留空则自动匹配
+single_task=${8:-}                        # 任务描述，留空则自动匹配
 
 max_ee_pos_step=0.1                      # 关节角限速
 # ===============================================
@@ -27,6 +29,13 @@ max_ee_pos_step=0.1                      # 关节角限速
 step=$(printf "%06d" "$(expr "$step" + 0)")
 
 policy_path=playground/results/models/${pretrained_id}/checkpoints/${step}/pretrained_model
+checkpoint_robot_type=$(python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("robot_type", ""))' "${policy_path}/config.json")
+if [ "${checkpoint_robot_type}" = "umi" ] && [ -z "${robot_type}" ]; then
+  echo "错误: UMI checkpoint 必须显式传入具体 robot_type（inference.sh 的第 3 个参数）" >&2
+  exit 1
+fi
+# 普通 checkpoint 的物理类型以 checkpoint 为准；这里的默认值只用于 Draccus 创建启动配置。
+robot_type=${robot_type:-rm_base_umi_dual}
 echo "测试policy: ${policy_path}"
 echo "动作下发目标频率: ${control_fps} Hz"
 
@@ -37,7 +46,7 @@ echo "录制数据集: ${repo_id}  ->  playground/eval/${repo_id##*/}"
 
 # =================== 启动 (match_policy 自动对齐硬件 + 任务) ===================
 set -- python -m deployment.inference \
-  "--robot.type=rm_base_umi_dual" \
+  "--robot.type=${robot_type}" \
   "--policy.path=${policy_path}" \
   "--dataset.repo_id=${repo_id}" \
   "--dataset.fps=${control_fps}" \
@@ -55,9 +64,9 @@ set -- python -m deployment.inference \
 
 exec "$@"  # ee 的 max step 初次建议 0.01，确认轨迹后再使用 0.1
 
-# --- 手动传感器/任务模式示例 (robot.type 仍会强制按 checkpoint 自动匹配) ---
+# --- 手动传感器/任务模式示例 (普通 checkpoint 以 checkpoint 为准；UMI 以显式 CLI 为准) ---
 # python -m deployment.inference \
-#   --robot.type=rm_base_umi_dual \
+#   --robot.type=${robot_type} \
 #   --policy.path=${policy_path} \
 #   --dataset.repo_id=${repo_id} \
 #   --match_policy=false \

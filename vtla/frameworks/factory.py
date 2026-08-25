@@ -427,8 +427,8 @@ def make_policy(
     if isinstance(cfg, FastWAMConfig):
         cfg.load_text_encoder = not for_training
 
-    # The joint feature names are the authoritative robot layout. Infer one-vs-two-arm EE packing
-    # from the dataset so single-arm datasets do not need a manual ``ee_num_arms=1`` override.
+    # Joint datasets derive their arm layout from raw joint names. UMI datasets have no usable
+    # joints, so their canonical offline EE columns are the authoritative layout instead.
     state_names = ds_meta.features.get(OBS_STATE, {}).get("names") or []
     detected_sides = []
     for side in ("right", "left"):
@@ -437,6 +437,19 @@ def make_policy(
         has_gripper = any("gripper" in name for name in side_names)
         if joint_count == 7 and has_gripper:
             detected_sides.append(side)
+    dataset_robot_type = ds_meta.robot_type
+    if dataset_robot_type == "umi":
+        ee_names = ds_meta.features.get(OBS_STATE_ABSOLUTE_EE, {}).get("names") or []
+        detected_sides = [
+            side
+            for side in ("right", "left")
+            if any(str(name).lower().startswith(f"{side}_") for name in ee_names)
+        ]
+        if not detected_sides:
+            raise ValueError(
+                "robot_type='umi' requires canonical EE state features with explicit left/right names. "
+                "Re-run scripts/process_umi_data.sh."
+            )
     if detected_sides and hasattr(cfg, "ee_num_arms"):
         cfg.ee_num_arms = len(detected_sides)
 
@@ -447,10 +460,24 @@ def make_policy(
         kwargs["load_dino_teacher"] = for_training
     features = dataset_to_policy_features(ds_meta.features)
 
-    # Persist the dataset's exact physical robot identity in the policy checkpoint.
+    # Persist the dataset robot type exactly. ``umi`` is intentionally not a physical RobotConfig:
+    # online inference resolves it from an explicitly supplied --robot.type.
     if for_training:
-        dataset_robot_type = ds_meta.robot_type
-        RobotConfig.validate_kinematics_sides(dataset_robot_type, tuple(detected_sides))
+        if dataset_robot_type == "umi":
+            state_mode = getattr(cfg, "state_mode", "absolute_joint")
+            action_representation = getattr(cfg, "action_representation", "joint")
+            if state_mode not in {
+                "none", "episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat"
+            }:
+                raise ValueError(
+                    f"robot_type='umi' does not provide joint state; unsupported state_mode={state_mode!r}."
+                )
+            if action_representation not in {"rot6d", "quat"}:
+                raise ValueError(
+                    "robot_type='umi' only supports EE actions; choose absolute/relative rot6d or quat."
+                )
+        else:
+            RobotConfig.validate_kinematics_sides(dataset_robot_type, tuple(detected_sides))
         cfg.robot_type = dataset_robot_type
 
     if for_training:

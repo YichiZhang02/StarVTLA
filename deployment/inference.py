@@ -168,21 +168,52 @@ def _replace_robot_config(cfg: InferenceConfig, target_cls) -> None:
 
 
 def _resolve_robot_type(cfg: InferenceConfig) -> None:
-    """Match the robot adapter and B/ISF kinematics to checkpoint robot_type."""
+    """Resolve the physical robot used for this inference process.
+
+    Concrete checkpoints remain checkpoint-owned. A UMI checkpoint is embodiment-agnostic and
+    therefore requires an explicit CLI ``--robot.type``; a dataclass/default robot is not accepted.
+    The policy config is changed in memory so all subsequently built FK/action processors use the
+    same concrete type. The checkpoint on disk remains ``robot_type='umi'``.
+    """
     checkpoint_type = getattr(cfg.policy, "robot_type", None)
-    target_cls = RobotConfig.get_kinematics_config_class(checkpoint_type)
+    resolved_type = checkpoint_type
+    source = "checkpoint"
+    if checkpoint_type == "umi":
+        cli_type = parser.get_type_arg("robot")
+        if cli_type is None:
+            raise ValueError(
+                "checkpoint robot_type='umi' requires an explicit concrete robot, for example "
+                "--robot.type=rm_base_umi_dual"
+            )
+        if cli_type == "umi":
+            raise ValueError("--robot.type must be a concrete physical robot type, not 'umi'.")
+        resolved_type = cli_type
+        source = "CLI (UMI checkpoint)"
+
+    target_cls = RobotConfig.get_kinematics_config_class(resolved_type)
+    if checkpoint_type == "umi":
+        expected_arms = int(getattr(cfg.policy, "ee_num_arms", len(target_cls.kinematics_sides)))
+        if expected_arms != len(target_cls.kinematics_sides):
+            raise ValueError(
+                f"Checkpoint expects {expected_arms} arm(s), but robot_type={resolved_type!r} has "
+                f"layout={target_cls.kinematics_sides}."
+            )
     old_type = cfg.robot.type
     if not isinstance(cfg.robot, target_cls):
         _replace_robot_config(cfg, target_cls)
         logger.info(
-            "[match-policy] robot.type: %s -> %s <- checkpoint",
+            "[match-policy] robot.type: %s -> %s <- %s",
             old_type,
             cfg.robot.type,
+            source,
         )
+    if checkpoint_type == "umi":
+        cfg.policy.robot_type = resolved_type
     logger.info(
-        "[match-policy] kinematics=%s <- checkpoint robot_type=%s",
-        RobotConfig.get_kinematics_force_type(checkpoint_type).upper(),
-        checkpoint_type,
+        "[match-policy] kinematics=%s <- %s robot_type=%s",
+        RobotConfig.get_kinematics_force_type(resolved_type).upper(),
+        source,
+        resolved_type,
     )
 
 

@@ -58,18 +58,24 @@ playground/results/models/<date>_<dataset>_<policy>_<routing>/
 
 ## Robot Type 契约
 
-训练不接收独立的 `robot_type` 参数。`make_policy()` 从数据集 `meta/info.json.robot_type` 读取它，校验 RobotConfig 和臂 feature 布局，然后写入 policy 的 `config.json`：
+训练不接收独立的 `robot_type` 参数。`make_policy()` 从数据集 `meta/info.json.robot_type` 读取它，校验臂 feature 布局，然后写入 policy 的 `config.json`：
 
 ```text
 dataset robot_type -> policy.config.robot_type -> checkpoint config.json
 ```
 
-当前合法值只有：
+物理机器人数据使用注册的具体类型，例如：
 
 - `rm_base_umi_dual`：B/base 双臂。
 - `rm_isf_umi_left`：ISF 单左臂。
 
-缺失、未知类型或错误臂布局会在创建 policy 时失败。不要手动覆盖 checkpoint 的 `robot_type`；推理会把它作为在线 FK/IK 和 RobotConfig 的权威来源。
+由 `scripts/process_umi_data.sh` 导入的通用 UMI pose 数据固定使用 `robot_type=umi`。训练只允许
+EE state（或 `none`）和 EE action，并从 canonical EE feature names 校验单/双臂布局；checkpoint
+继续保存 `umi`，不会在训练时伪装成具体机械臂。
+
+具体类型 checkpoint 在推理时仍是 RobotConfig 和 FK/IK 的权威来源。只有 `umi` checkpoint 是
+例外：推理必须显式提供具体 `--robot.type`，运行时以 CLI 类型选择 RobotConfig 和 FK/IK，磁盘上的
+checkpoint 配置保持 `umi`。
 
 单任务数据集的任务文本也会写入 `policy.config.single_task`。多任务数据集不会选取任意一个任务，推理时需要显式指定。
 
@@ -102,6 +108,8 @@ EE 模式要求数据集先经过：
 
 ```bash
 bash scripts/process_joint_data.sh <dataset_id> 256 32
+# 或 unified-format UMI v2.5：
+TASK="..." bash scripts/process_umi_data.sh <dataset_id> 256 32 6
 ```
 
 每臂 rot6d 为 10 维 `[xyz, rot6d(6), gripper]`，quaternion 为 8 维 `[xyz, xyzw, gripper]`。`rm_base_umi_dual` 分别为 20/16 维，`rm_isf_umi_left` 分别为 10/8 维。

@@ -15,7 +15,7 @@ REPO_ROOT="$(pwd)"
 dataset_id=${1:-rm_umi_dual_260711_pen_in_case}
 size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
 horizon=${3:-32}      # relative action 统计包含的动作数量，通常等于训练 chunk_size
-action_gap=${4:-0}    # 必须与 train.sh 的 action_gap 一致
+action_gap=${4:-6}    # 必须与 train.sh 的 action_gap 一致
 
 # 可选 env 覆盖 (一般不用动)
 crop=${CROP:-896}     # 去畸变后居中裁剪边长 (须与训练/推理一致)

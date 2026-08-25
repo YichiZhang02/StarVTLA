@@ -71,7 +71,7 @@ deployment/robots/<robot_type>/
 
 ## Robot Type 数据契约
 
-`robot_type` 是物理构型和运动学的唯一公开参数：
+`robot_type` 是物理构型和运动学的唯一公开参数。普通真机数据链路为：
 
 ```text
 robot.type
@@ -81,12 +81,16 @@ robot.type
   -> inference 读取并选择 RobotConfig + B/ISF FK/IK
 ```
 
-不支持旧名称兼容、默认构型或基于数据集名称的猜测。以下情况都会立即失败：
+unified-format UMI 数据是唯一例外：dataset 和 checkpoint 都保存 `robot_type=umi`，训练不把它
+改成具体机械臂。推理 UMI checkpoint 时必须显式传入具体 `--robot.type`，并以该 CLI 类型选择
+RobotConfig 和 B/ISF FK/IK；非 UMI checkpoint 仍忽略 CLI 类型并以 checkpoint 为准。
+
+不支持旧名称兼容或基于数据集名称的猜测。以下情况都会立即失败：
 
 - 数据集缺少 `robot_type`。
-- `robot_type` 不在 RobotConfig 运动学注册表中。
+- 非 UMI 数据集的 `robot_type` 不在 RobotConfig 运动学注册表中。
 - 单臂/双臂 feature 与 `kinematics_sides` 不一致。
-- checkpoint 缺少或包含未知 `robot_type`。
+- checkpoint 缺少或包含未知 `robot_type`，或 UMI checkpoint 未显式提供具体 CLI 类型。
 
 ## 厂商 SDK
 
@@ -229,7 +233,7 @@ decode:      rgb48le, uint16 HWC
 
 ```bash
 bash inference.sh \
-  <pretrained_id> <step> [n_action_steps] [action_start_offset] \
+  <pretrained_id> <step> [robot_type] [n_action_steps] [action_start_offset] \
   [control_fps] [reset_before_episode] [single_task]
 ```
 
@@ -245,7 +249,7 @@ playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained
 
 ```bash
 pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
-bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
+bash inference.sh "${pretrained_id}" 3000 rm_isf_umi_left 16 6 20 true \
   "Grasp the cap and pull it off the pen."
 ```
 
@@ -253,7 +257,7 @@ bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
 
 `single_task` 默认留空，由 `match_policy` 从 checkpoint 自动读取。多数据集混合训练的多任务模型可以显式传入任务文本；该文本会作为本次推理运行的语言语义输入，并且不会被 `match_policy` 覆盖。
 
-机器人身份始终归 checkpoint 所有。`deployment.inference` 会在连接硬件前：
+普通 checkpoint 的机器人身份归 checkpoint 所有。`deployment.inference` 会在连接硬件前：
 
 1. 读取 checkpoint 的 `robot_type`。
 2. 将启动时的 RobotConfig 替换成对应的注册类型。
@@ -261,7 +265,9 @@ bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
 4. 根据 action representation 选择 `joint` 或 `ee` 动作空间。
 5. 在 `match_policy=true` 时同步触觉、额外相机、任务文本和腕部去畸变配置。
 
-即使设置 `match_policy=false`，第 1 至 3 步也不会关闭。缺失 `robot_type` 的 checkpoint 不可用于当前真机链路。
+若 checkpoint 的类型为 `umi`，第 2 至 3 步改为使用显式传入的具体 `--robot.type`；未传、仍传
+`umi` 或单/双臂布局不匹配都会在连接硬件前失败。非 UMI checkpoint 即使收到不同 CLI 类型也
+仍以 checkpoint 为准。该规则不受 `match_policy=false` 影响。
 
 Action chunk 实际执行范围为：
 

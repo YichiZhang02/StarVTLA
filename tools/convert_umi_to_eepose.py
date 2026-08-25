@@ -21,12 +21,12 @@ a UMI dataset already stores the end-effector POSE directly, so this script skip
 just converts the stored quaternion to the rot6d layout the VLA infra expects, and also stores the
 pose with quaternion rotation directly.
 
-Input layout (per ``meta/info.json`` of this dataset, LEFT arm first then RIGHT):
-    observation.state : 28-dim, per arm [gripper_Position_Rad, x, y, z, Quat_X, Quat_Y, Quat_Z,
-                        Quat_W, Acc_X, Acc_Y, Acc_Z, Gyro_X, Gyro_Y, Gyro_Z]  (IMU is DROPPED)
-    action            : 16-dim, per arm [gripper_Position_Rad, x, y, z, Quat_X, Quat_Y, Quat_Z, Quat_W]
+Input vectors may contain additional unified-format fields. Pose and gripper dimensions are resolved
+from ``meta/info.json.features[*].names`` rather than fixed vector offsets. Both the legacy
+``left_Quat_X``/``left_gripper_Position_Rad`` names and the v2.5
+``left_qx``/``gripper_left`` names are supported.
 
-ADDS four columns to the SAME dataset (the original joint-less columns are left untouched):
+ADDS eight columns to the SAME dataset (the original joint-less columns are left untouched):
 
     observation.state_episode_ee : 20-dim, EE pose of the STATE relative to each episode's FIRST
                                    frame (T0^{-1}·Tt), expressed in the first-frame frame. rot6d.
@@ -35,6 +35,8 @@ ADDS four columns to the SAME dataset (the original joint-less columns are left 
     observation.state_episode_quat : 16-dim, same as state_episode_ee but rotation as quat [x,y,z,w]
                                      (per arm: xyz(3) + quat(4) + gripper(1) = 8).
     action_episode_quat            : 16-dim, same as action_episode_ee but quat rotation.
+    observation.state_absolute_ee / action_absolute_ee : world-frame rot6d pose.
+    observation.state_absolute_quat / action_absolute_quat : world-frame quaternion pose.
 
 Output uses per arm ``[xyz(3), rot6d(6), gripper(1)]`` for rot6d (20 = 2 * 10) and
 ``[xyz(3), quat_xyzw(4), gripper(1)]`` for quat (16 = 2 * 8), ordered RIGHT arm first then LEFT.
@@ -133,19 +135,34 @@ def pose_indices(names: list[str]) -> dict:
         low = n.lower()
         side = "left" if low.startswith("left") else "right" if low.startswith("right") else None
         if side is None:
+            if low in ("gripper_left", "left_gripper"):
+                out["left"]["grip"] = i
+            elif low in ("gripper_right", "right_gripper"):
+                out["right"]["grip"] = i
             continue
         rest = low[len(side) + 1:]  # strip "left_"/"right_"
         if "position_rad" in rest or rest == "gripper":
             out[side]["grip"] = i
         elif rest in ("x", "y", "z"):
             out[side]["pos"]["xyz".index(rest)] = i
-        elif rest.startswith("quat_"):
+        elif rest.startswith("quat_") and rest.split("_")[1] in quat_axis:
             out[side]["quat"][quat_axis[rest.split("_")[1]]] = i
+        elif rest in ("qx", "qy", "qz", "qw"):
+            out[side]["quat"][quat_axis[rest[1]]] = i
     for side in ("left", "right"):
         d = out[side]
         if d["grip"] is None or None in d["pos"] or None in d["quat"]:
             raise ValueError(f"Could not locate {side} pose/gripper columns in names={names}")
     return out
+
+
+def set_gripper_calibration(idx: dict, calibration: dict[str, tuple[float, float]]) -> None:
+    """Attach per-side ``(open, closed)`` raw values used to produce [0, 1] gripper targets."""
+    for side, (open_value, closed_value) in calibration.items():
+        if np.isclose(open_value, closed_value):
+            raise ValueError(f"{side} gripper open and closed calibration values must differ")
+        idx[side]["grip_open"] = float(open_value)
+        idx[side]["grip_closed"] = float(closed_value)
 
 
 def split_arm_pose(vec: np.ndarray, idx: dict, side: str):
@@ -155,6 +172,9 @@ def split_arm_pose(vec: np.ndarray, idx: dict, side: str):
     pos = vec[d["pos"]]
     quat = vec[d["quat"]]  # (x, y, z, w)
     grip = float(vec[d["grip"]])
+    if "grip_open" in d:
+        # Robot grippers use 1=open and 0=closed. Clipping handles small sensor overshoot.
+        grip = float(np.clip((grip - d["grip_closed"]) / (d["grip_open"] - d["grip_closed"]), 0, 1))
     return pos, quat, grip
 
 
@@ -238,7 +258,7 @@ def to_absolute_quat_umi(vec: np.ndarray, idx: dict) -> np.ndarray:
     out = []
     for side in ("right", "left"):
         pos, quat, grip = split_arm_pose(vec, idx, side)
-        out.append(np.concatenate([pos, quat, [grip]]))
+        out.append(np.concatenate([pos, mat_to_quat_np(quat_to_mat(quat)), [grip]]))
     return np.concatenate(out).astype(np.float32)
 
 
@@ -520,6 +540,9 @@ def main():
                     help="First GT action offset; stats cover gap .. gap+horizon-1.")
     ap.add_argument("--frame-eps", type=float, default=0.05,
                     help="Max |action_pos - state_pos| at episode start to assert same world frame (metres).")
+    for side in ("left", "right"):
+        ap.add_argument(f"--{side}-gripper-open", type=float)
+        ap.add_argument(f"--{side}-gripper-closed", type=float)
     args = ap.parse_args()
 
     if args.horizon <= 0:
@@ -544,6 +567,21 @@ def main():
     info = json.loads((root / "meta" / "info.json").read_text())
     st_idx = pose_indices(info["features"]["observation.state"]["names"])
     ac_idx = pose_indices(info["features"]["action"]["names"])
+    calibration_values = [
+        args.left_gripper_open,
+        args.left_gripper_closed,
+        args.right_gripper_open,
+        args.right_gripper_closed,
+    ]
+    if any(value is not None for value in calibration_values):
+        if any(value is None for value in calibration_values):
+            ap.error("all four left/right gripper open/closed values must be provided together")
+        calibration = {
+            "left": (args.left_gripper_open, args.left_gripper_closed),
+            "right": (args.right_gripper_open, args.right_gripper_closed),
+        }
+        set_gripper_calibration(st_idx, calibration)
+        set_gripper_calibration(ac_idx, calibration)
     out_names = build_names()
     n_arms = EE_DIM // PER_ARM_DIM
 
@@ -649,6 +687,9 @@ def main():
             info["features"][feat] = {**template, "shape": [EE_DIM_QUAT], "names": list(out_names_quat)}
         else:
             info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
+    info["robot_type"] = "umi"
+    info["ee_num_arms"] = n_arms
+    info["ee_arm_sides"] = ["right", "left"]
     (root / "meta" / "info.json").write_text(json.dumps(info, indent=4, ensure_ascii=False))
 
     # ---- meta/stats.json (global) ----

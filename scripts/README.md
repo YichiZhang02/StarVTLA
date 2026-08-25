@@ -11,7 +11,7 @@ bash scripts/<script>.sh ...
 | 脚本 | 用途 |
 | --- | --- |
 | `process_joint_data.sh` | 关节数据去畸变、触觉转换、缩放和 FK-to-EE |
-| `process_umi_data.sh` | 已有 UMI pose 数据去畸变、缩放和 EE 标准化 |
+| `process_umi_data.sh` | 导入 unified-format UMI v2.5 数据并生成 EE 训练数据 |
 | `train_enc.sh` | 训练 AnyTouch stage-1 风格的触觉 MAE |
 | `compute_mean_state.sh` | 统计 home joint 候选或全局 state |
 | `merge_datasets.sh` | 合并脚本内配置的一组数据集 |
@@ -128,19 +128,37 @@ u8_deformation = where(
 ## UMI Pose 数据处理
 
 ```bash
-bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
+TASK="Put the board eraser into the cup." \
+  bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
 
-该流程适用于数据中已经保存末端位姿的 UMI 数据：
+该流程适用于 unified-format UMI v2.5 双臂数据。它不修改源目录；全部验证成功后，输出
+`playground/data/<dataset_id>_processed`：
 
 ```text
-<id>
-  -> <id>_undist
-  -> <id>_undist_<size>
-  -> convert_umi_to_eepose 原地生成统一 EE 列和统计
+复制非视频 metadata/data
+  -> 相机 key 改为 cam_top + left/right_cam_wrist
+  -> 修正视频 HWC metadata、缩放并裁掉超过 episode 长度的尾帧
+  -> 写入真实 task 和 robot_type=umi
+  -> 从 UMI pose 生成 absolute/episode rot6d 与 quaternion EE 列
+  -> 生成 relative-action stats 和 meta/umi_processing.json
+  -> 完整验证后将临时目录原子改名为 <id>_processed
 ```
 
-它不执行 RealMan FK，因此不用于当前 joint-only 真机采集数据。`CROP`、`JOBS`、`CAMERAS` 和 `CALIB` 与关节处理脚本一致。
+相机映射固定为：
+
+| UMI v2.5 key | VTLA key |
+| --- | --- |
+| `observation.images.ego_right_undist` | `observation.images.cam_top` |
+| `observation.images.cam_left_undist` | `observation.images.left_cam_wrist` |
+| `observation.images.cam_right_undist` | `observation.images.right_cam_wrist` |
+
+`TASK` 必须是真实指令，不能是 `Unknown task`。`JOBS` 默认 `12`。夹爪默认按每侧全数据
+最小值=张开、最大值=闭合映射到 `[1,0]`；跨数据集训练时应通过
+`LEFT_GRIPPER_OPEN/CLOSED`、`RIGHT_GRIPPER_OPEN/CLOSED` 固定统一标定。
+
+该流程不执行 RealMan FK，也不使用 UMI 中无效的 joint/finger 占位字段。UMI absolute pose
+没有 robot-base 外参标定时只适合数据分析；跨平台上机训练应优先使用 episode state + relative action。
 
 ## 触觉 Backbone 训练
 

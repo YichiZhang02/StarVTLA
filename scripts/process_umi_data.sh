@@ -1,85 +1,47 @@
 #!/bin/bash
-# UMI 数据集离线预处理流水线: 去畸变(undist) -> 降分辨率(resize) -> UMI 位姿转末端位姿(umi2ee)。
-# 用法: bash process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
-#   只需指定 dataset_id, 其余参数全部自动 (与 train.sh 同风格)。
-# 与 process_joint_data.sh 的唯一区别: 第 3 步用 convert_umi_to_eepose (UMI 已存末端位姿, 跳过 FK;
-# 并在 meta/episodes 缺失时自动重建)。
-# 产物 (非破坏, 逐级生成新副本):
-#   <id>            (原始, 不动)
-#   -> <id>_undist        鱼眼去畸变 + 居中裁 896  (仅腕部相机)
-#   -> <id>_undist_<size> 降到 size×size (默认 256)  <-- 训练用这个
-#   最后在 <id>_undist_<size> 上就地 convert_umi_to_eepose (加 EE 列)。
-set -e
-cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
-REPO_ROOT="$(pwd)"
+# Unified-format UMI -> canonical VTLA EE dataset.
+# Usage: TASK="Put the board eraser into the cup." bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
+set -euo pipefail
+cd "$(dirname "$0")/.." || exit 1
 
-# =================== 配置 (只有 dataset_id 必填) ===================
-dataset_id=${1:?"用法: bash process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]"}
-size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
-horizon=${3:-32}      # relative action 统计包含的动作数量，通常等于训练 chunk_size
-action_gap=${4:-0}    # 必须与 train.sh 的 action_gap 一致
+dataset_id=${1:?"Usage: TASK='...' bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]"}
+size=${2:-256}
+horizon=${3:-32}
+action_gap=${4:-6}
+task=${TASK:-}
+jobs=${JOBS:-12}
 
-# 可选 env 覆盖 (一般不用动)
-crop=${CROP:-896}     # 去畸变后居中裁剪边长 (须与训练/推理一致)
-jobs=${JOBS:-12}      # ffmpeg 并行 worker 数 (12 是这台机器实测甜点区; NVDEC 解码空出的 CPU 给编码用)
-# CAMERAS / CALIB 留空 = 用 undistort 工具内置默认 (腕部相机 + tools/calib/x5_*.json)
-cameras_arg=${CAMERAS:+--cameras ${CAMERAS}}
-calib_arg=${CALIB:+--calib ${CALIB}}
-
-# =================== 路径 (逐级派生) ===================
-dataset_root=playground/data
-src=${dataset_root}/${dataset_id}
-undist=${dataset_root}/${dataset_id}_undist
-final=${dataset_root}/${dataset_id}_undist_${size}
-
-export PYTHONPATH=${REPO_ROOT}:${PYTHONPATH}
-
-echo "==================================================================="
-echo "UMI 数据预处理: ${dataset_id}"
-echo "  1) undist : ${src} -> ${undist}   (crop ${crop})"
-echo "  2) resize : ${undist} -> ${final}   (size ${size})"
-echo "  3) umi2ee (就地, 无 FK, 加 EE 列): ${final}   (gap ${action_gap}, horizon ${horizon})"
-echo "==================================================================="
-
-if [ ! -d "${src}" ]; then
-  echo "错误: 源数据集不存在: ${src}"; exit 1
+if [ -z "${task}" ]; then
+  echo "Error: set TASK to the real language instruction for this dataset" >&2
+  exit 1
 fi
 
-# =================== 1) 去畸变 (原生分辨率 -> 896) ===================
-# 顺序很重要: 先在原生 1920×1080 上去畸变并裁 896, 再降采样。反过来会糊且 FOV 不对。
-if [ -d "${undist}" ]; then
-  echo "[1/3] 已存在, 跳过去畸变: ${undist}"
-else
-  echo "[1/3] 去畸变 -> ${undist}"
-  python tools/undistort_dataset_videos.py \
-    --src "${src}" \
-    --dst "${undist}" \
-    --crop "${crop}" \
-    --jobs "${jobs}" \
-    ${cameras_arg} ${calib_arg}
+src="playground/data/${dataset_id}"
+dst="playground/data/${dataset_id}_processed"
+gripper_args=()
+if [ -n "${LEFT_GRIPPER_OPEN:-}" ]; then
+  gripper_args+=(
+    --left-gripper-open "${LEFT_GRIPPER_OPEN}"
+    --left-gripper-closed "${LEFT_GRIPPER_CLOSED:?LEFT_GRIPPER_CLOSED is required}"
+  )
+fi
+if [ -n "${RIGHT_GRIPPER_OPEN:-}" ]; then
+  gripper_args+=(
+    --right-gripper-open "${RIGHT_GRIPPER_OPEN}"
+    --right-gripper-closed "${RIGHT_GRIPPER_CLOSED:?RIGHT_GRIPPER_CLOSED is required}"
+  )
 fi
 
-# =================== 2) 降分辨率 (896 -> size) ===================
-if [ -d "${final}" ]; then
-  echo "[2/3] 已存在, 跳过降分辨率: ${final}"
-else
-  echo "[2/3] 降分辨率 -> ${final}"
-  python tools/downscale_dataset_videos.py \
-    --src "${undist}" \
-    --dst "${final}" \
-    --size "${size}" \
-    --jobs "${jobs}" 
-fi
-
-# =================== 3) UMI 位姿 -> 末端位姿 (就地, 幂等) ===================
-# UMI 数据本身已存末端位姿, 跳过 FK; 若 meta/episodes 缺失会自动从 data+视频帧数重建。
-echo "[3/3] convert_umi_to_eepose (就地) -> ${final}"
-python tools/convert_umi_to_eepose.py \
-  --root "${final}" \
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+python tools/process_umi_data.py \
+  --src "${src}" \
+  --dst "${dst}" \
+  --task "${task}" \
+  --size "${size}" \
   --horizon "${horizon}" \
-  --action-gap "${action_gap}"
+  --action-gap "${action_gap}" \
+  --jobs "${jobs}" \
+  "${gripper_args[@]}"
 
-echo "==================================================================="
-echo "完成 ✅  训练数据集: ${final}"
-echo "  训练示例: bash train.sh ${dataset_id}_undist_${size} pi05 1 32 10000 false none episode_rot6d relative_rot6d ${action_gap} none"
-echo "==================================================================="
+echo "Training dataset: ${dst}"
+echo "Example: bash train.sh $(basename "${dst}") pi05 1 32 10000 true none episode_rot6d relative_rot6d ${action_gap} none"

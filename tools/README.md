@@ -9,6 +9,7 @@
 | `undistort_dataset_videos.py` | 腕部鱼眼去畸变和中心裁剪 |
 | `tactile_uint16_to_uint8.py` | 权威 `uint16` 触觉转训练用 `uint8` |
 | `downscale_dataset_videos.py` | 缩放视觉和训练用触觉视频 |
+| `process_umi_data.py` | 完整导入 unified-format UMI v2.5 数据 |
 | `convert_joints_to_eepose.py` | 根据严格 `robot_type` 使用 FK 生成 EE 列 |
 | `convert_umi_to_eepose.py` | 从已有 UMI pose 生成统一 EE 列 |
 | `merge_datasets.py` | 对齐公共 feature 并合并 LeRobot 数据集 |
@@ -28,7 +29,7 @@ undistort_dataset_videos.py
   -> convert_joints_to_eepose.py
 ```
 
-UMI pose 数据将最后一步替换为 `convert_umi_to_eepose.py`。鱼眼视频必须先在原始分辨率去畸变和裁剪，再缩放；反向顺序会改变视场并损失细节。
+unified-format UMI v2.5 数据使用 `process_umi_data.py` 一次完成 key、metadata、视频、task、夹爪和 EE 转换；其中 `_undist` 相机已由来源数据完成去畸变。
 
 ## 鱼眼去畸变
 
@@ -145,13 +146,33 @@ quat:   [xyz, qx, qy, qz, qw, gripper]              8
 
 ## UMI-to-EE
 
+完整导入优先使用：
+
+```bash
+python tools/process_umi_data.py \
+  --src playground/data/<dataset_id> \
+  --dst playground/data/<dataset_id>_processed \
+  --task "Put the board eraser into the cup." \
+  --size 256 --horizon 32 --action-gap 6 --jobs 12
+```
+
+它要求 v2.5 的三路 `_undist` 相机和左右 pose/gripper 字段，输出
+`robot_type=umi`、标准相机 key、8 个 EE feature、relative stats 及处理 manifest。源数据和失败时的
+partial 目录都会保留。若不同数据集必须共享夹爪尺度，可显式传入每侧 open/closed 四个参数。
+
+仅对已经具有正确 key、task、视频同步和 metadata 的数据集原地补 EE 列时，才直接运行：
+
 ```bash
 python tools/convert_umi_to_eepose.py \
   --root playground/data/<dataset_id> \
-  --horizon 32
+  --horizon 32 --action-gap 6 \
+  --left-gripper-open -0.4 --left-gripper-closed -0.3 \
+  --right-gripper-open -0.35 --right-gripper-closed -0.15
 ```
 
-该工具读取已有末端位姿，不调用 RealMan FK。它生成与 joint-to-EE 相同的 rot6d/quaternion 数据契约，适用于真正的 UMI pose 数据，不用于当前 8/16 维 joint 采集数据。
+该工具按 feature `names` 查找 pose，不依赖固定的 144/111 维布局；支持 v2.5 的
+`left_qx`/`right_qx`、`gripper_left`/`gripper_right` 以及旧 UMI 字段名。它归一化 quaternion，
+并把原始夹爪值裁剪映射到 `[0,1]`，不调用 RealMan FK。
 
 ## 合并数据集
 

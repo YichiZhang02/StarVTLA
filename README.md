@@ -112,8 +112,9 @@ bash collect.sh insert_easy "insert the object to the hole" 25 drag
 
 `deployment.collect` 从 RobotConfig 注册表校验类型，并自动选择该机器人声明的遥操作器。采集结果的 `meta/info.json` 会记录完全相同的 `robot_type`。
 
-### 2. 处理关节数据
+### 2. 数据处理
 
+#### 处理关节数据
 ```bash
 bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
 ```
@@ -128,6 +129,22 @@ bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
 ```
 
 最后一个参数是 relative-action 统计使用的 `action_gap`；训练 relative 模型时必须与 `train.sh` 的值一致。absolute action 不使用这组 relative 统计。
+
+#### 处理UMI数据
+```bash
+bash scripts/process_umi_data.sh <dataset_id> [size] [horizon]
+```
+
+处理示例：
+
+```bash
+dataset_id=260821_boarderaser_to_cup_trainready_rgb640x480_camlr_egor
+TASK="Put the board eraser into the cup." \
+  bash scripts/process_umi_data.sh "${dataset_id}" 256 32 6
+```
+
+输出为 `<dataset_id>_processed`，相机统一为一组 top + 两组 wrist，数据集和后续 checkpoint 的
+`robot_type` 都保持 `umi`。该流程不依赖无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
 
 ### 3. 训练
 
@@ -204,7 +221,7 @@ bash scripts/evaluate_policy_offline.sh \
 
 ```bash
 bash inference.sh \
-  <pretrained_id> <step> [n_action_steps] [action_start_offset] \
+  <pretrained_id> <step> [robot_type] [n_action_steps] [action_start_offset] \
   [control_fps] [reset_before_episode] [single_task]
 ```
 
@@ -212,15 +229,16 @@ bash inference.sh \
 
 ```bash
 pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
-bash inference.sh "${pretrained_id}" 3000 16 6 20 true \
-  "Grasp the cap and pull it off the pen."
+bash inference.sh "${pretrained_id}" 5000
 ```
 
 `control_fps` 是机器人动作下发目标频率，默认 `30 Hz`。模型按 `30 Hz` 数据训练，降低该值会按比例放慢轨迹的真实执行速度；实际频率仍受新 chunk 推理耗时限制。
 
 `single_task` 默认为空，此时 `match_policy` 从 checkpoint 自动读取任务；多任务模型可以显式传入任务文本，控制本次推理的语言语义输入。
 
-`inference.sh` 中的初始 `--robot.type` 只是 Draccus 解析所需的启动配置。实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。EE checkpoint 会自动启用与其 B/ISF 构型匹配的在线 FK/IK。
+普通 checkpoint 的实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。
+当 checkpoint 的 `robot_type=umi` 时，必须把具体物理机器人类型作为 `inference.sh` 第 3 个参数
+显式传入；此时以 CLI 为准。两种情况都会启用对应 B/ISF 构型的在线 FK/IK。
 
 ## 文档
 
