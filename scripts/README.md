@@ -47,6 +47,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
   -> raw 触觉固定范围量化为 uint8
   -> 所有训练视频缩放到 size x size
   -> 根据 robot_type 选择 B/ISF FK 并生成 EE 列
+  -> 重命名为 <id>_processed
 ```
 
 源数据集不会被修改。目录产物为：
@@ -55,8 +56,9 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 <id>                         原始数据
 <id>_undist                  去畸变阶段
 <id>_undist_uint8            有 raw 触觉时的 uint8 中间阶段
-<id>_undist_uint8_<size>     有触觉的最终训练数据
-<id>_undist_<size>           无触觉的最终训练数据
+<id>_undist_uint8_<size>     有触觉时的 resize 中间阶段
+<id>_undist_<size>           无触觉时的 resize 中间阶段
+<id>_processed               全部流程成功后的最终训练数据
 ```
 
 脚本可从已完成的中间目录继续，但会拒绝同时存在多个矛盾阶段或元数据与目录后缀不一致的情况。

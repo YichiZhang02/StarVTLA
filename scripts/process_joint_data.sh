@@ -2,10 +2,11 @@
 # 关节数据集离线预处理流水线: 去畸变 -> 触觉 uint8 -> 全视频 resize -> 关节转末端位姿。
 # 用法: bash process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 #   只需指定 dataset_id, 其余参数全部自动 (与 train.sh 同风格)。
-# 只有 undist 创建副本；后续均在原目录处理，成功后追加后缀并改名:
+# 只有 undist 创建副本；后续均在原目录处理，并使用阶段后缀支持断点恢复:
 #   有触觉: <id> -> <id>_undist -> <id>_undist_uint8 -> <id>_undist_uint8_<size>
 #   无触觉: <id> -> <id>_undist -> <id>_undist_<size>
-# 最后在 resize 后的数据集上就地 convert_joints_to_eepose (FK 加 EE 列)。
+# 最后在 resize 后的数据集上就地 convert_joints_to_eepose (FK 加 EE 列)，
+# 全部成功后统一改名为 <id>_processed。
 set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1   # 切到仓库根, 服务器/本地通用
 REPO_ROOT="$(pwd)"
@@ -30,6 +31,7 @@ undist=${dataset_root}/${dataset_id}_undist
 uint8=${undist}_uint8
 final_with_tactile=${uint8}_${size}
 final_without_tactile=${undist}_${size}
+processed=${dataset_root}/${dataset_id}_processed
 
 export PYTHONPATH=${REPO_ROOT}:${PYTHONPATH:-}
 
@@ -78,12 +80,22 @@ echo "  1) undist : ${src} -> ${undist}   (crop ${crop})"
 echo "  2) tactile uint16_to_uint8 (有触觉时, 就地): ${undist} -> ${uint8}"
 echo "  3) resize 所有 MP4 (就地): -> *_${size}"
 echo "  4) joint2ee (就地, FK 加 EE 列, gap ${action_gap}, horizon ${horizon})"
+echo "  完成后重命名: -> ${processed}"
 echo "==================================================================="
 
 if [ ! -d "${src}" ]; then
   echo "错误: 源数据集不存在: ${src}"; exit 1
 fi
 
+if [ -e "${processed}" ] && [ ! -d "${processed}" ]; then
+  echo "错误: 最终目标已存在但不是目录: ${processed}"; exit 1
+fi
+if [ -d "${processed}" ] \
+  && { [ -d "${undist}" ] || [ -d "${uint8}" ] \
+    || [ -d "${final_with_tactile}" ] || [ -d "${final_without_tactile}" ]; }; then
+  echo "错误: 已存在最终产物 ${processed}，但仍发现中间目录，无法安全恢复"
+  exit 1
+fi
 if [ -d "${final_with_tactile}" ] && [ -d "${final_without_tactile}" ]; then
   echo "错误: 同时存在两个最终目录，无法判断应继续使用哪个:"
   echo "  ${final_with_tactile}"
@@ -109,10 +121,18 @@ if [ -d "${final_without_tactile}" ]; then
     echo "错误: ${final_without_tactile} 应是无触觉产物，但元数据状态为 ${state}"; exit 1
   fi
 fi
+if [ -d "${processed}" ]; then
+  state=$(inspect_tactile_state "${processed}")
+  if [ "${state}" != "uint8" ] && [ "${state}" != "none" ]; then
+    echo "错误: ${processed} 的触觉元数据状态无法安全使用: ${state}"; exit 1
+  fi
+fi
 
 # =================== 1) 去畸变 (原生分辨率 -> 896) ===================
 # 顺序很重要: 先在原生 1920×1080 上去畸变并裁 896, 再降采样。反过来会糊且 FOV 不对。
-if [ -d "${final_with_tactile}" ]; then
+if [ -d "${processed}" ]; then
+  echo "[1/4] 已有完整产物，跳过去畸变: ${processed}"
+elif [ -d "${final_with_tactile}" ]; then
   echo "[1/4] 已有完整产物，跳过去畸变: ${final_with_tactile}"
 elif [ -d "${final_without_tactile}" ]; then
   echo "[1/4] 已有完整产物，跳过去畸变: ${final_without_tactile}"
@@ -131,7 +151,10 @@ else
 fi
 
 # =================== 2) 触觉 uint16 -> uint8 MP4 (就地) ===================
-if [ -d "${final_with_tactile}" ]; then
+if [ -d "${processed}" ]; then
+  final=${processed}
+  echo "[2/4] 已有完整产物，跳过触觉 uint8 转换: ${final}"
+elif [ -d "${final_with_tactile}" ]; then
   final=${final_with_tactile}
   echo "[2/4] 已存在, 跳过触觉 uint8 转换: ${final}"
 elif [ -d "${final_without_tactile}" ]; then
@@ -187,7 +210,7 @@ else
   mv -- "${work}" "${final}"
 fi
 
-if [ -d "${final_with_tactile}" ] || [ -d "${final_without_tactile}" ]; then
+if [ -d "${processed}" ] || [ -d "${final_with_tactile}" ] || [ -d "${final_without_tactile}" ]; then
   echo "[3/4] resize 产物: ${final}"
 fi
 
@@ -198,6 +221,15 @@ python tools/convert_joints_to_eepose.py \
   --root "${final}" \
   --horizon "${horizon}" \
   --action-gap "${action_gap}"
+
+if [ "${final}" != "${processed}" ]; then
+  if [ -e "${processed}" ]; then
+    echo "错误: 最终目标已存在: ${processed}"; exit 1
+  fi
+  echo "重命名最终产物: ${final} -> ${processed}"
+  mv -- "${final}" "${processed}"
+  final=${processed}
+fi
 
 echo "==================================================================="
 echo "完成: 训练数据集: ${final}"

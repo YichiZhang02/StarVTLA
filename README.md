@@ -141,7 +141,7 @@ bash train.sh \
 关节动作示例：
 
 ```bash
-dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
+dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_processed
 bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
   true none absolute_joint absolute_joint 0 none
 ```
@@ -149,7 +149,7 @@ bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
 相对 EE 动作示例：
 
 ```bash
-dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
+dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_processed
 bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
   true none absolute_rot6d relative_rot6d 6 none
 ```
