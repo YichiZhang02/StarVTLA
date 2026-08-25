@@ -41,6 +41,7 @@ class FastWAMPrepareBatchStep(ProcessorStep):
     text_dim: int
     prompt_template: str
     text_embedding_cache_dir: str | None = None
+    text_embedding_cache_dirs: list[str] | None = None
     task_to_slot: dict[str, int] | None = None
     use_text_cache: bool = True
     camera_image_size: tuple[int, int] = (224, 224)
@@ -53,32 +54,80 @@ class FastWAMPrepareBatchStep(ProcessorStep):
             self.camera_image_size[1] * len(self.camera_keys),
         )
         self.task_to_slot = dict(self.task_to_slot or {})
+        self.text_embedding_cache_dirs = list(self.text_embedding_cache_dirs or [])
         self._text_context_state: dict[str, torch.Tensor] = {}
         if not self.use_text_cache:
             return
-        if self.text_embedding_cache_dir is None:
+        # A saved processor carries the merged mapping and state file. Do not touch the original
+        # training dataset paths before DataProcessorPipeline restores that state.
+        if self.task_to_slot:
             return
-        cache_dir = Path(self.text_embedding_cache_dir).expanduser()
-        manifest_path = cache_dir / "manifest.json"
-        tensor_path = cache_dir / "embeddings.safetensors"
-        if not manifest_path.is_file() or not tensor_path.is_file():
-            if not self.task_to_slot:
+        cache_dirs = [Path(path).expanduser() for path in self.text_embedding_cache_dirs]
+        if self.text_embedding_cache_dir is not None:
+            singular = Path(self.text_embedding_cache_dir).expanduser()
+            if singular not in cache_dirs:
+                cache_dirs.insert(0, singular)
+        if not cache_dirs:
+            return
+
+        merged_state: dict[str, torch.Tensor] = {}
+        task_sources: dict[str, Path] = {}
+        reference_manifest = None
+        for cache_dir in cache_dirs:
+            manifest_path = cache_dir / "manifest.json"
+            tensor_path = cache_dir / "embeddings.safetensors"
+            if not manifest_path.is_file() or not tensor_path.is_file():
                 raise FileNotFoundError(
                     f"FastWAM text cache requires {manifest_path} and {tensor_path}."
                 )
-            return
-        with manifest_path.open(encoding="utf-8") as handle:
-            manifest = json.load(handle)
+            with manifest_path.open(encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            self._validate_cache_manifest(manifest, cache_dir, reference_manifest)
+            if reference_manifest is None:
+                reference_manifest = manifest
+            source_state = load_file(str(tensor_path), device="cpu")
+            for entry in manifest["tasks"]:
+                task = str(entry["task"])
+                source_slot = int(entry["slot"])
+                context = source_state[f"context.{source_slot}"]
+                mask = source_state[f"mask.{source_slot}"]
+                if task in self.task_to_slot:
+                    slot = self.task_to_slot[task]
+                    if not torch.equal(merged_state[f"context.{slot}"], context) or not torch.equal(
+                        merged_state[f"mask.{slot}"], mask
+                    ):
+                        raise ValueError(
+                            f"FastWAM task {task!r} has conflicting embeddings in "
+                            f"{task_sources[task]} and {cache_dir}."
+                        )
+                    continue
+                slot = len(self.task_to_slot)
+                self.task_to_slot[task] = slot
+                task_sources[task] = cache_dir
+                merged_state[f"context.{slot}"] = context
+                merged_state[f"mask.{slot}"] = mask
+        self.load_state_dict(merged_state)
+
+    def _validate_cache_manifest(
+        self,
+        manifest: dict[str, Any],
+        cache_dir: Path,
+        reference: dict[str, Any] | None,
+    ) -> None:
         if manifest.get("world_model") != "wan22":
-            raise ValueError(f"Expected a wan22 text cache, got {manifest.get('world_model')!r}.")
+            raise ValueError(f"Expected a wan22 text cache in {cache_dir}, got {manifest.get('world_model')!r}.")
         if int(manifest.get("context_length", -1)) != self.context_len:
-            raise ValueError("FastWAM text cache context length does not match policy config.")
+            raise ValueError(f"FastWAM text cache context length does not match policy config: {cache_dir}")
         if int(manifest.get("embedding_dim", -1)) != self.text_dim:
-            raise ValueError("FastWAM text cache embedding dimension does not match policy config.")
+            raise ValueError(f"FastWAM text cache embedding dimension does not match policy config: {cache_dir}")
         if manifest.get("prompt_template") != self.prompt_template:
-            raise ValueError("FastWAM text cache prompt template does not match policy config.")
-        self.task_to_slot = {str(entry["task"]): int(entry["slot"]) for entry in manifest["tasks"]}
-        self.load_state_dict(load_file(str(tensor_path), device="cpu"))
+            raise ValueError(f"FastWAM text cache prompt template does not match policy config: {cache_dir}")
+        if not isinstance(manifest.get("tasks"), list):
+            raise ValueError(f"FastWAM text cache manifest has no tasks list: {cache_dir}")
+        if reference is not None and manifest.get("text_encoder_model_hash") != reference.get(
+            "text_encoder_model_hash"
+        ):
+            raise ValueError(f"FastWAM text caches use different text encoder model hashes: {cache_dir}")
 
     def _prepare_camera(self, image: torch.Tensor) -> torch.Tensor:
         image = torch.as_tensor(image)
@@ -215,6 +264,7 @@ class FastWAMPrepareBatchStep(ProcessorStep):
             "text_dim": self.text_dim,
             "prompt_template": self.prompt_template,
             "text_embedding_cache_dir": self.text_embedding_cache_dir,
+            "text_embedding_cache_dirs": self.text_embedding_cache_dirs,
             "task_to_slot": self.task_to_slot,
             "use_text_cache": self.use_text_cache,
             "use_proprio": self.use_proprio,
@@ -282,6 +332,7 @@ def make_fastwam_pre_post_processors(
             text_embedding_cache_dir=(
                 str(config.text_embedding_cache_dir) if config.text_embedding_cache_dir is not None else None
             ),
+            text_embedding_cache_dirs=[str(path) for path in config.text_embedding_cache_dirs],
             use_text_cache=not config.load_text_encoder,
             use_proprio=config.state_mode != "none",
         ),

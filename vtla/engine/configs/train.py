@@ -137,9 +137,6 @@ class TrainPipelineConfig(HubMixin):
             train_dir = f"{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}"
             self.output_dir = Path("outputs/train") / train_dir
 
-        if isinstance(self.dataset.repo_id, list):
-            raise NotImplementedError("LeRobotMultiDataset is not currently implemented.")
-
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
             raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
         elif self.use_policy_training_preset and not self.resume:
@@ -159,7 +156,7 @@ class TrainPipelineConfig(HubMixin):
 
     def _save_pretrained(self, save_directory: Path) -> None:
         # 保存时把 cwd(仓库根) 下的绝对路径转相对, 使 train_config.json 跨机器可移植。
-        # 只动 output_dir / dataset.root 两个已知会出现绝对路径的字段; dump 完恢复, 不影响内存中后续使用。
+        # 只动 output_dir / dataset paths 这些已知会出现绝对路径的字段; dump 完恢复, 不影响内存中后续使用。
         cwd = Path.cwd()
 
         def _to_rel(v):
@@ -185,6 +182,16 @@ class TrainPipelineConfig(HubMixin):
             if changed:
                 saved["dataset_root"] = ds.root
                 ds.root = new_root
+        if ds is not None and getattr(ds, "catalog_root", None):
+            new_catalog_root, changed = _to_rel(ds.catalog_root)
+            if changed:
+                saved["dataset_catalog_root"] = ds.catalog_root
+                ds.catalog_root = new_catalog_root
+        if ds is not None and getattr(ds, "mixture_config", None):
+            new_mixture_config, changed = _to_rel(ds.mixture_config)
+            if changed:
+                saved["dataset_mixture_config"] = ds.mixture_config
+                ds.mixture_config = new_mixture_config
         try:
             with open(save_directory / TRAIN_CONFIG_NAME, "w") as f, draccus.config_type("json"):
                 draccus.dump(self, f, indent=4)
@@ -193,6 +200,10 @@ class TrainPipelineConfig(HubMixin):
                 self.output_dir = saved["output_dir"]
             if "dataset_root" in saved:
                 self.dataset.root = saved["dataset_root"]
+            if "dataset_catalog_root" in saved:
+                self.dataset.catalog_root = saved["dataset_catalog_root"]
+            if "dataset_mixture_config" in saved:
+                self.dataset.mixture_config = saved["dataset_mixture_config"]
 
     @classmethod
     def from_pretrained(

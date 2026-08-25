@@ -15,6 +15,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from vtla.engine.transforms import ImageTransformsConfig
 from vtla.engine.utils.import_utils import get_safe_default_codec
@@ -22,14 +23,18 @@ from vtla.engine.utils.import_utils import get_safe_default_codec
 
 @dataclass
 class DatasetConfig:
-    # You may provide a list of datasets here. `train.py` creates them all and concatenates them. Note: only data
-    # keys common between the datasets are kept. Each dataset gets and additional transform that inserts the
-    # "dataset_index" into the returned item. The index mapping is made according to the order in which the
-    # datasets are provided.
+    # Logical dataset ID. It resolves to a named mixture when present in mixture_config, otherwise to a
+    # regular LeRobot dataset.
     repo_id: str
     # Root directory for a concrete local dataset tree (e.g. 'dataset/path'). If None, local datasets are
     # looked up under $HF_LEROBOT_HOME/repo_id and Hub downloads use a revision-safe cache under $HF_LEROBOT_HOME/hub.
     root: str | None = None
+    # Parent directory used to resolve local mixture members. A mixture-level or member-level root in the
+    # registry takes precedence. Ordinary datasets continue to use `root` as their concrete dataset path.
+    catalog_root: str | None = None
+    mixture_config: str = "configs/data_mixtures.yaml"
+    # Populated when a mixture is resolved and serialized into checkpoints for reproducible resume.
+    resolved_mixture: dict[str, Any] | None = None
     episodes: list[int] | None = None
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None
@@ -41,6 +46,8 @@ class DatasetConfig:
     streaming: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.repo_id, str) or not self.repo_id.strip():
+            raise ValueError("dataset.repo_id must be a non-empty dataset or mixture ID.")
         if self.episodes is not None:
             if any(ep < 0 for ep in self.episodes):
                 raise ValueError(

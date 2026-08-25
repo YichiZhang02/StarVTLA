@@ -47,33 +47,27 @@ run_name="$(date +%Y%m%d)_${dataset_id}_${policy_type}_${policy_suffix}"
 # 路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)
 dataset_root=playground/data
 output_root=playground/results/models
+mixture_config=configs/data_mixtures.yaml
 
-# 默认直接从数据集 video features 读取相机/触觉 key。环境变量可显式覆盖。
-dataset_info=${dataset_root}/${dataset_id}/meta/info.json
-if [ ! -f "${dataset_info}" ]; then
-  echo "Dataset metadata not found: ${dataset_info}"; exit 1
+# 普通数据集和 mixture 共用同一个 dataset_id 解析入口。
+if ! resolved_dataset_output=$(PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/resolve_training_dataset.py \
+  "${dataset_id}" --catalog-root "${dataset_root}" --mixture-config "${mixture_config}"); then
+  exit 1
 fi
-mapfile -t auto_video_keys < <(
-  python -c '
-import json
-import sys
-
-features = json.load(open(sys.argv[1], encoding="utf-8")).get("features", {})
-videos = [(key, value) for key, value in features.items() if value.get("dtype") == "video"]
-is_tactile = lambda key, value: bool(value.get("tactile_encoding")) or "finger" in key.lower()
-tactile = [key for key, value in videos if is_tactile(key, value)]
-wrist = [key for key, value in videos if not is_tactile(key, value) and "wrist" in key.lower()]
-top = [key for key, value in videos if not is_tactile(key, value) and key not in wrist]
-for keys in (top, wrist, tactile):
-    print("[" + ",".join(keys) + "]")
-' "${dataset_info}"
-)
-if [ "${#auto_video_keys[@]}" -ne 3 ]; then
-  echo "Failed to infer video keys from ${dataset_info}"; exit 1
+mapfile -t resolved_dataset <<< "${resolved_dataset_output}"
+if [ "${#resolved_dataset[@]}" -ne 6 ]; then
+  echo "Failed to resolve training dataset: ${dataset_id}"; exit 1
 fi
-top_cam=${TOP_CAM:-${auto_video_keys[0]}}
-wrist_cam=${WRIST_CAM:-${auto_video_keys[1]}}
-tactile_keys=${TACTILE_KEYS:-${auto_video_keys[2]}}
+dataset_kind=${resolved_dataset[0]}
+IFS='|' read -r -a dataset_member_roots <<< "${resolved_dataset[1]}"
+top_cam=${TOP_CAM:-${resolved_dataset[2]}}
+wrist_cam=${WRIST_CAM:-${resolved_dataset[3]}}
+tactile_keys=${TACTILE_KEYS:-${resolved_dataset[4]}}
+dataset_weights=${resolved_dataset[5]}
+dataset_root_arg=
+if [ "${dataset_kind}" = "dataset" ]; then
+  dataset_root_arg="--dataset.root=${dataset_member_roots[0]}"
+fi
 
 output_dir=${output_root}/${run_name}
 log_file="${output_dir}/${run_name}.log"
@@ -161,6 +155,7 @@ fi
 {
 echo "Log file: $log_file"
 echo "Training with dataset: $dataset_id"
+echo "Dataset kind: ${dataset_kind} | Members: ${dataset_member_roots[*]} | Weights: ${dataset_weights}"
 echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
@@ -185,15 +180,17 @@ WM_List="fastwam"
 case " ${WM_List} " in
   *" ${policy_type} "*)
     echo "Video visualization: ${visualization_enabled}"
-    text_embedding_dir="${dataset_root}/${dataset_id}/text_embeddings/wan22"
-    if [ -f "${text_embedding_dir}/manifest.json" ] && [ -f "${text_embedding_dir}/embeddings.safetensors" ]; then
-      echo "Reusing precomputed text embeddings: ${text_embedding_dir}"
-    else
-      echo "Precomputing text embeddings for ${policy_type}..."
-      PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/precompute_world_model_text_embeddings.py \
-        --dataset-root "${dataset_root}/${dataset_id}" \
-        --world-model wan22 || exit 1
-    fi
+    for member_root in "${dataset_member_roots[@]}"; do
+      text_embedding_dir="${member_root}/text_embeddings/wan22"
+      if [ -f "${text_embedding_dir}/manifest.json" ] && [ -f "${text_embedding_dir}/embeddings.safetensors" ]; then
+        echo "Reusing precomputed text embeddings: ${text_embedding_dir}"
+      else
+        echo "Precomputing text embeddings for ${policy_type}: ${member_root}"
+        PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/precompute_world_model_text_embeddings.py \
+          --dataset-root "${member_root}" \
+          --world-model wan22 || exit 1
+      fi
+    done
     ;;
 esac
 
@@ -201,7 +198,9 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --num_processes=$num_processes \
     -m vtla.train \
     --dataset.repo_id=$dataset_id \
-    --dataset.root=${dataset_root}/${dataset_id} \
+    ${dataset_root_arg} \
+    --dataset.catalog_root=${dataset_root} \
+    --dataset.mixture_config=${mixture_config} \
     --dataset.video_backend=pyav \
     --policy.type=${policy_type} \
     --policy.wrist_only=${wrist_only} \

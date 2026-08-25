@@ -31,7 +31,7 @@ from termcolor import colored
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from vtla.datasets import EpisodeAwareSampler, make_dataset
+from vtla.datasets import EpisodeAwareSampler, MixtureSampler, make_dataset
 from vtla.engine.common.train_utils import (
     get_step_checkpoint_dir,
     load_training_state,
@@ -43,6 +43,7 @@ from vtla.engine.configs import parser
 from vtla.engine.configs.train import TrainPipelineConfig
 from vtla.engine.optim.factory import make_optimizer_and_scheduler
 from vtla.engine.utils.import_utils import register_third_party_plugins, require_package
+from vtla.engine.utils.io_utils import write_json
 from vtla.engine.utils.logging_utils import AverageMeter, MetricsTracker
 from vtla.engine.utils.random_utils import set_seed
 from vtla.engine.utils.utils import (
@@ -244,6 +245,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if is_main_process:
         logging.info("Creating dataset")
         dataset = make_dataset(cfg)
+        if cfg.dataset.resolved_mixture is not None:
+            write_json(cfg.dataset.resolved_mixture, cfg.output_dir / "resolved_data_mixture.json")
 
     accelerator.wait_for_everyone()
 
@@ -261,20 +264,25 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             )
         active_cfg.load_text_encoder = False
         if not cfg.resume:
-            active_cfg.text_embedding_cache_dir = Path(dataset.root) / "text_embeddings" / "wan22"
+            if hasattr(dataset, "text_embedding_cache_dirs"):
+                cache_dirs = dataset.text_embedding_cache_dirs
+            else:
+                cache_dirs = [Path(dataset.root) / "text_embeddings" / "wan22"]
+            active_cfg.text_embedding_cache_dirs = list(cache_dirs)
+            active_cfg.text_embedding_cache_dir = cache_dirs[0] if len(cache_dirs) == 1 else None
             required_text_assets = [
-                active_cfg.text_embedding_cache_dir / "manifest.json",
-                active_cfg.text_embedding_cache_dir / "embeddings.safetensors",
+                path
+                for cache_dir in cache_dirs
+                for path in (cache_dir / "manifest.json", cache_dir / "embeddings.safetensors")
             ]
             missing_text_assets = [path for path in required_text_assets if not path.is_file()]
             if missing_text_assets:
                 raise FileNotFoundError(
                     "Missing dataset-local Wan2.2 text embeddings: "
-                    f"{missing_text_assets}. Run `python tools/precompute_world_model_text_embeddings.py "
-                    f"--dataset-root {dataset.root} --world-model wan22`."
+                    f"{missing_text_assets}. Precompute the wan22 cache for each listed dataset root."
                 )
             if is_main_process:
-                logging.info("Using dataset-local FastWAM text cache: %s", active_cfg.text_embedding_cache_dir)
+                logging.info("Using dataset-local FastWAM text caches: %s", cache_dirs)
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
@@ -391,6 +399,24 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         **processor_kwargs,
         **postprocessor_kwargs,
     )
+    if getattr(active_cfg, "type", None) == "fastwam" and not active_cfg.load_text_encoder:
+        fastwam_step = next(
+            (
+                processor_step
+                for processor_step in preprocessor.steps
+                if getattr(processor_step.__class__, "_registry_name", None)
+                == "fastwam_prepare_batch"
+            ),
+            None,
+        )
+        if fastwam_step is None:
+            raise RuntimeError("FastWAM preprocessor is missing its prepare-batch step.")
+        required_tasks = {str(task) for task in dataset.meta.tasks.index}
+        missing_tasks = sorted(required_tasks - set(fastwam_step.task_to_slot))
+        if missing_tasks:
+            raise ValueError(
+                f"FastWAM text caches do not contain all dataset tasks. Missing: {missing_tasks}"
+            )
 
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
@@ -416,7 +442,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(active_cfg, "drop_n_last_frames"):
+    if hasattr(dataset, "weights"):
+        shuffle = False
+        sampler = MixtureSampler(
+            dataset,
+            drop_n_last_frames=getattr(active_cfg, "drop_n_last_frames", 0),
+            seed=cfg.seed or 0,
+        )
+    elif hasattr(active_cfg, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
@@ -469,6 +502,11 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         initial_step=step,
         accelerator=accelerator,
     )
+    mixture_sample_counts = (
+        torch.zeros(len(dataset.weights), dtype=torch.long, device=device)
+        if hasattr(dataset, "weights")
+        else None
+    )
 
     if is_main_process:
         progbar = tqdm(
@@ -486,6 +524,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
+        if mixture_sample_counts is not None:
+            mixture_sample_counts += torch.bincount(
+                batch["dataset_index"].to(device=device), minlength=len(dataset.weights)
+            )
         # Select joint vs EE columns as the canonical observation.state / action before the processor.
         batch = route_ee_batch(
             batch,
@@ -540,7 +582,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             progress_metrics["lr"] = f"{train_tracker.lr.val:.1e}"
             progbar.set_postfix(progress_metrics)
         train_tracker.step()
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
+        is_log_interval = cfg.log_freq > 0 and step % cfg.log_freq == 0
+        mixture_fractions = None
+        if is_log_interval and mixture_sample_counts is not None:
+            global_counts = accelerator.reduce(mixture_sample_counts, reduction="sum")
+            mixture_fractions = global_counts.float() / global_counts.sum().clamp_min(1)
+            mixture_sample_counts.zero_()
+        is_log_step = is_log_interval and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_fastwam_visualization_step = (
             getattr(active_cfg, "type", None) == "fastwam"
@@ -551,8 +599,27 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
         if is_log_step:
             logging.info(train_tracker)
+            if mixture_fractions is not None:
+                logging.info(
+                    "Mixture sample fractions: %s",
+                    {
+                        repo_id: round(float(fraction), 4)
+                        for repo_id, fraction in zip(
+                            dataset.repo_ids, mixture_fractions.cpu(), strict=True
+                        )
+                    },
+                )
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
+                if mixture_fractions is not None:
+                    wandb_log_dict.update(
+                        {
+                            f"data_fraction/{repo_id}": float(fraction)
+                            for repo_id, fraction in zip(
+                                dataset.repo_ids, mixture_fractions.cpu(), strict=True
+                            )
+                        }
+                    )
                 if output_dict:
                     wandb_log_dict.update(output_dict)
                 wandb_logger.log_dict(wandb_log_dict, step)

@@ -2,6 +2,8 @@
 
 `vtla/` 包含 LeRobot 数据集、训练配置、pre/postprocessor 和全部 policy 实现。日常训练入口是仓库根目录的 [train.sh](../train.sh)。
 
+命名数据集 mixture 定义在 [`configs/data_mixtures.yaml`](../configs/data_mixtures.yaml)。mixture ID 与普通 dataset ID 一样直接传给 `train.sh`；数据只从各成员原目录读取，不会生成合并副本。
+
 ## Policy 类型
 
 | `policy_type` | 初始化 | 说明 |

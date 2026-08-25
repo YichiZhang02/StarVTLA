@@ -13,7 +13,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import logging
+from pathlib import Path
 from pprint import pformat
 
 import torch
@@ -25,6 +27,22 @@ from vtla.engine.utils.constants import ACTION, IMAGENET_STATS, OBS_PREFIX, REWA
 
 from .dataset_metadata import LeRobotDatasetMetadata
 from .lerobot_dataset import LeRobotDataset
+from .mixture_registry import resolve_member_root, resolve_mixture
+from .multi_dataset import MixtureLeRobotDataset
+
+
+def _metadata_fingerprint(root: Path) -> str:
+    digest = hashlib.sha256()
+    metadata_paths = [root / "meta" / "info.json", root / "meta" / "stats.json", root / "meta" / "tasks.parquet"]
+    metadata_paths.extend(sorted((root / "meta" / "episodes").glob("**/*.parquet")))
+    for path in metadata_paths:
+        if not path.is_file():
+            continue
+        digest.update(str(path.relative_to(root)).encode())
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetadata) -> dict[str, list] | None:
@@ -93,23 +111,26 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
     return delta_timestamps
 
 
-def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset:
+def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
     Args:
         cfg (TrainPipelineConfig): A TrainPipelineConfig config which contains a DatasetConfig and a PreTrainedConfig.
 
-    Raises:
-        NotImplementedError: The MultiLeRobotDataset is currently deactivated.
-
     Returns:
-        LeRobotDataset | MultiLeRobotDataset
+        LeRobotDataset | MixtureLeRobotDataset
     """
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
 
-    if isinstance(cfg.dataset.repo_id, str):
+    mixture = resolve_mixture(
+        cfg.dataset.repo_id,
+        registry_path=cfg.dataset.mixture_config,
+        resolved=cfg.dataset.resolved_mixture,
+    )
+
+    if mixture is None:
         ds_meta = LeRobotDatasetMetadata(
             cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
         )
@@ -149,7 +170,88 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset:
                 return_uint8=True,
             )
     else:
-        raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+        if cfg.dataset.streaming:
+            raise ValueError("Named dataset mixtures do not support dataset.streaming=true.")
+        if cfg.dataset.episodes is not None:
+            raise ValueError(
+                "Use per-member episodes in the mixture registry instead of dataset.episodes for a mixture."
+            )
+        collision_paths = []
+        if cfg.dataset.root is not None and Path(cfg.dataset.root).is_dir():
+            collision_paths.append(Path(cfg.dataset.root))
+        if cfg.dataset.catalog_root is not None:
+            catalog_candidate = Path(cfg.dataset.catalog_root) / cfg.dataset.repo_id
+            if catalog_candidate.is_dir() and catalog_candidate not in collision_paths:
+                collision_paths.append(catalog_candidate)
+        if collision_paths:
+            raise ValueError(
+                f"Dataset ID {cfg.dataset.repo_id!r} is both a named mixture and an existing dataset "
+                f"directory: {collision_paths}. Rename one of them."
+            )
+
+        member_datasets = []
+        for member in mixture.members:
+            member_root = resolve_member_root(mixture, member, cfg.dataset.catalog_root)
+            member_revision = member.revision or cfg.dataset.revision
+            member_meta = LeRobotDatasetMetadata(
+                member.dataset_id,
+                root=member_root,
+                revision=member_revision,
+            )
+            if member.episodes is not None and any(
+                episode >= member_meta.total_episodes for episode in member.episodes
+            ):
+                raise ValueError(
+                    f"Mixture {mixture.dataset_id!r} member {member.dataset_id!r} selects an episode "
+                    f"outside [0, {member_meta.total_episodes})."
+                )
+            delta_timestamps = resolve_delta_timestamps(cfg.trainable_config, member_meta)
+            use_video_keys = None
+            if hasattr(cfg.trainable_config, "decoded_video_keys"):
+                keys = cfg.trainable_config.decoded_video_keys()
+                if keys:
+                    use_video_keys = keys
+            member_datasets.append(
+                LeRobotDataset(
+                    member.dataset_id,
+                    root=member_root,
+                    episodes=member.episodes,
+                    delta_timestamps=delta_timestamps,
+                    image_transforms=image_transforms,
+                    revision=member_revision,
+                    video_backend=cfg.dataset.video_backend,
+                    return_uint8=True,
+                    tolerance_s=cfg.tolerance_s,
+                    use_video_keys=use_video_keys,
+                )
+            )
+        dataset = MixtureLeRobotDataset(member_datasets, mixture)
+        resolved_mixture = mixture.to_dict()
+        resolved_mixture["metadata"] = [
+            {
+                "dataset_id": child.repo_id,
+                "fingerprint": _metadata_fingerprint(Path(child.root)),
+                "num_frames": child.num_frames,
+                "num_episodes": child.num_episodes,
+                "root": str(child.root),
+            }
+            for child in member_datasets
+        ]
+        saved_metadata = (cfg.dataset.resolved_mixture or {}).get("metadata")
+        if saved_metadata is not None:
+            saved_fingerprints = {
+                item["dataset_id"]: item["fingerprint"] for item in saved_metadata
+            }
+            current_fingerprints = {
+                item["dataset_id"]: item["fingerprint"] for item in resolved_mixture["metadata"]
+            }
+            if saved_fingerprints != current_fingerprints:
+                raise ValueError(
+                    f"Dataset metadata changed since mixture {mixture.dataset_id!r} was resolved. "
+                    f"Saved fingerprints: {saved_fingerprints}; current: {current_fingerprints}."
+                )
+        cfg.dataset.resolved_mixture = resolved_mixture
+        logging.info("Resolved dataset mixture: %s", dataset)
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:

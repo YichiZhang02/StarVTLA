@@ -82,7 +82,9 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
     context_len: int = 128
     text_dim: int = 4096
     prompt_template: str = "A video recorded from a robot's point of view executing the following instruction: {task}"
+    # The singular field is retained for old checkpoints and ordinary datasets.
     text_embedding_cache_dir: Path | None = None
+    text_embedding_cache_dirs: list[Path] = field(default_factory=list)
     # Inference loads T5 for arbitrary prompts; vtla.train always forces this off.
     load_text_encoder: bool = True
 

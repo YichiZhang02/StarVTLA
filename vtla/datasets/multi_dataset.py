@@ -1,230 +1,193 @@
-#!/usr/bin/env python
+"""Map-style virtual dataset mixtures backed by existing LeRobot datasets."""
 
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+from __future__ import annotations
+
 import logging
-from collections.abc import Callable
+from bisect import bisect_right
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import datasets
+import numpy as np
+import pandas as pd
 import torch
-import torch.utils
 
-from vtla.engine.utils.constants import HF_LEROBOT_HOME
-
-from .compute_stats import aggregate_stats
-from .feature_utils import get_hf_features_from_features
 from .lerobot_dataset import LeRobotDataset
-from .video_utils import VideoFrame
+from .mixture_registry import MixtureDefinition
 
 logger = logging.getLogger(__name__)
 
 
-class MultiLeRobotDataset(torch.utils.data.Dataset):
-    """A dataset consisting of multiple underlying `LeRobotDataset`s.
+def _feature_diff(reference: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    differences = []
+    all_keys = sorted(set(reference) | set(candidate))
+    for key in all_keys:
+        if key not in reference:
+            differences.append(f"extra feature {key!r}")
+        elif key not in candidate:
+            differences.append(f"missing feature {key!r}")
+        elif reference[key] != candidate[key]:
+            differences.append(f"feature {key!r}: expected {reference[key]!r}, got {candidate[key]!r}")
+    return differences
 
-    The underlying `LeRobotDataset`s are effectively concatenated, and this class adopts much of the API
-    structure of `LeRobotDataset`.
-    """
 
-    def __init__(
-        self,
-        repo_ids: list[str],
-        root: str | Path | None = None,
-        episodes: dict | None = None,
-        image_transforms: Callable | None = None,
-        delta_timestamps: dict[str, list[float]] | None = None,
-        tolerances_s: dict | None = None,
-        download_videos: bool = True,
-        video_backend: str | None = None,
-    ):
-        super().__init__()
-        self.repo_ids = repo_ids
-        self.root = Path(root) if root else HF_LEROBOT_HOME
-        self.tolerances_s = tolerances_s if tolerances_s else dict.fromkeys(repo_ids, 0.0001)
-        # Construct the underlying datasets passing everything but `transform` and `delta_timestamps` which
-        # are handled by this class.
-        self._datasets = [
-            LeRobotDataset(
-                repo_id,
-                root=self.root / repo_id,
-                episodes=episodes[repo_id] if episodes else None,
-                image_transforms=image_transforms,
-                delta_timestamps=delta_timestamps,
-                tolerance_s=self.tolerances_s[repo_id],
-                download_videos=download_videos,
-                video_backend=video_backend,
+def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
+    if not datasets:
+        raise ValueError("A dataset mixture must contain at least one dataset.")
+    reference = datasets[0].meta
+    errors = []
+    for dataset in datasets[1:]:
+        meta = dataset.meta
+        if meta.fps != reference.fps:
+            errors.append(f"{dataset.repo_id}: fps expected {reference.fps}, got {meta.fps}")
+        if meta.robot_type != reference.robot_type:
+            errors.append(
+                f"{dataset.repo_id}: robot_type expected {reference.robot_type!r}, got {meta.robot_type!r}"
             )
-            for repo_id in repo_ids
+        errors.extend(
+            f"{dataset.repo_id}: {difference}"
+            for difference in _feature_diff(reference.features, meta.features)
+        )
+    if errors:
+        details = "\n  - ".join(errors)
+        raise ValueError(
+            "Dataset mixture members must have identical FPS, robot_type, and feature schemas:\n"
+            f"  - {details}"
+        )
+
+
+def aggregate_weighted_stats(
+    stats_list: list[dict[str, dict[str, np.ndarray]] | None],
+    weights: tuple[float, ...],
+) -> dict[str, dict[str, np.ndarray]]:
+    """Aggregate dataset-level statistics according to mixture sampling weights."""
+    data_keys = {key for stats in stats_list if stats is not None for key in stats}
+    aggregated: dict[str, dict[str, np.ndarray]] = {}
+    for feature_key in data_keys:
+        present = [
+            (stats[feature_key], weight)
+            for stats, weight in zip(stats_list, weights, strict=True)
+            if stats and feature_key in stats
         ]
-
-        # Disable any data keys that are not common across all of the datasets. Note: we may relax this
-        # restriction in future iterations of this class. For now, this is necessary at least for being able
-        # to use PyTorch's default DataLoader collate function.
-        self.disabled_features = set()
-        intersection_features = set(self._datasets[0].features)
-        for ds in self._datasets:
-            intersection_features.intersection_update(ds.features)
-        if len(intersection_features) == 0:
-            raise RuntimeError(
-                "Multiple datasets were provided but they had no keys common to all of them. "
-                "The multi-dataset functionality currently only keeps common keys."
+        if len(present) != len(stats_list):
+            logger.warning(
+                "Mixture statistic %s is missing from %d member(s); aggregating the available subset.",
+                feature_key,
+                len(stats_list) - len(present),
             )
-        for repo_id, ds in zip(self.repo_ids, self._datasets, strict=True):
-            extra_keys = set(ds.features).difference(intersection_features)
-            if extra_keys:
-                logger.warning(
-                    f"keys {extra_keys} of {repo_id} were disabled as they are not contained in all the "
-                    "other datasets."
-                )
-                self.disabled_features.update(extra_keys)
+        feature_weights = np.asarray([weight for _, weight in present], dtype=np.float64)
+        feature_weights /= feature_weights.sum()
+        feature_stats = [stats for stats, _ in present]
+        common_keys = set.intersection(*(set(stats) for stats in feature_stats))
+        if not {"mean", "std"}.issubset(common_keys):
+            logger.warning("Skipping incomplete mixture statistics for feature %s", feature_key)
+            continue
 
-        self.delta_timestamps = delta_timestamps
-        # TODO(rcadene, aliberts): We should not perform this aggregation for datasets
-        # with multiple robots of different ranges. Instead we should have one normalization
-        # per robot.
-        self.stats = aggregate_stats([dataset.meta.stats for dataset in self._datasets])
-        self.set_image_transforms(image_transforms)
-
-    def set_image_transforms(self, image_transforms: Callable | None) -> None:
-        """Replace the transform for this dataset and its children."""
-        if image_transforms is not None and not callable(image_transforms):
-            raise TypeError("image_transforms must be callable or None.")
-        self.image_transforms = image_transforms
-        for dataset in getattr(self, "_datasets", []):
-            dataset.set_image_transforms(self.image_transforms)
-
-    def clear_image_transforms(self) -> None:
-        """Remove the transform from this dataset and its children."""
-        self.set_image_transforms(None)
-
-    @property
-    def repo_id_to_index(self):
-        """Return a mapping from dataset repo_id to a dataset index automatically created by this class.
-
-        This index is incorporated as a data key in the dictionary returned by `__getitem__`.
-        """
-        return {repo_id: i for i, repo_id in enumerate(self.repo_ids)}
-
-    @property
-    def fps(self) -> int:
-        """Frames per second used during data collection.
-
-        NOTE: Fow now, this relies on a check in __init__ to make sure all sub-datasets have the same info.
-        """
-        return self._datasets[0].meta.info.fps
-
-    @property
-    def video(self) -> bool:
-        """Returns True if this dataset loads video frames from mp4 files.
-
-        Returns False if it only loads images from png files.
-
-        NOTE: Fow now, this relies on a check in __init__ to make sure all sub-datasets have the same info.
-        """
-        return len(self._datasets[0].meta.video_keys) > 0
-
-    @property
-    def features(self) -> datasets.Features:
-        features = {}
-        for dataset in self._datasets:
-            features.update(
-                {
-                    k: v
-                    for k, v in get_hf_features_from_features(dataset.features).items()
-                    if k not in self.disabled_features
-                }
+        means = np.stack([np.asarray(stats["mean"]) for stats in feature_stats])
+        variances = np.stack([np.asarray(stats["std"]) ** 2 for stats in feature_stats])
+        broadcast_weights = feature_weights.reshape((len(feature_weights),) + (1,) * (means.ndim - 1))
+        mean = (means * broadcast_weights).sum(axis=0)
+        variance = ((variances + (means - mean) ** 2) * broadcast_weights).sum(axis=0)
+        result = {"mean": mean, "std": np.sqrt(variance)}
+        if "min" in common_keys:
+            result["min"] = np.min(np.stack([np.asarray(stats["min"]) for stats in feature_stats]), axis=0)
+        if "max" in common_keys:
+            result["max"] = np.max(np.stack([np.asarray(stats["max"]) for stats in feature_stats]), axis=0)
+        if "count" in common_keys:
+            result["count"] = np.sum(
+                np.stack([np.asarray(stats["count"]) for stats in feature_stats]), axis=0
             )
-        return features
+        for stat_key in sorted(key for key in common_keys if key.startswith("q") and key[1:].isdigit()):
+            values = np.stack([np.asarray(stats[stat_key]) for stats in feature_stats])
+            value_weights = feature_weights.reshape((len(feature_weights),) + (1,) * (values.ndim - 1))
+            result[stat_key] = (values * value_weights).sum(axis=0)
+        aggregated[feature_key] = result
+    return aggregated
+
+
+@dataclass
+class MixtureMetadata:
+    features: dict[str, dict]
+    stats: dict[str, dict[str, np.ndarray]]
+    tasks: pd.DataFrame
+    fps: int
+    robot_type: str | None
 
     @property
     def camera_keys(self) -> list[str]:
-        """Keys to access image and video stream from cameras."""
-        keys = []
-        for key, feats in self.features.items():
-            if isinstance(feats, (datasets.Image | VideoFrame)):
-                keys.append(key)
-        return keys
+        return [key for key, feature in self.features.items() if feature["dtype"] in ("video", "image")]
 
     @property
-    def video_frame_keys(self) -> list[str]:
-        """Keys to access video frames that requires to be decoded into images.
+    def video_keys(self) -> list[str]:
+        return [key for key, feature in self.features.items() if feature["dtype"] == "video"]
 
-        Note: It is empty if the dataset contains images only,
-        or equal to `self.cameras` if the dataset contains videos only,
-        or can even be a subset of `self.cameras` in a case of a mixed image/video dataset.
-        """
-        video_frame_keys = []
-        for key, feats in self.features.items():
-            if isinstance(feats, VideoFrame):
-                video_frame_keys.append(key)
-        return video_frame_keys
+
+class MixtureLeRobotDataset(torch.utils.data.Dataset):
+    """A weighted virtual mixture with concatenated map-style index space."""
+
+    def __init__(self, datasets: list[LeRobotDataset], definition: MixtureDefinition):
+        super().__init__()
+        if len(datasets) != len(definition.members):
+            raise ValueError("Mixture definition and loaded dataset counts do not match.")
+        validate_mixture_metadata(datasets)
+        self.repo_id = definition.dataset_id
+        self.repo_ids = [member.dataset_id for member in definition.members]
+        self.definition = definition
+        self._datasets = datasets
+        self.weights = definition.normalized_weights
+        self.roots = [Path(dataset.root) for dataset in datasets]
+        self.root = None
+        self.episodes = None
+
+        self._offsets = []
+        running = 0
+        for dataset in datasets:
+            self._offsets.append(running)
+            running += len(dataset)
+        self._num_frames = running
+
+        task_names = []
+        for dataset in datasets:
+            task_names.extend(str(task) for task in dataset.meta.tasks.index)
+        unique_tasks = list(dict.fromkeys(task_names))
+        tasks = pd.DataFrame(index=pd.Index(unique_tasks, name="task"))
+        reference = datasets[0].meta
+        self.meta = MixtureMetadata(
+            features=reference.features,
+            stats=aggregate_weighted_stats([dataset.meta.stats for dataset in datasets], self.weights),
+            tasks=tasks,
+            fps=reference.fps,
+            robot_type=reference.robot_type,
+        )
 
     @property
     def num_frames(self) -> int:
-        """Number of samples/frames."""
-        return sum(d.num_frames for d in self._datasets)
+        return self._num_frames
 
     @property
     def num_episodes(self) -> int:
-        """Number of episodes."""
-        return sum(d.num_episodes for d in self._datasets)
+        return sum(dataset.num_episodes for dataset in self._datasets)
 
     @property
-    def tolerance_s(self) -> float:
-        """Tolerance in seconds used to discard loaded frames when their timestamps
-        are not close enough from the requested frames. It is only used when `delta_timestamps`
-        is provided or when loading video frames from mp4 files.
-        """
-        # 1e-4 to account for possible numerical error
-        return 1 / self.fps - 1e-4
+    def text_embedding_cache_dirs(self) -> list[Path]:
+        return [root / "text_embeddings" / "wan22" for root in self.roots]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.num_frames
 
-    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        if idx >= len(self):
-            raise IndexError(f"Index {idx} out of bounds.")
-        # Determine which dataset to get an item from based on the index.
-        start_idx = 0
-        dataset_idx = 0
-        for dataset in self._datasets:
-            if idx >= start_idx + dataset.num_frames:
-                start_idx += dataset.num_frames
-                dataset_idx += 1
-                continue
-            break
-        else:
-            raise AssertionError("We expect the loop to break out as long as the index is within bounds.")
-        item = self._datasets[dataset_idx][idx - start_idx]
-        item["dataset_index"] = torch.tensor(dataset_idx)
-        for data_key in self.disabled_features:
-            if data_key in item:
-                del item[data_key]
-
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        if idx < 0 or idx >= len(self):
+            raise IndexError(f"Index {idx} out of bounds for mixture of length {len(self)}.")
+        dataset_idx = bisect_right(self._offsets, idx) - 1
+        item = self._datasets[dataset_idx][idx - self._offsets[dataset_idx]]
+        item["dataset_index"] = torch.tensor(dataset_idx, dtype=torch.long)
         return item
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        members = ", ".join(
+            f"{repo_id}={weight:.4f}" for repo_id, weight in zip(self.repo_ids, self.weights, strict=True)
+        )
         return (
-            f"{self.__class__.__name__}(\n"
-            f"  Repository IDs: '{self.repo_ids}',\n"
-            f"  Number of Samples: {self.num_frames},\n"
-            f"  Number of Episodes: {self.num_episodes},\n"
-            f"  Type: {'video (.mp4)' if self.video else 'image (.png)'},\n"
-            f"  Recorded Frames per Second: {self.fps},\n"
-            f"  Camera Keys: {self.camera_keys},\n"
-            f"  Video Frame Keys: {self.video_frame_keys if self.video else 'N/A'},\n"
-            f"  Transformations: {self.image_transforms},\n"
-            f")"
+            f"{self.__class__.__name__}(id={self.repo_id!r}, members=[{members}], "
+            f"frames={self.num_frames}, episodes={self.num_episodes})"
         )

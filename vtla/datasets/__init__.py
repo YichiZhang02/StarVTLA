@@ -21,13 +21,14 @@ require_package("datasets", extra="dataset")
 require_package("av", extra="dataset")
 
 from .factory import make_dataset, resolve_delta_timestamps
-from .sampler import EpisodeAwareSampler
+from .sampler import EpisodeAwareSampler, MixtureSampler
 
 # Keep this package entrypoint light. Training only needs the dataset factory
 # and sampler; heavier dataset tools should be imported from their modules.
 
 __all__ = [
     "EpisodeAwareSampler",
+    "MixtureSampler",
     "make_dataset",
     "resolve_delta_timestamps",
 ]

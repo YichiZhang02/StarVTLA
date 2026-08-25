@@ -158,6 +158,29 @@ bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
 
 训练会校验数据集的臂布局，并把 `robot_type` 写入每个 checkpoint 的 policy config。
 
+#### 数据集 Mixture
+
+在 `configs/data_mixtures.yaml` 中可以把已有数据集注册为一个不占额外数据存储的虚拟数据集：
+
+```yaml
+version: 1
+mixtures:
+  <data_all>:
+    root: playground/data
+    datasets:
+      - dataset_id: <data1>
+      - dataset_id: <data2>
+      - dataset_id: <data3>
+```
+
+mixture 和普通数据集使用同一个 ID 入口，不需要特殊前缀：
+
+```bash
+bash train.sh <data_all>
+```
+
+每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type`、FPS 和 feature schema。
+
 ### 4. 离线推理
 
 ```bash

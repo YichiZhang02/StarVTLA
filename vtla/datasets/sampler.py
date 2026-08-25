@@ -17,6 +17,7 @@ import logging
 from collections.abc import Iterator
 
 import torch
+from torch.utils.data import Sampler
 
 logger = logging.getLogger(__name__)
 
@@ -84,3 +85,73 @@ class EpisodeAwareSampler:
 
     def __len__(self) -> int:
         return len(self.indices)
+
+
+class MixtureSampler(Sampler[int]):
+    """Sample a dataset by mixture weight, then a valid frame uniformly within it."""
+
+    def __init__(
+        self,
+        dataset,
+        drop_n_first_frames: int = 0,
+        drop_n_last_frames: int = 0,
+        num_samples: int | None = None,
+        seed: int = 0,
+    ) -> None:
+        if drop_n_first_frames < 0 or drop_n_last_frames < 0:
+            raise ValueError("drop_n_first_frames and drop_n_last_frames must be non-negative.")
+        self.dataset = dataset
+        self.seed = seed
+        self.epoch = 0
+        self.valid_indices = [
+            self._valid_child_indices(child, drop_n_first_frames, drop_n_last_frames)
+            for child in dataset._datasets
+        ]
+        empty = [dataset.repo_ids[i] for i, indices in enumerate(self.valid_indices) if not indices]
+        if empty:
+            raise ValueError(f"No valid frames remain for mixture members: {empty}")
+        self.num_samples = num_samples or sum(len(indices) for indices in self.valid_indices)
+        self.weights = torch.tensor(dataset.weights, dtype=torch.double)
+
+    @staticmethod
+    def _valid_child_indices(dataset, drop_first: int, drop_last: int) -> list[int]:
+        if drop_first == 0 and drop_last == 0:
+            return list(range(len(dataset)))
+        selected_episodes = (
+            sorted(dataset.episodes)
+            if dataset.episodes is not None
+            else list(range(dataset.meta.total_episodes))
+        )
+        indices = []
+        local_start = 0
+        for episode_idx in selected_episodes:
+            episode = dataset.meta.episodes[episode_idx]
+            episode_length = int(episode["dataset_to_index"] - episode["dataset_from_index"])
+            if drop_first + drop_last >= episode_length:
+                logger.warning(
+                    "Dataset %s episode %d has no frames after dropping %d first and %d last frames.",
+                    dataset.repo_id,
+                    episode_idx,
+                    drop_first,
+                    drop_last,
+                )
+            else:
+                indices.extend(range(local_start + drop_first, local_start + episode_length - drop_last))
+            local_start += episode_length
+        return indices
+
+    def __iter__(self) -> Iterator[int]:
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        dataset_choices = torch.multinomial(
+            self.weights, self.num_samples, replacement=True, generator=generator
+        ).tolist()
+        offsets = self.dataset._offsets
+        for dataset_idx in dataset_choices:
+            candidates = self.valid_indices[dataset_idx]
+            local_pos = torch.randint(len(candidates), (1,), generator=generator).item()
+            yield offsets[dataset_idx] + candidates[local_pos]
+
+    def __len__(self) -> int:
+        return self.num_samples

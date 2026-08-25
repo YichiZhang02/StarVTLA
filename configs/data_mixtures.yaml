@@ -1,0 +1,10 @@
+version: 1
+
+# Mixture IDs share the same namespace as ordinary dataset IDs. Each member's
+# weight defaults to 1.0 and is normalized across the mixture at load time.
+mixtures:
+  rm_isf_umi_left_20260820_insert_easy_all_undist_uint8_256:
+    root: playground/data
+    datasets:
+      - dataset_id: rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
+      - dataset_id: rm_isf_umi_left_20260820_insert_easy_robust_undist_uint8_256
