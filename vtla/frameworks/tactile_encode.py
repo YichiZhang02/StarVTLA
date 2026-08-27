@@ -13,37 +13,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Shared tactile-encode token builder used by all vtla policies.
+"""Shared pooled tactile-backbone token builder used by all VTLA policies.
 
-When ``tactile_mode="encode"``, each policy owns one ``TactileEncoder``. It wraps the
-tactile-MAE feature extractor (``vtla.tac_encoder.tactile_mae.inference``), which emits
-``N = tactile_num_tokens`` learnable query tokens per tactile image, plus a trainable
-projection that maps them into the policy's token space. All tactile keys (fingers) are
-encoded in a single batched forward, so the total number of tactile tokens is
-``n_keys * N``.
-
-The encoder weights / arch / sensor_id / image_size are loaded automatically from
-``config.tactile_encoder_path``; the user only specifies that path. By default the MAE
-encoder + query tokens are fine-tuned end-to-end during policy training
-(``freeze_tactile_encoder=False``).
+Only checkpoints produced by ``vtla.tac_encoder.train`` are supported. Each tactile
+sensor is encoded independently inside one batched backbone call, then its spatial
+features are reduced with fixed ``3x3`` adaptive average pooling.
 """
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
-from vtla.tac_encoder.tactile_mae.inference import TactileMAEFeatureExtractor
+from vtla.tac_encoder.inference import TactileBackboneFeatureExtractor
 
 
 class TactileEncoder(nn.Module):
-    """Tactile-MAE query-token encoder + projection that yields tactile tokens.
-
-    forward(batch) returns tactile tokens projected to ``output_dim``:
-      * ``[B, n_keys * N, output_dim]``         for ``[B, C, H, W]`` tactile inputs
-      * ``[B, T, n_keys * N, output_dim]``      for ``[B, T, C, H, W]`` tactile inputs
-
-    where ``N = tactile_num_tokens`` is the number of query tokens per tactile image.
-    """
+    """Unified tactile backbone plus a projection into the policy token space."""
 
     def __init__(self, config, output_dim: int):
         super().__init__()
@@ -52,15 +38,22 @@ class TactileEncoder(nn.Module):
             raise ValueError(
                 "TactileEncoder requires tactile_mode='encode' with non-empty tactile_keys."
             )
-
-        self.extractor = TactileMAEFeatureExtractor.from_pretrained(
+        self.num_frames = int(getattr(config, "tactile_num_frames", 1))
+        self.pool_size = int(getattr(config, "tactile_pool_size", 3))
+        self.extractor = TactileBackboneFeatureExtractor.from_pretrained(
             config.tactile_encoder_path,
             freeze=config.freeze_tactile_encoder,
-            num_query_tokens=config.tactile_num_tokens,
+            pool_size=self.pool_size,
         )
+        self.image_size = self.extractor.image_size
+        if self.num_frames != self.extractor.num_frames:
+            raise ValueError(
+                f"Tactile checkpoint requires tactile_num_frames={self.extractor.num_frames}, "
+                f"got {self.num_frames}."
+            )
+        if self.num_frames <= 1:
+            raise ValueError("Unified tactile checkpoints require tactile_num_frames > 1.")
         self.output_dim = int(output_dim)
-        # Tactile temporal window: F frames fold into the token axis (see forward_flat).
-        self.num_frames = int(getattr(config, "tactile_num_frames", 1))
         self.proj = nn.Linear(self.extractor.feature_dim, self.output_dim)
         if self.extractor.compute_dtype is not None:
             self.proj.to(dtype=self.extractor.compute_dtype)
@@ -71,34 +64,19 @@ class TactileEncoder(nn.Module):
 
     @property
     def num_tokens(self) -> int:
-        """Tactile tokens per (time) step: ``n_keys * num_query_tokens``."""
-        return len(self.tactile_keys) * self.extractor.num_query_tokens
+        """Total pooled tokens for all configured sensors and the full window."""
+        return len(self.tactile_keys) * self.extractor.tokens_per_sensor
 
     @property
     def total_tokens(self) -> int:
-        """Total tactile tokens across the whole window: ``num_frames * n_keys * num_query_tokens``.
-
-        Equals :attr:`num_tokens` when ``tactile_num_frames == 1``. Token-based policies size their
-        tactile position embedding to this so a multi-frame window is just extra tokens.
-        """
-        return self.num_frames * self.num_tokens
+        return self.num_tokens
 
     def _missing_keys(self, batch: dict[str, Tensor]) -> list[str]:
         return [k for k in self.tactile_keys if k not in batch]
 
     def forward_flat(self, batch: dict[str, Tensor]) -> Tensor:
-        """Tactile tokens with any time axis folded into the token axis.
-
-        Always returns ``[B, F * n_keys * N, output_dim]`` (``F = tactile_num_frames``,
-        ``F = 1`` for single-frame inputs). This lets the token-based policies (ACT / pi05 /
-        starvla_groot) treat a tactile history window as simply "more tokens" without any
-        per-frame bookkeeping — the frames enter as extra tokens ordered oldest → current.
-        """
-        feat = self.forward(batch)  # [B, n_tac, P] (4D input) or [B, T, n_tac, P] (5D input)
-        if feat.dim() == 4:
-            b, t, n, p = feat.shape
-            feat = feat.reshape(b, t * n, p)  # frames folded into token axis (oldest → current)
-        return feat
+        """Return ``[B, all_sensor_window_tokens, output_dim]``."""
+        return self.forward(batch)
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         missing = self._missing_keys(batch)
@@ -109,35 +87,38 @@ class TactileEncoder(nn.Module):
             )
 
         device = self.proj.weight.device
-        n_keys = len(self.tactile_keys)
-
         imgs = []
         for key in self.tactile_keys:
             img = batch[key]
+            if img.dim() != 5:
+                raise ValueError(
+                    "Unified tactile checkpoints expect each tactile key as [B,T,C,H,W], "
+                    f"got {tuple(img.shape)} for {key!r}."
+                )
+            if img.shape[2] != 3:
+                raise ValueError(
+                    f"Unified tactile checkpoints require 3 channels, got {img.shape[2]} "
+                    f"for {key!r}."
+                )
             if img.device != device:
-                img = img.to(device)
+                img = img.to(device, non_blocking=True)
+            if img.dtype == torch.uint8:
+                img = img.float().div_(255.0)
+            elif not img.is_floating_point():
+                raise TypeError(
+                    f"Tactile input {key!r} must be uint8 or floating point, got {img.dtype}."
+                )
+            if tuple(img.shape[-2:]) != (self.image_size, self.image_size):
+                batch_size, frames = img.shape[:2]
+                img = F.interpolate(
+                    img.flatten(0, 1).float(),
+                    size=(self.image_size, self.image_size),
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                ).unflatten(0, (batch_size, frames))
             imgs.append(img)
 
-        # Stack every tactile key and run the MAE encoder a *single* time (keys folded
-        # into the batch dim) instead of one forward per key. Token ordering matches the
-        # old per-key concat: key0's N query tokens, then key1's, ... along the token dim.
         sample = imgs[0]
-        if sample.dim() == 4:                              # [B, C, H, W] per key
-            stacked = torch.stack(imgs, dim=1)             # [B, n_keys, C, H, W]
-            feat = self.extractor(stacked)                 # [B, n_keys, N, D]
-            b, _, n, d = feat.shape
-            feat = feat.reshape(b, n_keys * n, d)          # [B, n_keys*N, D]
-        elif sample.dim() == 5:                            # [B, T, C, H, W] per key
-            b, t = sample.shape[:2]
-            stacked = torch.stack(imgs, dim=1)             # [B, n_keys, T, C, H, W]
-            flat = stacked.reshape(b * n_keys, t, *sample.shape[2:])
-            feat = self.extractor(flat)                    # [B*n_keys, T, N, D]
-            n, d = feat.shape[-2:]
-            feat = feat.reshape(b, n_keys, t, n, d)
-            feat = feat.permute(0, 2, 1, 3, 4).reshape(b, t, n_keys * n, d)  # [B, T, n_keys*N, D]
-        else:
-            raise ValueError(
-                f"TactileEncoder expects 4D or 5D tactile tensors, got shape {tuple(sample.shape)}"
-            )
-
-        return self.proj(feat)                              # [B, n_keys*N, P] or [B, T, n_keys*N, P]
+        stacked = torch.stack(imgs, dim=1)
+        return self.proj(self.extractor(stacked).tokens)

@@ -15,7 +15,7 @@
 # limitations under the License.
 """Private reader component for LeRobotDataset. Handles random-access reading (HF dataset, delta indices, video decoding)."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -35,6 +35,23 @@ from .io_utils import (
 from .video_utils import decode_tactile_video_frames_pyav, decode_video_frames
 
 
+def apply_image_transforms(
+    images: dict[str, torch.Tensor],
+    camera_keys: Iterable[str],
+    image_transforms: Callable | None,
+    image_transform_keys: set[str] | None = None,
+) -> None:
+    """Apply augmentation in place, optionally restricting it to selected RGB keys."""
+    if image_transforms is None:
+        return
+    for key in camera_keys:
+        if key not in images:
+            continue
+        if image_transform_keys is not None and key not in image_transform_keys:
+            continue
+        images[key] = image_transforms(images[key])
+
+
 class DatasetReader:
     """Encapsulates read-side state and methods for LeRobotDataset.
 
@@ -52,6 +69,7 @@ class DatasetReader:
         image_transforms: Callable | None,
         return_uint8: bool = False,
         use_video_keys: list[str] | None = None,
+        image_transform_keys: list[str] | None = None,
     ):
         """Initialize the reader with metadata, filtering, and transform config.
 
@@ -80,6 +98,9 @@ class DatasetReader:
         # Only decode these video streams (subset of meta.video_keys). None = decode all. Lets the
         # training path skip cameras the policy doesn't consume (a big data-loading speedup).
         self._use_video_keys = set(use_video_keys) if use_video_keys is not None else None
+        self._image_transform_keys = (
+            set(image_transform_keys) if image_transform_keys is not None else None
+        )
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
@@ -314,11 +335,12 @@ class DatasetReader:
             video_frames = self._query_videos(query_timestamps, ep_idx)
             item = {**video_frames, **item}
 
-        if self._image_transforms is not None:
-            image_keys = self._meta.camera_keys
-            for cam in image_keys:
-                if cam in item:  # may be absent when use_video_keys skips this camera
-                    item[cam] = self._image_transforms(item[cam])
+        apply_image_transforms(
+            item,
+            self._meta.camera_keys,
+            self._image_transforms,
+            self._image_transform_keys,
+        )
 
         # Add task as a string
         task_idx = item["task_index"].item()

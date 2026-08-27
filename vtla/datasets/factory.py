@@ -45,6 +45,14 @@ def _metadata_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_image_transform_keys(config: PreTrainedConfig) -> list[str] | None:
+    """Return RGB camera keys eligible for augmentation, excluding tactile inputs."""
+    if not hasattr(config, "selected_camera_keys"):
+        return None
+    tactile_keys = set(getattr(config, "tactile_keys", []))
+    return [key for key in config.selected_camera_keys() if key not in tactile_keys]
+
+
 def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetadata) -> dict[str, list] | None:
     """Resolves delta_timestamps by reading from the 'delta_indices' properties of the config.
 
@@ -123,6 +131,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
+    image_transform_keys = _resolve_image_transform_keys(cfg.trainable_config)
 
     mixture = resolve_mixture(
         cfg.dataset.repo_id,
@@ -154,6 +163,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                 return_uint8=True,
                 tolerance_s=cfg.tolerance_s,
                 use_video_keys=use_video_keys,
+                image_transform_keys=image_transform_keys,
             )
         else:
             from .streaming_dataset import StreamingLeRobotDataset
@@ -168,6 +178,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                 max_num_shards=cfg.num_workers,
                 tolerance_s=cfg.tolerance_s,
                 return_uint8=True,
+                image_transform_keys=image_transform_keys,
             )
     else:
         if cfg.dataset.streaming:
@@ -223,6 +234,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                     return_uint8=True,
                     tolerance_s=cfg.tolerance_s,
                     use_video_keys=use_video_keys,
+                    image_transform_keys=image_transform_keys,
                 )
             )
         dataset = MixtureLeRobotDataset(member_datasets, mixture)

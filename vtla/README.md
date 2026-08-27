@@ -22,7 +22,7 @@ bash train.sh \
   <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
   [action_gap] <augmentation_mode> \
-  [tactile_encoder_path] [tactile_insert_location]
+  [tactile_encoder_path] [tactile_insert_location] [tactile_pool_size]
 ```
 
 | 位置 | 参数 | 脚本默认值 | 可选值或含义 |
@@ -38,8 +38,9 @@ bash train.sh \
 | 9 | `action_mode` | `absolute_joint` | 见下文 |
 | 10 | `action_gap` | `6` | GT action 起点相对当前观测向未来偏移的帧数 |
 | 11 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
-| 12 | `tactile_encoder_path` | AnyTouch 本地目录 | 仅 `encode` 使用 |
+| 12 | `tactile_encoder_path` | 空 | `train_backbone.sh` 生成的 checkpoint，仅 `encode` 使用 |
 | 13 | `tactile_insert_location` | `encoder` | `encoder`、`decoder` |
+| 14 | `tactile_pool_size` | `3` | `3` 表示下游 `AdaptiveAvgPool2d(3,3)` |
 
 关节训练示例：
 
@@ -148,17 +149,17 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | --- | --- |
 | `none` | policy 不消费触觉 feature |
 | `as_image` | 每路触觉作为额外图像视角 |
-| `encode` | 触觉 MAE 生成额外 token/context |
+| `encode` | 统一触觉 backbone 经下游 spatial pooling 后生成 token/context |
 
-`encode` 模式的 tactile encoder 和 query token 会随 policy 训练，不默认冻结。常用变量：
+`encode` 模式的 tactile encoder 会随 policy 训练，不默认冻结。spatial pooling 仅发生在 policy 特征提取阶段，不参与 backbone 重建训练。常用变量：
 
 | 变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `TACTILE_ENCODER_PATH` | `playground/pretrained_models/AnyTouch-ViT-L-16` | encoder 初始化 |
+| `TACTILE_ENCODER_PATH` | 空 | `train_backbone.sh` 生成的 checkpoint |
 | `TACTILE_INSERT_LOCATION` | `encoder` | 注入 encoder 或 decoder |
-| `TACTILE_NUM_TOKENS` | `16` | 每张触觉图的 token 数 |
-| `TACTILE_NUM_FRAMES` | `1` | 每次观测的历史帧数 |
-| `TACTILE_FRAME_OFFSET` | `1` | 历史帧间隔 |
+| `TACTILE_POOL_SIZE` | `3` | 下游 spatial pooling 边长；`3` 表示 `3x3` |
+| `TACTILE_NUM_FRAMES` | `4` | 每次观测的历史帧数 |
+| `TACTILE_FRAME_OFFSET` | `2` | 历史帧间隔 |
 
 时间窗口 `F=TACTILE_NUM_FRAMES`、`K=TACTILE_FRAME_OFFSET` 对应：
 

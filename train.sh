@@ -22,15 +22,15 @@ action_mode=${9:-absolute_joint}  # absolute_joint | relative_joint | absolute_r
 action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
 
 # 数据增强
-augmentation_mode=${11:-none}  # none | mild | strong
+augmentation_mode=${11:-strong}  # none | mild | strong
 color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}  # 色温增强 [min,max] (逗号后不要空格)
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
-tactile_encoder_path=${TACTILE_ENCODER_PATH:-${12:-playground/pretrained_models/AnyTouch-ViT-L-16}}
-tactile_insert_location=${TACTILE_INSERT_LOCATION:-${13:-encoder}}  # 触觉插入位置 encoder | decoder
-tactile_num_tokens=${TACTILE_NUM_TOKENS:-16}  # 触觉 tokens / per image
-tactile_num_frames=${TACTILE_NUM_FRAMES:-1}  # 每步输入的触觉帧数（含当前帧）
-tactile_frame_offset=${TACTILE_FRAME_OFFSET:-1}  # 相邻两个触觉帧的采样间隔（帧数）
+tactile_encoder_path=${TACTILE_ENCODER_PATH:-${12:-/mnt/data/xidong_data/StarVTLA/playground/results/backbones/20260826_backbone_training_data_anytouch2_4frames_2stride/best.pth}}
+tactile_insert_location=${TACTILE_INSERT_LOCATION:-encoder}  # 触觉插入位置 encoder | decoder
+tactile_pool_size=${TACTILE_POOL_SIZE:-3}  # 3 表示下游 AdaptiveAvgPool2d(3x3)
+tactile_num_frames=${TACTILE_NUM_FRAMES:-4}  # 每步输入的触觉帧数（含当前帧）
+tactile_frame_offset=${TACTILE_FRAME_OFFSET:-2}  # 相邻两个触觉帧的采样间隔（帧数）
 
 # cpu / gpu training
 policy_device=${POLICY_DEVICE:-cuda}
@@ -137,10 +137,10 @@ fi
 # tactile_mode=encode 时追加 tactile encoder 相关参数（四个 framework 通用）
 if [ "${tactile_mode}" = "encode" ]; then
   if [ -z "${tactile_encoder_path}" ]; then
-    echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 12 个位置参数）指向 tactile-MAE 权重"; exit 1
+    echo "tactile_mode=encode 需要提供 TACTILE_ENCODER_PATH（或第 12 个位置参数）指向 train_backbone.sh 生成的 checkpoint"; exit 1
   fi
   extra_args="${extra_args} --policy.tactile_encoder_path=${tactile_encoder_path}"
-  extra_args="${extra_args} --policy.tactile_num_tokens=${tactile_num_tokens}"
+  extra_args="${extra_args} --policy.tactile_pool_size=${tactile_pool_size}"
 fi
 
 # 触觉时序窗口（encode 和 as_image 均生效；F=1 时完全向后兼容）
@@ -167,7 +167,7 @@ echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
 echo "Tactile keys:   ${tactile_keys}"
 if [ "${tactile_mode}" = "encode" ]; then
-  echo "Tactile encoder path: ${tactile_encoder_path} | Num tokens: ${tactile_num_tokens} (encoder trained jointly)"
+  echo "Tactile encoder path: ${tactile_encoder_path} (${tactile_pool_size}x${tactile_pool_size} pooled backbone, trained jointly)"
 fi
 if [ "${tactile_mode}" != "none" ]; then
   echo "Tactile context: insert=${tactile_insert_location} | num_frames=${tactile_num_frames} | frame_offset=${tactile_frame_offset}"

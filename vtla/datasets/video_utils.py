@@ -408,17 +408,31 @@ def decode_tactile_video_frames_pyav(
     timestamps: list[float],
     tolerance_s: float,
     return_uint8: bool = False,
-) -> torch.Tensor:
-    """Decode lossless uint16/uint8 tactile MKV into its standard uint8 view."""
+    *,
+    return_numpy_hwc: bool = False,
+    decoder_threads: int | None = None,
+) -> torch.Tensor | np.ndarray:
+    """Decode tactile video with linear nearest-timestamp matching.
+
+    ``return_numpy_hwc`` avoids per-frame Torch conversions for offline cache
+    builders. ``decoder_threads`` bounds FFmpeg threads when episodes are
+    decoded concurrently.
+    """
     from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
 
+    if return_numpy_hwc and not return_uint8:
+        raise ValueError("return_numpy_hwc requires return_uint8=True")
     first_ts = min(timestamps)
     last_ts = max(timestamps)
-    loaded_frames: list[torch.Tensor] = []
+    loaded_frames: list[np.ndarray] = []
     loaded_ts: list[float] = []
 
     with av.open(str(video_path)) as container:
         stream = container.streams.video[0]
+        if decoder_threads is not None:
+            if decoder_threads <= 0:
+                raise ValueError("decoder_threads must be positive")
+            stream.codec_context.thread_count = decoder_threads
         pixel_format = stream.codec_context.format.name
         decode_format = "rgb48le" if "16" in pixel_format else "rgb24"
         container.seek(int(first_ts * av.time_base), backward=True)
@@ -428,7 +442,7 @@ def decode_tactile_video_frames_pyav(
             current_ts = float(frame.pts * stream.time_base)
             tactile_frame = frame.to_ndarray(format=decode_format)
             encoded = tactile_uint16_to_uint8(tactile_frame)
-            loaded_frames.append(torch.from_numpy(encoded).permute(2, 0, 1).contiguous())
+            loaded_frames.append(encoded)
             loaded_ts.append(current_ts)
             if current_ts >= last_ts:
                 break
@@ -439,24 +453,32 @@ def decode_tactile_video_frames_pyav(
             f"the timestamp range [{first_ts}, {last_ts}]."
         )
 
-    query_ts = torch.tensor(timestamps)
-    loaded_ts_t = torch.tensor(loaded_ts)
-    distances = torch.cdist(query_ts[:, None], loaded_ts_t[:, None], p=1)
-    minimum, argmin = distances.min(1)
+    query_ts = np.asarray(timestamps, dtype=np.float64)
+    loaded_ts_array = np.asarray(loaded_ts, dtype=np.float64)
+    right = np.searchsorted(loaded_ts_array, query_ts, side="left")
+    right = np.clip(right, 0, len(loaded_ts_array) - 1)
+    left = np.maximum(right - 1, 0)
+    left_distance = np.abs(query_ts - loaded_ts_array[left])
+    right_distance = np.abs(query_ts - loaded_ts_array[right])
+    argmin = np.where(left_distance <= right_distance, left, right)
+    minimum = np.minimum(left_distance, right_distance)
     # Matroska commonly stores timestamps on a 1 ms time base. At 30 Hz this
     # rounds 33.333 ms frame intervals by up to 0.333 ms.
     effective_tolerance_s = max(tolerance_s, 0.00051)
-    if not (minimum < effective_tolerance_s).all():
+    if not np.all(minimum < effective_tolerance_s):
         raise FrameTimestampError(
             f"Tactile frame timestamps violate tolerance "
             f"({minimum} > {effective_tolerance_s=}). "
-            f"queried={query_ts}, loaded={loaded_ts_t}, video={video_path}"
+            f"queried={query_ts}, loaded={loaded_ts_array}, video={video_path}"
         )
 
-    closest_frames = torch.stack([loaded_frames[index] for index in argmin])
-    if return_uint8:
+    closest_frames = np.stack([loaded_frames[index] for index in argmin])
+    if return_numpy_hwc:
         return closest_frames
-    return (closest_frames / 255.0).type(torch.float32)
+    closest_frames_t = torch.from_numpy(closest_frames).permute(0, 3, 1, 2).contiguous()
+    if return_uint8:
+        return closest_frames_t
+    return closest_frames_t.type(torch.float32).div_(255.0)
 
 
 def encode_video_frames(

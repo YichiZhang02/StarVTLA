@@ -25,6 +25,7 @@ from datasets import load_dataset
 from vtla.engine.utils.constants import HF_LEROBOT_HOME, LOOKAHEAD_BACKTRACKTABLE, LOOKBACK_BACKTRACKTABLE
 
 from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
+from .dataset_reader import apply_image_transforms
 from .feature_utils import get_delta_indices
 from .io_utils import item_to_torch
 from .utils import (
@@ -253,6 +254,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         rng: np.random.Generator | None = None,
         shuffle: bool = True,
         return_uint8: bool = False,
+        image_transform_keys: list[str] | None = None,
     ):
         """Initialize a StreamingLeRobotDataset.
 
@@ -281,6 +283,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         self.streaming_from_local = root is not None
 
         self.image_transforms = image_transforms
+        self._image_transform_keys = (
+            set(image_transform_keys) if image_transform_keys is not None else None
+        )
         self.episodes = episodes
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
@@ -501,10 +506,12 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             )
             video_frames = self._query_videos(query_timestamps, ep_idx)
 
-            if self.image_transforms is not None:
-                image_keys = self.meta.camera_keys
-                for cam in image_keys:
-                    video_frames[cam] = self.image_transforms(video_frames[cam])
+            apply_image_transforms(
+                video_frames,
+                self.meta.camera_keys,
+                self.image_transforms,
+                self._image_transform_keys,
+            )
 
             updates.append(video_frames)
 

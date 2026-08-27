@@ -374,8 +374,7 @@ class ACT(nn.Module):
         if self.tactile_mode_encode:
             self.tactile_encoder = TactileEncoder(config, config.dim_model)
             self.tactile_insert_location = config.tactile_insert_location
-            # Size to the FULL tactile window (num_frames * n_keys * num_query_tokens); a
-            # multi-frame history simply contributes more tactile tokens (oldest → current).
+            # Size to the fixed 3x3-pooled token count stored by the tactile backbone.
             self.tactile_pos_embed = nn.Embedding(self.tactile_encoder.total_tokens, config.dim_model)
 
         # Transformer decoder.

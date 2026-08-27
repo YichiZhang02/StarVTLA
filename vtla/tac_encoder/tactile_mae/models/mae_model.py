@@ -122,7 +122,7 @@ class TactileMAE(nn.Module):
         batch_size = pixel_values.shape[0]
         target_dtype = self.video_patch_embedding.weight.dtype
         if self.use_same_patchemb:
-            xv = pixel_values.unsqueeze(1).repeat(1, 3, 1, 1, 1)
+            xv = pixel_values.unsqueeze(2).repeat(1, 1, 3, 1, 1)
             patch_embeds = self.video_patch_embedding(xv.to(dtype=target_dtype))
         else:
             patch_embeds = self.touch_model.embeddings.patch_embedding(pixel_values.to(dtype=target_dtype))

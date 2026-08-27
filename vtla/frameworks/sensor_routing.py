@@ -124,8 +124,8 @@ class SensorRoutingMixin:
         ]
     )
     # --- tactile encoder (tactile_mode="encode" only) ---
-    # Path to a trained tactile-MAE checkpoint (.pth) or HF dir. The encoder arch /
-    # sensor_id / image_size are read from the checkpoint automatically.
+    # Path to a checkpoint produced by vtla.tac_encoder.train. The model configuration
+    # and image size are read from the checkpoint automatically.
     tactile_encoder_path: str | None = None
     # Where the tactile tokens are injected, relative to each policy's
     # observation-encoder -> action-decoder structure:
@@ -136,9 +136,8 @@ class SensorRoutingMixin:
     # Ignored for Diffusion (no explicit encoder/decoder split) and only active
     # when tactile_mode="encode".
     tactile_insert_location: str = "decoder"  # encoder | decoder
-    # Number of learnable query tokens emitted by the tactile-MAE encoder per tactile
-    # image. Total tactile tokens = len(tactile_keys) * tactile_num_tokens.
-    tactile_num_tokens: int = 8
+    # Downstream spatial pooling only. ``3`` means AdaptiveAvgPool2d(3, 3).
+    tactile_pool_size: int = 3
     # --- tactile temporal window (independent of the RGB observation window) ---
     # Number of tactile frames fed to the policy per step, INCLUDING the current frame.
     # ``1`` (default) = current frame only = exact legacy behaviour. ``F>1`` stacks the
@@ -150,9 +149,8 @@ class SensorRoutingMixin:
     # frames; ``k`` = every k-th frame (wider temporal receptive field, same F frames).
     # The sampled tactile delta indices are ``[-(F-1)*offset, ..., -offset, 0]``.
     tactile_frame_offset: int = 1
-    # By default the tactile-MAE encoder + query tokens are fine-tuned end-to-end with
-    # the policy (the checkpoint is used as initialization). Set True to freeze the MAE
-    # backbone and train only the query tokens + projection.
+    # By default the tactile backbone is fine-tuned end-to-end with the policy. Set True
+    # to freeze the backbone and train only the policy projection.
     freeze_tactile_encoder: bool = False
 
     # --- state / action routing ---
@@ -378,11 +376,11 @@ class SensorRoutingMixin:
         if self.tactile_mode == "encode" and not self.tactile_encoder_path:
             raise ValueError(
                 "tactile_mode='encode' requires --policy.tactile_encoder_path to point at a "
-                "trained tactile-MAE checkpoint (.pth) or HF directory."
+                "checkpoint produced by vtla.tac_encoder.train."
             )
-        if self.tactile_mode == "encode" and self.tactile_num_tokens < 1:
+        if self.tactile_pool_size < 1:
             raise ValueError(
-                f"tactile_num_tokens must be >= 1, got {self.tactile_num_tokens}."
+                f"tactile_pool_size must be >= 1, got {self.tactile_pool_size}."
             )
         # Tactile temporal window (both as_image and encode).
         if self.tactile_num_frames < 1:

@@ -63,6 +63,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
         use_video_keys: list[str] | None = None,
+        image_transform_keys: list[str] | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -213,6 +214,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._vcodec = resolve_vcodec(vcodec)
         self._encoder_threads = encoder_threads
         self._use_video_keys = use_video_keys
+        self._image_transform_keys = image_transform_keys
 
         if self._requested_root is not None:
             self._requested_root.mkdir(exist_ok=True, parents=True)
@@ -252,6 +254,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             image_transforms=image_transforms,
             return_uint8=self._return_uint8,
             use_video_keys=self._use_video_keys,
+            image_transform_keys=self._image_transform_keys,
         )
 
         # Load actual data
@@ -319,6 +322,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 image_transforms=self.image_transforms,
                 return_uint8=self._return_uint8,
                 use_video_keys=self._use_video_keys,
+                image_transform_keys=self._image_transform_keys,
             )
         return self.reader
 
@@ -727,6 +731,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj._batch_encoding_size = batch_encoding_size
         obj._vcodec = vcodec
         obj._encoder_threads = encoder_threads
+        obj._use_video_keys = None
+        obj._image_transform_keys = None
 
         # Reader is lazily created on first access (write-only mode)
         obj.reader = None
@@ -822,6 +828,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj._batch_encoding_size = batch_encoding_size
         obj._vcodec = vcodec
         obj._encoder_threads = encoder_threads
+        obj._use_video_keys = None
+        obj._image_transform_keys = None
 
         if obj._requested_root is not None:
             obj._requested_root.mkdir(exist_ok=True, parents=True)

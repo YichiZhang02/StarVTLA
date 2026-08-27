@@ -12,7 +12,8 @@ bash scripts/<script>.sh ...
 | --- | --- |
 | `process_joint_data.sh` | 关节数据去畸变、触觉转换、缩放和 FK-to-EE |
 | `process_umi_data.sh` | 导入 unified-format UMI v2.5 数据并生成 EE 训练数据 |
-| `train_enc.sh` | 训练 AnyTouch stage-1 风格的触觉 MAE |
+| `process_backbone_data.sh` | 在 processed dataset 内生成触觉 backbone `.npy` cache |
+| `train_backbone.sh` | 统一训练 AnyTouch1、AnyTouch2 或 Sparsh reconstruction backbone |
 | `compute_mean_state.sh` | 统计 home joint 候选或全局 state |
 | `merge_datasets.sh` | 合并脚本内配置的一组数据集 |
 | `evaluate_policy_offline.sh` | 按完整 episode 离线评估 checkpoint |
@@ -163,51 +164,52 @@ TASK="Put the board eraser into the cup." \
 ## 触觉 Backbone 训练
 
 ```bash
-bash scripts/train_enc.sh \
-  <dataset_ids> <init_mode> <arch> <num_processes> <batch_size> <epochs>
+bash scripts/process_backbone_data.sh <dataset_id> [--num_workers 4] [--overwrite]
+bash scripts/train_backbone.sh \
+  <dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
+  [lr] [image_size] [tactile_num_frames] [tactile_frame_offset] [resume]
 ```
 
-多个数据集 ID 使用带引号的空格分隔字符串：
+`dataset_id` 可以是普通 processed dataset，也可以是 `configs/data_mixtures.yaml` 中的 mixture。cache 固定写入每个 concrete dataset 的 `tactile_backbone_cache/`；训练阶段只读取这些 `.npy` 文件。预处理默认使用 4 个 episode worker，只 resize 和保存有效接触窗口实际引用的唯一帧；可按 CPU 和内存情况调整 `--num_workers`。
+
+旧的 `tactile_backbone_npy_v1` 全量 cache 不会被静默复用。首次切换到紧凑 v2 cache 时使用 `--overwrite` 显式重建；之后相同配置直接运行会复用现有 cache。
+
+`train_backbone.sh` 根据 `model_id` 自动选择固定的预训练权重：
+
+| `model_id` | `pretrained_path` |
+| --- | --- |
+| `anytouch1` | `playground/pretrained_models/AnyTouch-ViT-L-16/checkpoint.pth` |
+| `anytouch2` | `playground/pretrained_models/AnyTouch2-Model/checkpoint-4frames.pth` |
+| `sparsh_vjepa` | `playground/pretrained_models/Sparsh-VJEPA-Small/vjepa_vitsmall_full.ckpt` |
+
+Sparsh 公开的 `vjepa_vitsmall.safetensors` 只包含 encoder，不能初始化 JEPA predictor。训练必须提供包含 context encoder、target encoder 和 predictor 的完整官方 checkpoint；缺少任一部分都会在训练前报错。
 
 ```bash
-bash scripts/train_enc.sh \
-  "dataset_a dataset_b" clip vit_b 4 128 100
+bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2
+# 从 checkpoint 恢复
+bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2 path/to/last.pth
 ```
 
 | 参数 | 默认值 | 可选值 |
 | --- | --- | --- |
-| `dataset_ids` | `pretrained_data` | 一个或多个本地数据集 |
-| `init_mode` | `clip` | `scratch`、`clip`、`anytouch` |
-| `arch` | `vit_b` | `vit_b`、`vit_l` |
+| `dataset_id` | `backbone_training_data` | 普通 dataset 或 named mixture |
+| `model_id` | `anytouch1` | `anytouch1`、`anytouch2`、`sparsh_vjepa` |
 | `num_processes` | `4` | `1` 使用 Python，多进程使用 torchrun |
-| `batch_size` | `128` | 每进程 batch size |
-| `epochs` | `100` | epoch 数 |
+| `batch_size` | `32` | 每进程 / 每 GPU batch size |
+| `epochs` | `5` | epoch 数 |
+| `lr` | `1e-5` | AdamW 初始学习率 |
+| `image_size` | `224` | cache 和模型输入分辨率 |
+| `tactile_num_frames` | `4` | 每个触觉窗口包含的帧数 |
+| `tactile_frame_offset` | `2` | 相邻触觉帧在原数据中的间隔 |
+| `resume` | 空 | V2 checkpoint 路径；空值表示从固定 pretrained checkpoint 开始 |
 
-`anytouch` 初始化只支持 `vit_l`。输出保存在：
+输出保存在：
 
 ```text
-playground/results/backbones/<timestamp>_tacmae_<arch>_from_<init_mode>/
+playground/results/backbones/<YYYYMMDD>_<dataset_id>_<model_id>/
 ```
 
-脚本通过 `meta/info.json` 区分 LeRobot 数据集和 raw frame cache；两种模式不能在同一次训练中混用。raw 模式没有逐帧 LeRobot 来源，因此自动关闭 contact filter。
-
-常用环境变量：
-
-| 变量 | 默认值 | 含义 |
-| --- | --- | --- |
-| `TACTILE_KEYS` | 自动选择 | 触觉 camera key 列表 |
-| `RAW_FRAME_CACHE` | 自动识别 | `1/0` 强制选择输入模式 |
-| `SENSOR_ID` | `-1` | AnyTouch sensor token |
-| `MASK_RATIO` | `0.75` | MAE mask 比例 |
-| `VISIBLE_LOSS_WEIGHT` | `0.1` | 可见 patch loss 权重 |
-| `CONTACT_FILTER` | `1` | LeRobot 接触帧筛选 |
-| `CONTACT_STD_THRESHOLD` | `0.5` | 接触判定阈值 |
-| `NONCONTACT_KEEP_RATIO` | `0.05` | 非接触帧保留比例 |
-| `IMAGE_SIZE` | `224` | 输入和 cache 图像尺寸 |
-| `NUM_WORKERS` | `12` | 数据 worker 数 |
-| `RUN_NAME` | 当前时间 | 输出目录前缀 |
-
-模型和初始化细节见 [Tactile MAE](../vtla/tac_encoder/tactile_mae/README.md)。
+模型和数据契约见 [重构计划](../docs/REFACTOR_PLAN.md)。
 
 ## State 统计
 
