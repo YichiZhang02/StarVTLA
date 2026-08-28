@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor, nn
 
 from .models import FeatureTokens, build_backbone
+from .models.registry import MODEL_REGISTRY
 
 
 ENCODER_PREFIXES = {
@@ -40,9 +43,17 @@ def _checkpoint_file(path: str | Path) -> Path:
 
 
 class TactileBackboneFeatureExtractor(nn.Module):
-    def __init__(self, backbone: nn.Module, *, pool_size: int = 3, freeze: bool = False) -> None:
+    def __init__(
+        self,
+        backbone: nn.Module,
+        *,
+        pool_size: int = 3,
+        freeze: bool = False,
+        architecture_config: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self.backbone = backbone
+        self.architecture_config = dict(architecture_config or {})
         self.pool_size = int(pool_size)
         self.feature_dim = int(backbone.feature_dim)
         self.image_size = int(backbone.image_size)
@@ -57,6 +68,49 @@ class TactileBackboneFeatureExtractor(nn.Module):
         self.freeze = bool(freeze)
         if self.freeze:
             self.backbone.requires_grad_(False)
+
+    @staticmethod
+    def _resolve_architecture_config(model_id: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Return the complete, path-free constructor config needed by a policy checkpoint."""
+        try:
+            backbone_class = MODEL_REGISTRY[model_id]
+        except KeyError as error:
+            raise ValueError(f"Unknown tactile backbone model_id: {model_id!r}") from error
+        signature = inspect.signature(backbone_class)
+        resolved: dict[str, Any] = {"model_id": model_id}
+        for name, parameter in signature.parameters.items():
+            if name in {"pretrained_path", "checkpoint_source_grid"}:
+                continue
+            if name in kwargs:
+                resolved[name] = kwargs[name]
+            elif parameter.default is not inspect.Parameter.empty:
+                resolved[name] = parameter.default
+        return resolved
+
+    @classmethod
+    def from_config(
+        cls,
+        architecture_config: dict[str, Any],
+        *,
+        pool_size: int = 3,
+        freeze: bool = False,
+    ) -> "TactileBackboneFeatureExtractor":
+        """Build an uninitialized extractor whose weights will come from the policy checkpoint."""
+        architecture_config = dict(architecture_config)
+        try:
+            model_id = str(architecture_config.pop("model_id"))
+        except KeyError as error:
+            raise ValueError("tactile_encoder_config is missing model_id") from error
+        architecture_config.pop("pretrained_path", None)
+        backbone = build_backbone(model_id, pretrained_path="", **architecture_config)
+        if hasattr(backbone, "discard_training_modules"):
+            backbone.discard_training_modules()
+        return cls(
+            backbone,
+            pool_size=pool_size,
+            freeze=freeze,
+            architecture_config={"model_id": model_id, **architecture_config},
+        )
 
     @classmethod
     def from_pretrained(
@@ -93,6 +147,7 @@ class TactileBackboneFeatureExtractor(nn.Module):
                 overrides["decoder_depth"] = args.get("decoder_depth")
                 overrides["decoder_heads"] = args.get("decoder_heads")
             kwargs.update({key: value for key, value in overrides.items() if value is not None})
+        architecture_config = cls._resolve_architecture_config(checkpoint["model_id"], kwargs)
         backbone = build_backbone(checkpoint["model_id"], **kwargs)
         if checkpoint.get("format_version") == 2:
             encoder_state = checkpoint.get("encoder")
@@ -127,7 +182,12 @@ class TactileBackboneFeatureExtractor(nn.Module):
         backbone.load_state_dict(encoder_state, strict=False)
         if hasattr(backbone, "discard_training_modules"):
             backbone.discard_training_modules()
-        return cls(backbone, pool_size=pool_size, freeze=freeze)
+        return cls(
+            backbone,
+            pool_size=pool_size,
+            freeze=freeze,
+            architecture_config=architecture_config,
+        )
 
     def forward(self, images: Tensor) -> FeatureTokens:
         if images.ndim == 5:

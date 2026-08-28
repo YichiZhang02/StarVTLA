@@ -124,9 +124,12 @@ class SensorRoutingMixin:
         ]
     )
     # --- tactile encoder (tactile_mode="encode" only) ---
-    # Path to a checkpoint produced by vtla.tac_encoder.train. The model configuration
-    # and image size are read from the checkpoint automatically.
+    # Training-only initializer produced by vtla.tac_encoder.train. Once loaded, its
+    # path-free architecture is persisted below and its weights live in the policy ckpt.
     tactile_encoder_path: str | None = None
+    # Complete constructor metadata saved with the policy. Inference builds the code-native
+    # backbone from this field before model.safetensors restores tactile_encoder.* weights.
+    tactile_encoder_config: dict | None = None
     # Where the tactile tokens are injected, relative to each policy's
     # observation-encoder -> action-decoder structure:
     #   "encoder": tactile tokens enter the observation encoder with the other
@@ -373,10 +376,14 @@ class SensorRoutingMixin:
                 f"Invalid tactile_insert_location '{self.tactile_insert_location}'. "
                 f"Expected one of {VALID_TACTILE_INSERT_LOCATIONS}."
             )
-        if self.tactile_mode == "encode" and not self.tactile_encoder_path:
+        if (
+            self.tactile_mode == "encode"
+            and not self.tactile_encoder_path
+            and not self.tactile_encoder_config
+        ):
             raise ValueError(
-                "tactile_mode='encode' requires --policy.tactile_encoder_path to point at a "
-                "checkpoint produced by vtla.tac_encoder.train."
+                "tactile_mode='encode' requires tactile_encoder_config from a policy "
+                "checkpoint or --policy.tactile_encoder_path for initial training."
             )
         if self.tactile_pool_size < 1:
             raise ValueError(

@@ -38,7 +38,7 @@ bash train.sh \
 | 9 | `action_mode` | `absolute_joint` | 见下文 |
 | 10 | `action_gap` | `6` | GT action 起点相对当前观测向未来偏移的帧数 |
 | 11 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
-| 12 | `tactile_encoder_path` | 空 | `train_backbone.sh` 生成的 checkpoint，仅 `encode` 使用 |
+| 12 | `tactile_encoder_path` | 空 | `train_backbone.sh` 生成的 checkpoint，仅用于首次初始化 `encode` 训练 |
 | 13 | `tactile_insert_location` | `encoder` | `encoder`、`decoder` |
 | 14 | `tactile_pool_size` | `3` | `3` 表示下游 `AdaptiveAvgPool2d(3,3)` |
 
@@ -179,6 +179,8 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | FastWAM | Video DiT 或 action DiT context | 不支持 |
 
 触觉 backbone 训练见 [Tactile MAE](tac_encoder/tactile_mae/README.md)。
+训练初始化后，backbone 结构写入 policy 的 `config.json`，权重写入
+`model.safetensors`；推理只依赖 policy checkpoint，不再读取 `tactile_encoder_path`。
 
 ## 数据增强
 

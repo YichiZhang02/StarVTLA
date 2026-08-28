@@ -15,9 +15,9 @@
 # limitations under the License.
 """Shared pooled tactile-backbone token builder used by all VTLA policies.
 
-Only checkpoints produced by ``vtla.tac_encoder.train`` are supported. Each tactile
-sensor is encoded independently inside one batched backbone call, then its spatial
-features are reduced with fixed ``3x3`` adaptive average pooling.
+During initial policy training, checkpoints produced by ``vtla.tac_encoder.train``
+initialize the backbone. Policy checkpoints subsequently reconstruct the backbone
+from saved architecture metadata and restore its weights from ``model.safetensors``.
 """
 from __future__ import annotations
 
@@ -40,11 +40,27 @@ class TactileEncoder(nn.Module):
             )
         self.num_frames = int(getattr(config, "tactile_num_frames", 1))
         self.pool_size = int(getattr(config, "tactile_pool_size", 3))
-        self.extractor = TactileBackboneFeatureExtractor.from_pretrained(
-            config.tactile_encoder_path,
-            freeze=config.freeze_tactile_encoder,
-            pool_size=self.pool_size,
-        )
+        architecture_config = getattr(config, "tactile_encoder_config", None)
+        if architecture_config:
+            self.extractor = TactileBackboneFeatureExtractor.from_config(
+                architecture_config,
+                freeze=config.freeze_tactile_encoder,
+                pool_size=self.pool_size,
+            )
+        elif config.tactile_encoder_path:
+            self.extractor = TactileBackboneFeatureExtractor.from_pretrained(
+                config.tactile_encoder_path,
+                freeze=config.freeze_tactile_encoder,
+                pool_size=self.pool_size,
+            )
+            # The external checkpoint is an initializer, not a runtime dependency.
+            config.tactile_encoder_config = dict(self.extractor.architecture_config)
+            config.tactile_encoder_path = None
+        else:
+            raise ValueError(
+                "TactileEncoder requires tactile_encoder_config in a policy checkpoint or "
+                "tactile_encoder_path for initial training."
+            )
         self.image_size = self.extractor.image_size
         if self.num_frames != self.extractor.num_frames:
             raise ValueError(

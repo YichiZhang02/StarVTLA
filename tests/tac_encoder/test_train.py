@@ -105,13 +105,36 @@ def test_unified_train_entrypoint_and_checkpoint_inference(tmp_path: Path, monke
         def tactile_encoder_keys():
             return ["finger0"]
 
-    policy_encoder = TactileEncoder(PolicyConfig(), output_dim=16)
+    policy_config = PolicyConfig()
+    policy_encoder = TactileEncoder(policy_config, output_dim=16)
+    assert policy_config.tactile_encoder_path is None
+    assert policy_config.tactile_encoder_config == policy_encoder.extractor.architecture_config
+    assert policy_encoder.extractor.architecture_config["model_id"] == "anytouch2"
     # Policy datasets decode uint8 at their native resolution. The shared tactile
     # boundary converts to [0, 1] and resizes to the checkpoint's image size.
     projected = policy_encoder.forward_flat(
         {"finger0": torch.zeros(1, 4, 3, 40, 48, dtype=torch.uint8)}
     )
     assert projected.shape == (1, 19, 16)
+
+    saved_state = policy_encoder.state_dict()
+
+    class ReloadedPolicyConfig:
+        tactile_encoder_path = None
+        tactile_encoder_config = dict(policy_encoder.extractor.architecture_config)
+        freeze_tactile_encoder = True
+        tactile_num_frames = 4
+
+        @staticmethod
+        def tactile_encoder_keys():
+            return ["finger0"]
+
+    reloaded = TactileEncoder(ReloadedPolicyConfig(), output_dim=16)
+    reloaded.load_state_dict(saved_state, strict=True)
+    reloaded_projected = reloaded.forward_flat(
+        {"finger0": torch.zeros(1, 4, 3, 40, 48, dtype=torch.uint8)}
+    )
+    torch.testing.assert_close(reloaded_projected, projected)
 
     class Pool2PolicyConfig(PolicyConfig):
         tactile_pool_size = 2
