@@ -42,6 +42,7 @@ deployment/sdk/
 
 # Local reference repositories.
 /ref_repo/
+/tests/
 
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/
