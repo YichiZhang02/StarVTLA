@@ -5,7 +5,7 @@ cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效,
 # =================== 可调参数 ===================
 robot_type=rm_isf_umi_left                    # rm_base_umi_dual | rm_isf_umi_left
 
-name=${1:-insert_easy_robust}                # 数据集基础名
+name=${1:-insert_easy_robust3}                # 数据集基础名
 single_task=${2:-"insert the object to the hole"}        # 任务文字描述 (会写入每一帧)
 num_episodes=${3:-25}                      # 录制集数
 mode=${4:-drag}                          # teleop | drag
@@ -16,9 +16,9 @@ reset_before_episode=${6:-true}           # true=按左右键结束时先复位�
 home_duration_s=2.0                       # 平滑复位耗时（秒）
 home_joint_tolerance_deg=1.0              # 关节反馈到位容差（度）
 home_settle_timeout_s=2.0                 # 2s 后未到位时最多继续保持等待的时间
-
-# 按时间命名: local/<时间戳>_<基础名>
-repo_id="local/${robot_type}_$(date +%Y%m%d)_${name}"
+    
+# 按时间命名: local/<时间戳>_<基础名      >
+repo_id="local/${robot_type}_$(date +%Y%m%d)_${name}"     
 
 
 fps=30

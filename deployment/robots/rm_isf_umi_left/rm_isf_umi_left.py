@@ -443,6 +443,12 @@ class RmIsfUmiLeft(Robot):
                 logger.warning(f"[{side}] 夹爪初始化失败, 该臂夹爪将不可用")
                 return
             arm.gripper = gripper
+            if gripper.move_norm(self.config.home_gripper):
+                logger.info(
+                    f"[{side}] 夹爪初始化后已下发打开目标: {self.config.home_gripper:.2f}"
+                )
+            else:
+                logger.warning(f"[{side}] 夹爪初始化后打开命令被拒绝, 后续复位将重试")
         except Exception as e:
             logger.warning(f"[{side}] 夹爪连接异常: {e}")
             arm.gripper = None
