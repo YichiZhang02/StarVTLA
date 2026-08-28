@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-读取双臂当前关节位置, 输出可直接贴入 inference.sh 的 --robot.home_joints JSON 字符串。
+读取双臂当前关节位置并输出 JSON，供硬件姿态诊断。
 
 用法:
     python -m deployment.tools.read_home_joints
@@ -37,7 +37,7 @@ def read_side(ip: str, port: int, side: str) -> dict[str, float]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="读取双臂当前关节位置 -> home_joints JSON")
+    ap = argparse.ArgumentParser(description="读取双臂当前关节位置 JSON")
     ap.add_argument("--left-ip",  default="192.168.1.200")
     ap.add_argument("--right-ip", default="192.168.1.201")
     ap.add_argument("--port", type=int, default=8080)
@@ -54,8 +54,7 @@ def main():
         result.update(read_side(ip_map[side], args.port, side))
 
     json_str = json.dumps(result, separators=(", ", ": "))
-    # 对齐风格: 单引号包裹, 与 inference.sh 一致
-    print(f"--robot.home_joints='{json_str}'")
+    print(json_str)
 
     # 同时在 stderr 打印每个关节方便核对
     print("\n当前关节 (弧度):", file=sys.stderr)

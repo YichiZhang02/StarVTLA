@@ -114,7 +114,7 @@ SDK 不会自动下载。缺少某个 SDK 时，对应硬件模块会在导入�
 - 末端板 IP、夹爪行程和 CAN 参数。
 - 本机触觉 UDP 回传 IP 与端口。
 - 腕部相机、顶部相机和触觉开关。
-- `home_joints`、复位时间和 EE 单步安全限制。
+- 连接时初始姿态、复位时间和 EE 单步安全限制。
 
 配置字段可通过 CLI 覆盖。例如：
 
@@ -195,7 +195,7 @@ playground/data/<robot_type>_<YYYYMMDD>_<name>/
 | `teleop` | RobotConfig 声明的 leader | 自动创建并校验 |
 | `drag` | 人工拖动从臂 | 不连接 leader |
 
-`reset_before_episode=true` 时，首个 episode 开始前回到固定 home。录制中按左键重录或右键保存时，会先停止拖动并复位，再清空或提交内存中的 episode；由于机器人已经在 home，下一轮开始前不会重复复位。collect 和 inference 共用这一顺序。`home_joints` 为空时，连接后读取当前关节位置并在本次运行中固定使用；上机前先确认该姿态安全。
+`reset_before_episode=true` 时，机器人连接后同步读取一次当前关节位置，作为本次进程唯一的固定 home。按 `↑` 直接开始采集或执行策略 chunk；按 `←` 时先用 joint 控制平滑回到固定 home，反馈确认到位后丢弃本次 episode；按 `→` 时同样先复位并确认，再保存本次 episode。复位失败会自动重试，未确认到位时不会保存或丢弃，复位过程也不会写入采集数据。每次结束后都需要重新按 `↑` 才开始下一次。collect 和 inference 共用这一顺序。上机连接前必须先把机械臂摆到安全的初始姿态。
 
 ## 触觉采集编码
 

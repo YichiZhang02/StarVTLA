@@ -111,7 +111,7 @@ def _resolve_teleop_config(cfg: CollectConfig) -> None:
 
 
 def _validate_reset_home(cfg: CollectConfig) -> None:
-    """Reject partial RealMan home targets before connecting hardware."""
+    """Validate startup-home motion parameters before connecting hardware."""
     if not cfg.reset_before_episode:
         return
 
@@ -124,42 +124,6 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
         raise ValueError("--robot.home_joint_tolerance_deg 必须大于 0")
     if not math.isfinite(settle_timeout_s) or settle_timeout_s < 0:
         raise ValueError("--robot.home_settle_timeout_s 不能小于 0")
-
-    home_joints = getattr(cfg.robot, "home_joints", None)
-    if home_joints is None:
-        # The robot captures its connection-time pose as a fixed home target.
-        return
-    if not isinstance(home_joints, dict):
-        raise ValueError("--robot.home_joints 必须是关节名到角度值的字典")
-
-    sides = getattr(cfg.robot, "arms", None)
-    if sides is None:
-        sides = cfg.robot.kinematics_sides
-    expected = {
-        f"{side}_main_joint{joint_index}"
-        for side in sides
-        for joint_index in range(1, 8)
-    }
-    provided = set(home_joints)
-    missing = sorted(expected - provided)
-    unknown = sorted(provided - expected)
-    if missing or unknown:
-        details = []
-        if missing:
-            details.append(f"缺少 {missing}")
-        if unknown:
-            details.append(f"未知 {unknown}")
-        raise ValueError(
-            "--robot.home_joints 必须完整指定启用臂的 7 个关节: "
-            + "; ".join(details)
-        )
-
-    non_finite = sorted(
-        key for key, value in home_joints.items() if not math.isfinite(float(value))
-    )
-    if non_finite:
-        raise ValueError(f"--robot.home_joints 包含非有限值: {non_finite}")
-
 
 @parser.wrap()
 def collect(cfg: CollectConfig):
@@ -179,9 +143,9 @@ def collect(cfg: CollectConfig):
         cfg.dataset.root = f"playground/data/{cfg.dataset.repo_id.split('/')[-1]}"
 
     if cfg.mode == CollectMode.DRAG:
-        hint = " \033[30;42m 拖动采集中 ↑开始 | 空格开/关夹爪 | →保存 | ←重录 | ESC退出 \033[0m"
+        hint = " \033[30;42m 拖动采集中 ↑开始 | 空格开/关夹爪 | →复位并保存 | ←复位并重录 | ESC退出 \033[0m"
     else:
-        hint = " \033[30;42m 遥操采集中 ↑开始 | →保存 | ←重录 | ESC退出 \033[0m"
+        hint = " \033[30;42m 遥操采集中 ↑开始 | →复位并保存 | ←复位并重录 | ESC退出 \033[0m"
     with StickyHint(hint):
         return run_record(cfg)
 

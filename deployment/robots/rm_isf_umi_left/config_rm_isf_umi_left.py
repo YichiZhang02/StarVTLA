@@ -81,7 +81,6 @@ class RmIsfUmiLeftConfig(RobotConfig):
     ee_frame_check: bool = True
 
     # 自动复位。
-    home_joints: dict[str, float] | None = None
     home_gripper: float = 1.0
     home_duration_s: float = 4.0
     home_joint_tolerance_deg: float = 1.0

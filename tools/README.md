@@ -204,7 +204,7 @@ python tools/compute_dataset_mean_state.py \
   --state-key observation.state
 ```
 
-对 joint state 使用 `first` 时，stdout 输出可作为 `--robot.home_joints`；详细均值、标准差和范围写入 stderr。
+对 joint state 使用 `first` 时，stdout 输出关节均值诊断 JSON；详细均值、标准差和范围写入 stderr。部署 home 始终取机械臂连接时姿态。
 
 ## Policy 离线评估
 

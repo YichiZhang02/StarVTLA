@@ -161,9 +161,7 @@ class RmBaseUmiDualConfig(RobotConfig):
     ee_frame_check: bool = True
 
     # ============ 自动复位 (move_to_home) ============
-    # 各关节 home 目标值: key = "{side}_{joint_name}", value 单位与 use_degrees 一致。
-    # None = 连接时自动读取当前位置 (推荐: 启动前先把机械臂摆到想要的初始姿态)。
-    home_joints: dict[str, float] | None = None
+    # 连接时自动读取当前位置；启动前先把机械臂摆到安全的初始姿态。
     # 复位时夹爪目标开度 (归一化 [0,1], 1.0=张开, 0.0=夹紧)
     home_gripper: float = 1.0
     # 复位运动总耗时 (秒), 使用 cosine ease-in/out 插值

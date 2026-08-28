@@ -12,8 +12,7 @@ mode=${4:-drag}                          # teleop | drag
 drag_gripper_close_value=${5:-0.3}         # 0=最紧, 1=全开
 
 # 复位选项
-reset_before_episode=${6:-true}           # true=保存前复位，并把复位过程追加到当前 episode
-home_joints=                              # 留空：连接时读取当前关节角作为本次采集的固定复位点
+reset_before_episode=${6:-true}           # true=按左右键结束时先复位确认，再保存或重录
 home_duration_s=2.0                       # 平滑复位耗时（秒）
 home_joint_tolerance_deg=1.0              # 关节反馈到位容差（度）
 home_settle_timeout_s=2.0                 # 2s 后未到位时最多继续保持等待的时间
@@ -34,10 +33,6 @@ set -- python -m deployment.collect \
   "--robot.home_duration_s=${home_duration_s}" \
   "--robot.home_joint_tolerance_deg=${home_joint_tolerance_deg}" \
   "--robot.home_settle_timeout_s=${home_settle_timeout_s}"
-
-if [ -n "${home_joints}" ]; then
-  set -- "$@" "--robot.home_joints=${home_joints}"
-fi
 
 set -- "$@" \
   "--drag_gripper_close_value=${drag_gripper_close_value}" \

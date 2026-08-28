@@ -14,19 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline: compute the mean of a LeRobot dataset's ``observation.state`` and print it as a
-ready-to-paste ``--robot.home_joints`` string for ``inference.sh``.
+"""Offline: compute and report the mean of a LeRobot dataset's ``observation.state``.
 
 By default it averages the FIRST frame of every episode across episodes — i.e. the mean starting
-pose of the robot, a natural candidate for the inference home position. Use ``--frames all`` to
+pose of the robot for diagnostics. Use ``--frames all`` to
 average over every frame instead (that global mean already lives in ``meta/stats.json``; this tool
 just recomputes it grouped nicely by joint name).
 
 For a dual-arm joint dataset the state is 16-dim
 (``left_main_joint1..7``, ``left_main_gripper``, ``right_main_joint1..7``, ``right_main_gripper``).
-``--robot.home_joints`` only carries the 14 joints (grippers are set separately via
-``--robot.home_gripper``), so the joints are emitted in the home_joints JSON and the gripper means
-are reported on the side.
+The joint means are emitted as JSON and the gripper means are reported on the side. Deployment
+home is always captured from the connected robot and cannot be overridden by this output.
 
 Usage:
     python tools/compute_dataset_mean_state.py --root playground/data/<dataset>
@@ -83,9 +81,7 @@ def _all_frame_states(root: Path, state_key: str) -> np.ndarray:
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="计算数据集 state 均值 -> 可贴入 inference.sh 的 --robot.home_joints"
-    )
+    ap = argparse.ArgumentParser(description="计算并输出数据集 state 均值")
     ap.add_argument("--root", required=True, help="数据集目录 (含 meta/ 与 data/)")
     ap.add_argument("--state-key", default="observation.state", help="要求均值的 state 列名")
     ap.add_argument("--frames", choices=["first", "all"], default="first",
@@ -114,15 +110,14 @@ def main():
     for nm, m, s, a, b in zip(names, mean, std, lo, hi):
         print(f"  {nm:<20} {m:>10.6f} {s:>10.6f} {a:>10.6f} {b:>10.6f}", file=sys.stderr)
 
-    # home_joints JSON: 只含关节 (名字带 'joint'), 排除 gripper —— 与 read_home_joints / inference.sh 对齐。
+    # Joint JSON excludes grippers so it remains easy to inspect or compare.
     joints = {nm: round(float(m), 6) for nm, m in zip(names, mean) if "joint" in nm}
     grippers = {nm: round(float(m), 6) for nm, m in zip(names, mean) if "gripper" in nm}
 
     if joints:
-        json_str = json.dumps(joints, separators=(", ", ": "))
-        print(f"--robot.home_joints='{json_str}'")
+        print(json.dumps(joints, separators=(", ", ": ")))
     else:
-        # 非关节 state (如 EE 列): 没有 home_joints 语义, 直接给完整均值向量。
+        # Non-joint state (such as EE): print the complete mean vector.
         print(json.dumps([round(float(m), 6) for m in mean]))
 
     if grippers:

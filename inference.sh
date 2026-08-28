@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260824_rm_isf_umi_right_20260822_wipe_board_undist_uint8_256_starvla_groot_wristonly_true_tactile_as_image_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
+pretrained_id=${1:-20260827_rm_isf_umi_left_20260825_assemble_gearL_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
 step=${2:-10000}
 
 robot_type=${3:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
@@ -14,11 +14,8 @@ action_start_offset=${5:-0}
 control_fps=${6:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
 
 # 复位选项
-reset_before_episode=${7:-true}           # 与其他参数独立: true=每个 episode 前复位
-home_joints=                              # 留空：连接时读取当前关节角作为本次推理的固定复位点
+reset_before_episode=${7:-true}           # 与其他参数独立: true=按左右键结束时先复位确认
 home_duration_s=4.0                       # 平滑复位耗时（秒）
-# 显式 home 示例：
-# home_joints='{"left_main_joint1": -0.109262, "left_main_joint2": 0.235679, "left_main_joint3": 0.118975, "left_main_joint4": 1.265910, "left_main_joint5": 0.034194, "left_main_joint6": 1.589552, "left_main_joint7": -0.278270, "right_main_joint1": 0.041508, "right_main_joint2": 0.100594, "right_main_joint3": 0.046601, "right_main_joint4": 1.527823, "right_main_joint5": 0.011595, "right_main_joint6": 1.477732, "right_main_joint7": 0.472311}'
 
 # 任务描述
 single_task=${8:-}                        # 任务描述，留空则自动匹配
@@ -56,10 +53,9 @@ set -- python -m deployment.inference \
   "--robot.home_gripper=1.0" \
   "--robot.max_ee_pos_step_m=${max_ee_pos_step}"
 
-# 空值不产生 override：task 由 checkpoint 自动读取，home 使用连接时当前关节角。
+# 空值不产生 override：task 由 checkpoint 自动读取。
 [ -n "${n_action_steps}" ] && set -- "$@" "--policy.n_action_steps=${n_action_steps}"
 [ -n "${action_start_offset}" ] && set -- "$@" "--policy.action_start_offset=${action_start_offset}"
-[ -n "${home_joints}" ] && set -- "$@" "--robot.home_joints=${home_joints}"
 [ -n "${single_task}" ] && set -- "$@" "--dataset.single_task=${single_task}"
 
 exec "$@"  # ee 的 max step 初次建议 0.01，确认轨迹后再使用 0.1

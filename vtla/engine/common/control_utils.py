@@ -183,10 +183,10 @@ def init_keyboard_listener():
                 print("Up arrow key pressed. Starting episode...")
                 events["start_episode"] = True
             elif key == keyboard.Key.right:
-                print("Right arrow key pressed. Saving episode...")
+                print("Right arrow key pressed. Resetting, then saving episode...")
                 events["exit_early"] = True
             elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Rerecording episode...")
+                print("Left arrow key pressed. Resetting, then rerecording episode...")
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
             elif key == keyboard.Key.esc:

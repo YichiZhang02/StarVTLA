@@ -517,26 +517,19 @@ class RmBaseUmiDual(Robot):
     # ==================== 初始位置复位 ====================
 
     def _capture_home_joints(self) -> None:
-        """连接完成后读取各臂当前关节位置作为 home 目标 (优先 config.home_joints)。"""
+        """连接完成后读取各臂当前关节位置作为本次运行的固定 home。"""
         for side, arm in self._arms.items():
             if arm.follower is None:
                 continue
-            if self.config.home_joints is not None:
-                target = [
-                    self.config.home_joints.get(f"{side}_{j}", 0.0)
-                    for j in self.JOINT_NAMES
-                ]
-                logger.info(f"[{side}] home 位置来自 config: {target}")
-            else:
-                pos = arm.follower.read_joints_now()
-                if pos is None:
-                    pos = arm.follower.read_joints()
-                target = list(pos)
-                logger.info(f"[{side}] home 位置自动捕获 (当前姿态): {target}")
+            pos = arm.follower.read_joints_now()
+            if pos is None:
+                pos = arm.follower.read_joints()
+            target = list(pos)
+            logger.info(f"[{side}] home 位置自动捕获 (连接后当前姿态): {target}")
             self._home_joints[side] = target
 
     def move_to_home(self) -> None:
-        """机械臂和夹爪复位到初始位置 (推理时按→保存后调用)。
+        """机械臂和夹爪复位到连接时的初始位置。
 
         流程: 先立即张开夹爪 (非阻塞), 再并行将双臂平滑插值到 home 位置。
         """

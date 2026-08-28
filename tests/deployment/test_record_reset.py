@@ -29,140 +29,189 @@ class FakeRobot:
         return action.copy()
 
 
-def test_reset_then_finalize_records_interpolation_and_confirmed_home(monkeypatch):
+def test_move_to_home_interpolates_and_confirms_feedback(monkeypatch):
     robot = FakeRobot()
-    recorded = []
-    finalized_at = []
     monkeypatch.setattr(_record_engine, "busy_wait", lambda _seconds: None)
 
-    prepared_at_home = _record_engine.reset_then_finalize_episode(
-        robot=robot,
-        reset_before_episode=True,
-        home_action={"joint": 0.0},
+    at_home = _record_engine.move_to_home_smooth(
+        robot,
+        {"joint": 0.0},
         fps=2,
-        home_duration_s=2.0,
-        play_sounds=False,
-        episode_label="Episode 1",
-        record_step=lambda obs, action: recorded.append((obs, action.copy())),
-        finalize=lambda: finalized_at.append(len(recorded)),
+        duration_s=2.0,
     )
 
-    assert prepared_at_home is True
-    assert robot.observation_count == 5
+    assert at_home is True
+    assert robot.observation_count == 2
     np.testing.assert_allclose(
         [action["joint"] for action in robot.actions],
         [3.41421356, 2.0, 0.58578644, 0.0, 0.0],
     )
-    assert [action for _, action in recorded] == robot.actions
-    assert finalized_at == [5]
 
 
-def test_reset_timeout_still_finalizes_and_warns(monkeypatch, caplog):
+def test_move_to_home_timeout_is_not_confirmed(monkeypatch, caplog):
     robot = FakeRobot(settle_timeout_s=0.0)
     robot.send_action = lambda action: robot.actions.append(action.copy()) or action.copy()
     monkeypatch.setattr(_record_engine, "busy_wait", lambda _seconds: None)
-    finalized = []
 
-    prepared_at_home = _record_engine.reset_then_finalize_episode(
-        robot=robot,
-        reset_before_episode=True,
-        home_action={"joint": 0.0},
+    at_home = _record_engine.move_to_home_smooth(
+        robot,
+        {"joint": 0.0},
         fps=2,
-        home_duration_s=0.5,
-        play_sounds=False,
-        episode_label="Episode 1",
-        finalize=lambda: finalized.append(True),
+        duration_s=0.5,
     )
 
-    assert prepared_at_home is False
-    assert finalized == [True]
+    assert at_home is False
     assert "等待关节到位超时" in caplog.text
 
 
-def test_episode_does_not_start_after_incomplete_reset(monkeypatch):
-    events = {
-        "start_episode": True,
+def _events():
+    return {
+        "start_episode": False,
         "exit_early": False,
         "rerecord_episode": False,
         "toggle_gripper": 0,
         "stop_recording": False,
     }
-    prepared = []
-    monkeypatch.setattr(_record_engine, "move_to_home_smooth", lambda *_args: False)
+
+
+def test_up_starts_episode_without_reset(monkeypatch):
+    events = _events()
+    order = []
+
+    def request_start(_seconds):
+        order.append("start_requested")
+        events["start_episode"] = True
+
+    monkeypatch.setattr(_record_engine.time, "sleep", request_start)
+    monkeypatch.setattr(
+        _record_engine,
+        "move_to_home_smooth",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("up must not reset")),
+    )
     monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
 
     started = _record_engine.wait_for_episode_start(
-        robot=FakeRobot(),
         events=events,
         episode_label="Episode 1",
-        fps=30,
         play_sounds=False,
+        on_prepared=lambda: order.append("prepared"),
+    )
+
+    assert started is True
+    assert order == ["start_requested", "prepared"]
+    assert events["start_episode"] is False
+
+
+def test_right_resets_before_save(monkeypatch):
+    events = _events()
+    events["exit_early"] = True
+    order = []
+
+    def reset_with_retry(*_args):
+        confirmed = "reset_failed" in order
+        order.append("home_confirmed" if confirmed else "reset_failed")
+        return confirmed
+
+    monkeypatch.setattr(_record_engine, "move_to_home_smooth", reset_with_retry)
+    monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
+
+    finalized = _record_engine.reset_then_finalize_episode(
+        robot=FakeRobot(),
+        events=events,
         reset_before_episode=True,
         home_action={"joint": 0.0},
+        fps=30,
         home_duration_s=2.0,
-        on_prepared=lambda: prepared.append(True),
+        play_sounds=False,
+        episode_label="Episode 1",
+        finalize=lambda: order.append("saved"),
     )
 
-    assert started is False
-    assert prepared == []
+    assert finalized is True
+    assert order == ["reset_failed", "home_confirmed", "saved"]
 
 
-def test_record_reset_frame_appends_dataset_state_action_and_raw_tactile():
-    features = {
-        "observation.state": {
-            "dtype": "float32",
-            "shape": (1,),
-            "names": ["joint"],
-        },
-        "observation.images.camera": {
-            "dtype": "video",
-            "shape": (2, 2, 3),
-            "names": ["height", "width", "channels"],
-        },
-        "action": {
-            "dtype": "float32",
-            "shape": (1,),
-            "names": ["joint"],
-        },
-    }
-    dataset = SimpleNamespace(frames=[])
-    dataset.add_frame = dataset.frames.append
-    tactile_writer = SimpleNamespace(camera_keys=(), observations=[])
-    tactile_writer.add_observation = tactile_writer.observations.append
-    obs = {
-        "joint": 2.0,
-        "camera": np.ones((2, 2, 3), dtype=np.uint8),
-    }
+def test_left_resets_before_discard(monkeypatch):
+    events = _events()
+    events["rerecord_episode"] = True
+    events["exit_early"] = True
+    order = []
+    monkeypatch.setattr(
+        _record_engine,
+        "move_to_home_smooth",
+        lambda *_args: order.append("home_confirmed") or True,
+    )
+    monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
 
-    _record_engine.record_reset_frame(
-        obs=obs,
-        action={"joint": 1.5},
-        robot_observation_processor=lambda value: value,
-        record_features=features,
-        single_task="reset test",
-        dataset=dataset,
-        tactile_writer=tactile_writer,
+    def discard():
+        order.append("discarded")
+        events["rerecord_episode"] = False
+
+    finalized = _record_engine.reset_then_finalize_episode(
+        robot=FakeRobot(),
+        events=events,
+        reset_before_episode=True,
+        home_action={"joint": 0.0},
+        fps=30,
+        home_duration_s=2.0,
+        play_sounds=False,
+        episode_label="Episode 1",
+        finalize=discard,
     )
 
-    assert len(dataset.frames) == 1
-    np.testing.assert_array_equal(dataset.frames[0]["observation.state"], [2.0])
-    np.testing.assert_array_equal(dataset.frames[0]["action"], [1.5])
-    assert dataset.frames[0]["task"] == "reset test"
-    assert tactile_writer.observations == [obs]
+    assert finalized is True
+    assert order == ["home_confirmed", "discarded"]
+    assert events["rerecord_episode"] is False
 
 
-def test_record_reset_frame_appends_stream_observation():
-    stream_writer = SimpleNamespace(observations=[])
-    stream_writer.add_observation = stream_writer.observations.append
-    obs = {"joint": 2.0, "camera": np.ones((2, 2, 3), dtype=np.uint8)}
+def test_failed_reset_does_not_finalize(monkeypatch):
+    events = _events()
+    finalized = []
 
-    _record_engine.record_reset_frame(
-        obs=obs,
-        action={"joint": 1.5},
-        robot_observation_processor=lambda value: {**value, "processed": True},
-        record_features={},
-        single_task="reset test",
-        stream_writer=stream_writer,
+    def fail_and_stop(*_args):
+        events["stop_recording"] = True
+        return False
+
+    monkeypatch.setattr(_record_engine, "move_to_home_smooth", fail_and_stop)
+    monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
+
+    result = _record_engine.reset_then_finalize_episode(
+        robot=FakeRobot(),
+        events=events,
+        reset_before_episode=True,
+        home_action={"joint": 0.0},
+        fps=30,
+        home_duration_s=2.0,
+        play_sounds=False,
+        episode_label="Episode 1",
+        finalize=lambda: finalized.append(True),
     )
 
-    assert stream_writer.observations == [{**obs, "processed": True}]
+    assert result is False
+    assert finalized == []
+
+
+def test_capture_home_uses_first_post_connect_observation_once():
+    class StartupRobot:
+        JOINT_NAMES = ["main_joint1"]
+        GRIPPER_NAME = "main_gripper"
+
+        def __init__(self):
+            self._arms = {"left": object()}
+            self._home_joints = {"left": [0.25]}
+            self.config = SimpleNamespace(
+                home_gripper=1.0,
+                home_joints={"left_main_joint1": 99.0},
+            )
+            self.observation_count = 0
+
+        def get_observation(self):
+            self.observation_count += 1
+            return {"left_main_joint1": 0.25 * self.observation_count}
+
+    robot = StartupRobot()
+
+    home = _record_engine.capture_home_action(robot)
+
+    assert home == {"left_main_joint1": 0.25, "left_main_gripper": 1.0}
+    assert robot.observation_count == 0

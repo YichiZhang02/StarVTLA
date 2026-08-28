@@ -217,7 +217,7 @@ playground/results/backbones/<YYYYMMDD>_<dataset_id>_<model_id>/
 bash scripts/compute_mean_state.sh [dataset_id] [first|all] [state_key]
 ```
 
-`first` 对每个 episode 的首帧求统计，适合得到 home joint 候选；`all` 对全部帧统计。默认列为 `observation.state`。关节 state 的 stdout 可直接用作 `--robot.home_joints` 参数，详细统计写入 stderr。
+`first` 对每个 episode 的首帧求统计，适合核对起始关节分布；`all` 对全部帧统计。默认列为 `observation.state`。关节 state 的 stdout 是诊断 JSON，详细统计写入 stderr；部署 home 始终取机械臂连接时姿态。
 
 ## 合并数据集
 

@@ -313,7 +313,7 @@ def inference(cfg: InferenceConfig):
         cfg.dataset.root = f"playground/eval/{cfg.dataset.repo_id.split('/')[-1]}"
 
     # 钉在底行的保存提示 (推理时容易被日志刷掉)
-    hint = " \033[30;43m 推理中 ↑开始 | →保存 | ←重录 | ESC退出 \033[0m"
+    hint = " \033[30;43m 推理中 ↑开始 | →复位并保存 | ←复位并重录 | ESC退出 \033[0m"
     with StickyHint(hint):
         return run_record(cfg)
 
