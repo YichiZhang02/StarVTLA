@@ -15,7 +15,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
-from .config import SUPPORTED_MODEL_IDS
 from .data.npy_tactile_dataset import (
     WeightedMixtureSampler,
     build_training_dataset,
@@ -23,13 +22,13 @@ from .data.npy_tactile_dataset import (
     save_resolved_definition,
 )
 from .eval import select_visualization_indices
-from .training import get_training_recipe
+from .registry import get_training_recipe, supported_model_ids
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset_id", required=True)
-    parser.add_argument("--model_id", required=True, choices=SUPPORTED_MODEL_IDS)
+    parser.add_argument("--model_id", required=True, choices=supported_model_ids())
     parser.add_argument(
         "--cache_root",
         type=Path,
@@ -52,6 +51,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder_dim", type=int)
     parser.add_argument("--decoder_depth", type=int)
     parser.add_argument("--decoder_heads", type=int)
+    parser.add_argument("--wan22_latent_dim", type=int, default=48)
+    parser.add_argument("--wan22_base_dim", type=int, default=160)
+    parser.add_argument("--wan22_decoder_base_dim", type=int, default=256)
+    parser.add_argument("--vae_kl_weight", type=float, default=1e-6)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)

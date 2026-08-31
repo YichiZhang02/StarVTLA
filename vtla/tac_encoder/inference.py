@@ -9,27 +9,8 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from .models import FeatureTokens, build_backbone
-from .models.registry import MODEL_REGISTRY
-
-
-ENCODER_PREFIXES = {
-    "anytouch1": (
-        "model.touch_model.",
-        "model.touch_projection.",
-        "model.video_patch_embedding.",
-        "model.video_position_embedding.",
-        "model.sensor_token",
-        "normalization_",
-    ),
-    "anytouch2": (
-        "touch_model.",
-        "touch_projection.",
-        "sensor_token",
-        "normalization_",
-    ),
-    "sparsh_vjepa": ("encoder.",),
-}
+from .common.backbone import FeatureTokens
+from .registry import build_backbone, get_encoder_spec
 
 
 def _checkpoint_file(path: str | Path) -> Path:
@@ -60,11 +41,7 @@ class TactileBackboneFeatureExtractor(nn.Module):
         self.compute_dtype = None
         self.model_id = str(backbone.model_id)
         self.num_frames = int(backbone.num_frames)
-        self.tokens_per_sensor = (
-            self.num_frames * (1 + self.pool_size**2)
-            if self.model_id == "anytouch1"
-            else 1 + (self.num_frames // backbone.tubelet_size) * self.pool_size**2
-        )
+        self.tokens_per_sensor = backbone.pooled_tokens_per_sensor(self.pool_size)
         self.freeze = bool(freeze)
         if self.freeze:
             self.backbone.requires_grad_(False)
@@ -73,13 +50,13 @@ class TactileBackboneFeatureExtractor(nn.Module):
     def _resolve_architecture_config(model_id: str, kwargs: dict[str, Any]) -> dict[str, Any]:
         """Return the complete, path-free constructor config needed by a policy checkpoint."""
         try:
-            backbone_class = MODEL_REGISTRY[model_id]
-        except KeyError as error:
+            backbone_class = get_encoder_spec(model_id).backbone_class
+        except ValueError as error:
             raise ValueError(f"Unknown tactile backbone model_id: {model_id!r}") from error
         signature = inspect.signature(backbone_class)
         resolved: dict[str, Any] = {"model_id": model_id}
         for name, parameter in signature.parameters.items():
-            if name in {"pretrained_path", "checkpoint_source_grid"}:
+            if name in {"pretrained_path", "checkpoint_source_grid", "include_decoder"}:
                 continue
             if name in kwargs:
                 resolved[name] = kwargs[name]
@@ -102,7 +79,11 @@ class TactileBackboneFeatureExtractor(nn.Module):
         except KeyError as error:
             raise ValueError("tactile_encoder_config is missing model_id") from error
         architecture_config.pop("pretrained_path", None)
-        backbone = build_backbone(model_id, pretrained_path="", **architecture_config)
+        backbone_class = get_encoder_spec(model_id).backbone_class
+        build_kwargs = dict(architecture_config)
+        if "include_decoder" in inspect.signature(backbone_class).parameters:
+            build_kwargs["include_decoder"] = False
+        backbone = build_backbone(model_id, pretrained_path="", **build_kwargs)
         if hasattr(backbone, "discard_training_modules"):
             backbone.discard_training_modules()
         return cls(
@@ -127,27 +108,11 @@ class TactileBackboneFeatureExtractor(nn.Module):
         if not isinstance(checkpoint, dict) or "model_id" not in checkpoint:
             raise ValueError(f"Not a unified tactile backbone checkpoint: {checkpoint_path}")
         args = checkpoint.get("args", {})
-        kwargs = {
-            "num_frames": int(args.get("num_frames", 4)),
-            "image_size": int(args.get("image_size", 224)),
-            "pretrained_path": "",
-        }
-        if checkpoint["model_id"] == "anytouch1":
-            kwargs["arch"] = args.get("anytouch1_arch", "vit_l")
-            kwargs["mask_ratio"] = float(args.get("mask_ratio", 0.75))
-        else:
-            overrides = {
-                "embed_dim": args.get("encoder_dim"),
-                "depth": args.get("encoder_depth"),
-                "num_heads": args.get("encoder_heads"),
-            }
-            if checkpoint["model_id"] == "anytouch2":
-                overrides["projection_dim"] = args.get("projection_dim")
-                overrides["decoder_dim"] = args.get("decoder_dim")
-                overrides["decoder_depth"] = args.get("decoder_depth")
-                overrides["decoder_heads"] = args.get("decoder_heads")
-            kwargs.update({key: value for key, value in overrides.items() if value is not None})
+        spec = get_encoder_spec(checkpoint["model_id"])
+        kwargs = spec.checkpoint_kwargs(args)
         architecture_config = cls._resolve_architecture_config(checkpoint["model_id"], kwargs)
+        if "include_decoder" in inspect.signature(spec.backbone_class).parameters:
+            kwargs["include_decoder"] = False
         backbone = build_backbone(checkpoint["model_id"], **kwargs)
         if checkpoint.get("format_version") == 2:
             encoder_state = checkpoint.get("encoder")
@@ -157,7 +122,7 @@ class TactileBackboneFeatureExtractor(nn.Module):
             legacy_state = checkpoint.get("model")
             if not isinstance(legacy_state, dict):
                 raise ValueError(f"Not a unified tactile backbone checkpoint: {checkpoint_path}")
-            prefixes = ENCODER_PREFIXES[checkpoint["model_id"]]
+            prefixes = spec.checkpoint_prefixes
             encoder_state = {
                 key: value for key, value in legacy_state.items() if key.startswith(prefixes)
             }
@@ -175,7 +140,7 @@ class TactileBackboneFeatureExtractor(nn.Module):
         missing_expected = [
             key
             for key in current
-            if key.startswith(ENCODER_PREFIXES[checkpoint["model_id"]]) and key not in encoder_state
+            if key.startswith(spec.checkpoint_prefixes) and key not in encoder_state
         ]
         if missing_expected:
             raise ValueError(f"Encoder checkpoint is incomplete: {missing_expected[:8]}")

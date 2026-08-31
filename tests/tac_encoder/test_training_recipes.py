@@ -5,12 +5,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from vtla.tac_encoder.training.sparsh_vjepa import (
+from vtla.tac_encoder.frameworks.sparsh_vjepa.training import (
     SparshVJEPATrainingModel,
     SparshVJEPATrainingRecipe,
     _load_full_pretrained,
 )
-from vtla.tac_encoder.training.base import WarmupCosineScheduler
+from vtla.tac_encoder.common.training import WarmupCosineScheduler
 
 
 def _tiny_vjepa() -> SparshVJEPATrainingModel:
@@ -27,11 +27,37 @@ def _tiny_vjepa() -> SparshVJEPATrainingModel:
     )
 
 
-def test_vjepa_requires_context_target_and_predictor_checkpoint(tmp_path: Path) -> None:
+def test_vjepa_rejects_incomplete_encoder_checkpoint(tmp_path: Path) -> None:
     checkpoint = tmp_path / "encoder_only.pth"
     torch.save({"blocks.0.norm1.weight": torch.ones(32)}, checkpoint)
-    with pytest.raises(ValueError, match="context_encoder, target_encoder, and predictor"):
+    with pytest.raises(ValueError, match="encoder checkpoint is incomplete"):
         _load_full_pretrained(_tiny_vjepa(), str(checkpoint))
+
+
+def test_vjepa_initializes_both_encoders_and_leaves_predictor_from_scratch(
+    tmp_path: Path,
+) -> None:
+    source = _tiny_vjepa()
+    encoder = {
+        key: value.clone() for key, value in source.context_encoder.backbone.state_dict().items()
+    }
+    checkpoint = tmp_path / "encoder_only.pth"
+    torch.save(encoder, checkpoint)
+
+    model = _tiny_vjepa()
+    predictor_before = {
+        key: value.clone() for key, value in model.predictor.state_dict().items()
+    }
+    report = _load_full_pretrained(model, str(checkpoint))
+
+    assert report["initialization"] == "encoder_only"
+    assert report["predictor_init"] == "scratch"
+    assert report["loaded_tensors"] == 2 * len(encoder)
+    for key, expected in encoder.items():
+        torch.testing.assert_close(model.context_encoder.backbone.state_dict()[key], expected)
+        torch.testing.assert_close(model.target_encoder.backbone.state_dict()[key], expected)
+    for key, expected in predictor_before.items():
+        torch.testing.assert_close(model.predictor.state_dict()[key], expected)
 
 
 def test_vjepa_full_checkpoint_gradients_and_ema(tmp_path: Path) -> None:
@@ -44,6 +70,7 @@ def test_vjepa_full_checkpoint_gradients_and_ema(tmp_path: Path) -> None:
     model = _tiny_vjepa()
     report = _load_full_pretrained(model, str(checkpoint))
     assert report["loaded_tensors"] == len(model.state_dict())
+    assert report["predictor_init"] == "checkpoint"
 
     output = model(torch.rand(2, 1, 4, 3, 32, 32))
     output.loss.backward()

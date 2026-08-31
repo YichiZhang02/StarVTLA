@@ -2,10 +2,14 @@
 set -euo pipefail
 
 dataset_id=${1:-backbone_training_data}
-model_id=${2:-anytouch1}  # anytouch1 | anytouch2 | sparsh_vjepa
+model_id=${2:-anytouch1}  # anytouch1 | anytouch2 | sparsh_vjepa | wan22_vae
 
 num_processes=${3:-4}
-batch_size=${4:-32}   # per process / per GPU
+default_batch_size=32
+if [[ "${model_id}" == "wan22_vae" ]]; then
+  default_batch_size=4
+fi
+batch_size=${4:-${default_batch_size}}   # per process / per GPU
 epochs=${5:-5}
 lr=${6:-1e-5}
 
@@ -31,11 +35,14 @@ case "${model_id}" in
     pretrained_path="${repo_root}/playground/pretrained_models/AnyTouch2-Model/checkpoint-4frames.pth"
     ;;
   sparsh_vjepa)
-    # The public .safetensors is encoder-only and cannot initialize the JEPA predictor.
-    pretrained_path="${repo_root}/playground/pretrained_models/Sparsh-VJEPA-Small/vjepa_vitsmall_full.ckpt"
+    # Initialize context/target from the public encoder; train the predictor from scratch.
+    pretrained_path="${repo_root}/playground/pretrained_models/Sparsh-VJEPA-Small/vjepa_vitsmall.safetensors"
+    ;;
+  wan22_vae)
+    pretrained_path="${repo_root}/playground/pretrained_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth"
     ;;
   *)
-    echo "Unknown model_id: ${model_id} (anytouch1|anytouch2|sparsh_vjepa)" >&2
+    echo "Unknown model_id: ${model_id} (anytouch1|anytouch2|sparsh_vjepa|wan22_vae)" >&2
     exit 1
     ;;
 esac
@@ -60,6 +67,9 @@ common_args=(
 
 if [[ -n "${resume}" ]]; then
   common_args+=(--resume "${resume}")
+fi
+if [[ "${model_id}" == "wan22_vae" ]]; then
+  common_args+=(--vae_kl_weight "${VAE_KL_WEIGHT:-1e-6}")
 fi
 
 echo "Pretrained path: ${pretrained_path}"

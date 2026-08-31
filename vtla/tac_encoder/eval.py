@@ -139,3 +139,50 @@ def save_reconstruction_visualization(
     destination.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(destination, dpi=120)
     plt.close(figure)
+
+
+@torch.no_grad()
+def save_full_reconstruction_visualization(
+    model,
+    dataset,
+    indices: Iterable[int],
+    destination: str | Path,
+    device: torch.device,
+    autocast_dtype=None,
+) -> None:
+    """Visualize deterministic full-frame reconstruction for VAE recipes."""
+    indices = list(indices)
+    if not indices:
+        return
+    images = torch.stack([dataset[index]["images"] for index in indices]).to(device)
+    model.eval()
+    with torch.autocast(
+        device_type=device.type,
+        dtype=autocast_dtype,
+        enabled=autocast_dtype is not None,
+    ):
+        output = model.forward_reconstruction(images, mask_ratio=0.0)
+    reconstruction = output.reconstruction.float()
+    error = (images - reconstruction).abs().mean(dim=3, keepdim=True).expand_as(images)
+
+    rows = images.shape[0] * images.shape[1] * images.shape[2]
+    figure, axes = plt.subplots(rows, 3, figsize=(9, max(2.0, rows * 2.2)), squeeze=False)
+    tensors = (images, reconstruction, error)
+    titles = ("original", "reconstruction", "error")
+    row = 0
+    for sample_index in range(images.shape[0]):
+        for sensor in range(images.shape[1]):
+            for time in range(images.shape[2]):
+                for column, tensor in enumerate(tensors):
+                    image = tensor[sample_index, sensor, time].permute(1, 2, 0).cpu().clamp(0, 1)
+                    axes[row, column].imshow(image)
+                    axes[row, column].axis("off")
+                    if row == 0:
+                        axes[row, column].set_title(titles[column])
+                axes[row, 0].set_ylabel(f"n{sample_index} s{sensor} t{time}")
+                row += 1
+    figure.tight_layout()
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(destination, dpi=120)
+    plt.close(figure)

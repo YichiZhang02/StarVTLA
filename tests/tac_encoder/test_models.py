@@ -2,10 +2,30 @@ from __future__ import annotations
 
 import torch
 
-from vtla.tac_encoder.models.base import EncodedFeatures
-from vtla.tac_encoder.models.checkpoint import interpolate_video_position_embedding
-from vtla.tac_encoder.models.pooling import pool_encoded_features
-from vtla.tac_encoder.models.registry import build_backbone
+from vtla.tac_encoder.common.backbone import EncodedFeatures
+from vtla.tac_encoder.common.checkpoint import interpolate_video_position_embedding
+from vtla.tac_encoder.common.pooling import pool_encoded_features
+from vtla.tac_encoder.inference import TactileBackboneFeatureExtractor
+from vtla.tac_encoder.registry import (
+    ENCODER_REGISTRY,
+    build_backbone,
+    get_encoder_spec,
+    get_training_recipe,
+)
+
+
+def test_registry_specs_are_self_consistent() -> None:
+    assert tuple(ENCODER_REGISTRY) == (
+        "anytouch1",
+        "anytouch2",
+        "sparsh_vjepa",
+        "wan22_vae",
+    )
+    for model_id in ENCODER_REGISTRY:
+        spec = get_encoder_spec(model_id)
+        assert spec.backbone_class.model_id == model_id
+        assert spec.training_recipe.model_id == model_id
+        assert spec.checkpoint_prefixes
 
 
 def test_anytouch1_pooling_contract_is_40_tokens_per_sensor() -> None:
@@ -56,6 +76,114 @@ def test_sparsh_downstream_backbone_is_encoder_only() -> None:
     pooled = model.extract_pooled_features(torch.rand(1, 2, 4, 3, 32, 32), pool_size=3)
     assert pooled.tokens.shape == (1, 38, 48)
     assert pooled.sensor_ids[0].tolist() == [0] * 19 + [1] * 19
+
+
+def test_wan22_vae_reconstruction_features_and_encoder_only_state() -> None:
+    model = build_backbone(
+        "wan22_vae",
+        num_frames=2,
+        image_size=32,
+        latent_dim=4,
+        base_dim=8,
+        decoder_base_dim=8,
+    )
+    images = torch.rand(1, 1, 2, 3, 32, 32)
+    output = model(images, 0.75)
+    assert output.reconstruction.shape == images.shape
+    assert output.mask.shape == (1, 1, 2, 4)
+    output.loss.backward()
+    assert model.vae.encoder.conv1.weight.grad is not None
+    assert model.vae.decoder.conv1.weight.grad is not None
+
+    pooled = model.extract_pooled_features(images, pool_size=2)
+    assert pooled.tokens.shape == (1, 9, 4)
+    patches = model.patchify(images)
+    torch.testing.assert_close(model.unpatchify(patches), images)
+
+    model.discard_training_modules()
+    assert model.vae.decoder is None
+    assert not any(key.startswith(("vae.decoder.", "vae.conv2.")) for key in model.state_dict())
+
+
+def test_wan22_vae_loads_official_root_key_names(tmp_path) -> None:
+    config = dict(
+        num_frames=1,
+        image_size=32,
+        latent_dim=4,
+        base_dim=8,
+        decoder_base_dim=8,
+    )
+    source = build_backbone("wan22_vae", **config)
+    checkpoint = tmp_path / "Wan2.2_VAE.pth"
+    torch.save(source.vae.state_dict(), checkpoint)
+
+    target = build_backbone("wan22_vae", pretrained_path=str(checkpoint), **config)
+    assert target.load_report["loaded_tensors"] == len(source.vae.state_dict())
+    assert not [
+        key
+        for key in target.load_report["missing_keys"]
+        if key in dict(target.named_parameters())
+    ]
+    torch.testing.assert_close(target.vae.encoder.conv1.weight, source.vae.encoder.conv1.weight)
+    torch.testing.assert_close(target.vae.decoder.conv1.weight, source.vae.decoder.conv1.weight)
+
+
+def test_wan22_downstream_config_never_constructs_decoder() -> None:
+    extractor = TactileBackboneFeatureExtractor.from_config(
+        {
+            "model_id": "wan22_vae",
+            "num_frames": 2,
+            "image_size": 32,
+            "latent_dim": 4,
+            "base_dim": 8,
+            "decoder_base_dim": 8,
+            "kl_weight": 1e-6,
+        },
+        pool_size=2,
+    )
+    assert extractor.backbone.vae.decoder is None
+    assert not any(
+        key.startswith(("vae.decoder.", "vae.conv2."))
+        for key in extractor.backbone.state_dict()
+    )
+    output = extractor(torch.rand(1, 1, 2, 3, 32, 32))
+    assert output.tokens.shape == (1, 9, 4)
+
+
+def test_wan22_unified_checkpoint_loads_encoder_without_decoder(tmp_path) -> None:
+    model = build_backbone(
+        "wan22_vae",
+        num_frames=2,
+        image_size=32,
+        latent_dim=4,
+        base_dim=8,
+        decoder_base_dim=8,
+    )
+    recipe = get_training_recipe("wan22_vae")
+    checkpoint = tmp_path / "wan22_tactile.pth"
+    torch.save(
+        {
+            "format_version": 2,
+            "model_id": "wan22_vae",
+            "args": {
+                "num_frames": 2,
+                "image_size": 32,
+                "wan22_latent_dim": 4,
+                "wan22_base_dim": 8,
+                "wan22_decoder_base_dim": 8,
+                "vae_kl_weight": 1e-6,
+            },
+            "encoder": recipe.encoder_state_dict(model),
+            "trainer": recipe.trainer_state_dict(model),
+        },
+        checkpoint,
+    )
+
+    extractor = TactileBackboneFeatureExtractor.from_pretrained(checkpoint, pool_size=2)
+    assert extractor.backbone.vae.decoder is None
+    assert extractor.architecture_config["model_id"] == "wan22_vae"
+    output = extractor(torch.rand(1, 1, 2, 3, 32, 32))
+    assert output.tokens.shape == (1, 9, 4)
 
 
 def test_spatiotemporal_position_interpolation_preserves_shape_contract() -> None:

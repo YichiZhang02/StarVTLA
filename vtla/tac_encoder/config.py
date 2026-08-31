@@ -5,9 +5,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 
-SUPPORTED_MODEL_IDS = ("anytouch1", "anytouch2", "sparsh_vjepa")
-
-
 @dataclass(frozen=True)
 class TactileDataConfig:
     image_size: int = 224

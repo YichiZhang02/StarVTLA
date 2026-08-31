@@ -8,7 +8,7 @@ import torch
 
 from tests.tac_encoder.test_data import _write_cache
 from vtla.tac_encoder.inference import TactileBackboneFeatureExtractor
-from vtla.tac_encoder.models.registry import build_backbone
+from vtla.tac_encoder.registry import build_backbone
 from vtla.tac_encoder.train import main
 from vtla.frameworks.tactile_encode import TactileEncoder
 

@@ -18,7 +18,7 @@ from vtla.tac_encoder.data.npy_tactile_dataset import (
     build_training_dataset,
     resolve_tactile_dataset,
 )
-from vtla.tac_encoder.training import get_training_recipe
+from vtla.tac_encoder.registry import get_training_recipe
 
 
 PRETRAINED_PATHS = {

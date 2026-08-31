@@ -1,7 +1,12 @@
-"""Unified tactile reconstruction model registry."""
+"""Compatibility exports for the pre-package tactile encoder API."""
 
-from .base import EncodedFeatures, FeatureTokens, ReconstructionOutput, ReconstructionBackbone
-from .registry import build_backbone, load_backbone_checkpoint
+from ..common.backbone import (
+    EncodedFeatures,
+    FeatureTokens,
+    ReconstructionBackbone,
+    ReconstructionOutput,
+)
+from ..registry import build_backbone, load_backbone_checkpoint
 
 __all__ = [
     "EncodedFeatures",

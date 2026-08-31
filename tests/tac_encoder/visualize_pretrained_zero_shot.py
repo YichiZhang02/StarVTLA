@@ -24,9 +24,8 @@ from vtla.tac_encoder.data.npy_tactile_dataset import (
     resolve_tactile_dataset,
 )
 from vtla.tac_encoder.eval import select_visualization_indices
-from vtla.tac_encoder.models.registry import build_backbone
-from vtla.tac_encoder.training import get_training_recipe
-from vtla.tac_encoder.training.base import require_fully_pretrained
+from vtla.tac_encoder.common.training import require_fully_pretrained
+from vtla.tac_encoder.registry import build_backbone, get_training_recipe
 
 
 PRETRAINED = {

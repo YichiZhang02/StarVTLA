@@ -114,7 +114,7 @@ bash collect.sh insert_easy "insert the object to the hole" 25 drag
 
 ### 2. 数据处理
 
-#### 处理关节数据
+#### 2.1 处理关节数据
 ```bash
 bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
 ```
@@ -130,7 +130,7 @@ bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
 
 最后一个参数是 relative-action 统计使用的 `action_gap`；训练 relative 模型时必须与 `train.sh` 的值一致。absolute action 不使用这组 relative 统计。
 
-#### 处理UMI数据
+#### 2.2 处理UMI数据
 ```bash
 bash scripts/process_umi_data.sh <dataset_id> [size] [horizon]
 ```
@@ -146,13 +146,44 @@ TASK="Put the board eraser into the cup." \
 输出为 `<dataset_id>_processed`，相机统一为一组 top + 两组 wrist，数据集和后续 checkpoint 的
 `robot_type` 都保持 `umi`。该流程不依赖无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
 
+#### 2.3 处理 Backbone 数据（可选）
+
+只有需要训练触觉 backbone 时才执行该步骤。输入应是完成上述处理、触觉图像已转换为 `uint8` 的数据集：
+
+```bash
+bash scripts/process_backbone_data.sh <dataset_id> \
+  --image_size 224 --num_frames 4 --frame_stride 2
+```
+
+脚本筛选有效接触窗口，并把训练实际引用的触觉帧写入各数据集自己的 `tactile_backbone_cache/`。
+
 ### 3. 训练
+
+#### 3.1 Backbone 训练（可选）
+
+可以训练 Tactile Backbone：
+
+```bash
+bash scripts/train_backbone.sh \
+  <dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
+  [lr] [image_size] [tactile_num_frames] [tactile_frame_offset] [resume]
+```
+
+训练示例：
+
+```bash
+bash scripts/train_backbone.sh <dataset_id> wan22_vae 4 4 5 1e-5 224 4 2
+```
+
+各模型目标和权重要求见 [Backbone 模型文档](#backbone模型文档)。
+
+#### 3.2 VTLA 训练
 
 ```bash
 bash train.sh \
   <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
-  [action_gap] <augmentation_mode>
+  [action_gap] <augmentation_mode> [tactile_encoder_path]
 ```
 
 关节动作示例：
@@ -175,7 +206,7 @@ bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
 
 训练会校验数据集的臂布局，并把 `robot_type` 写入每个 checkpoint 的 policy config。
 
-#### 数据集 Mixture
+#### 3.3 数据集 Mixture
 
 在 `configs/data_mixtures.yaml` 中可以把已有数据集注册为一个不占额外数据存储的虚拟数据集：
 
@@ -194,6 +225,8 @@ mixture 和普通数据集使用同一个 ID 入口，不需要特殊前缀：
 
 ```bash
 bash train.sh <data_all>
+
+bash train_backbone.sh <data_all>
 ```
 
 每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type`、FPS 和 feature schema。
@@ -257,6 +290,15 @@ bash inference.sh "${pretrained_id}" 5000 async rm_isf_umi_left
 | StarVLA-GR00T DINOAlign | [vtla/frameworks/starvla_groot_dinoalign/README.md](vtla/frameworks/starvla_groot_dinoalign/README.md) |
 | FastWAM | [vtla/frameworks/fastwam/README.md](vtla/frameworks/fastwam/README.md) |
 | Dream-Tac | [vtla/frameworks/dream_tac/README.md](vtla/frameworks/dream_tac/README.md) |
+
+## Backbone模型文档
+
+| 模型 | 文档 |
+| --- | --- |
+| AnyTouch1 | [vtla/tac_encoder/frameworks/anytouch1/README.md](vtla/tac_encoder/frameworks/anytouch1/README.md) |
+| AnyTouch2 | [vtla/tac_encoder/frameworks/anytouch2/README.md](vtla/tac_encoder/frameworks/anytouch2/README.md) |
+| Sparsh V-JEPA | [vtla/tac_encoder/frameworks/sparsh_vjepa/README.md](vtla/tac_encoder/frameworks/sparsh_vjepa/README.md) |
+| Wan2.2 VAE | [vtla/tac_encoder/frameworks/wan22_vae/README.md](vtla/tac_encoder/frameworks/wan22_vae/README.md) |
 
 
 

@@ -180,9 +180,17 @@ bash scripts/train_backbone.sh \
 | --- | --- |
 | `anytouch1` | `playground/pretrained_models/AnyTouch-ViT-L-16/checkpoint.pth` |
 | `anytouch2` | `playground/pretrained_models/AnyTouch2-Model/checkpoint-4frames.pth` |
-| `sparsh_vjepa` | `playground/pretrained_models/Sparsh-VJEPA-Small/vjepa_vitsmall_full.ckpt` |
+| `sparsh_vjepa` | `playground/pretrained_models/Sparsh-VJEPA-Small/vjepa_vitsmall.safetensors` |
+| `wan22_vae` | `playground/pretrained_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth` |
 
-Sparsh 公开的 `vjepa_vitsmall.safetensors` 只包含 encoder，不能初始化 JEPA predictor。训练必须提供包含 context encoder、target encoder 和 predictor 的完整官方 checkpoint；缺少任一部分都会在训练前报错。
+Sparsh 公开的 `vjepa_vitsmall.safetensors` 只包含 encoder。训练会用它同时初始化
+context encoder 和 target encoder，JEPA predictor 从随机权重开始训练。若提供包含
+context encoder、target encoder 和 predictor 的完整 checkpoint，则三部分都会恢复。
+
+`wan22_vae` 对窗口内每张触觉图像独立执行 posterior sampling 和全图重建，loss 为 L1
+reconstruction 加 `1e-6` 权重的 KL。它不会把 `T=4` 当作 Wan causal video 序列。VAE
+显存和 checkpoint 占用明显高于其他 backbone；未传第 4 个参数时，它的 per-GPU batch
+默认是 `4`，其他模型仍为 `32`。可用 `VAE_KL_WEIGHT` 环境变量覆盖 KL 权重。
 
 ```bash
 bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2
@@ -193,9 +201,9 @@ bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2 path/to/l
 | 参数 | 默认值 | 可选值 |
 | --- | --- | --- |
 | `dataset_id` | `backbone_training_data` | 普通 dataset 或 named mixture |
-| `model_id` | `anytouch1` | `anytouch1`、`anytouch2`、`sparsh_vjepa` |
+| `model_id` | `anytouch1` | `anytouch1`、`anytouch2`、`sparsh_vjepa`、`wan22_vae` |
 | `num_processes` | `4` | `1` 使用 Python，多进程使用 torchrun |
-| `batch_size` | `32` | 每进程 / 每 GPU batch size |
+| `batch_size` | `32` | 每进程 / 每 GPU batch size；`wan22_vae` 默认 `4` |
 | `epochs` | `5` | epoch 数 |
 | `lr` | `1e-5` | AdamW 初始学习率 |
 | `image_size` | `224` | cache 和模型输入分辨率 |
@@ -209,7 +217,12 @@ bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2 path/to/l
 playground/results/backbones/<YYYYMMDD>_<dataset_id>_<model_id>/
 ```
 
-模型和数据契约见 [重构计划](../docs/REFACTOR_PLAN.md)。
+模型目录、公共接口和扩展方式见 [Tactile Encoders](../vtla/tac_encoder/README.md)。
+各模型的结构、目标和 checkpoint 契约见对应文档：
+[AnyTouch1](../vtla/tac_encoder/frameworks/anytouch1/README.md)、
+[AnyTouch2](../vtla/tac_encoder/frameworks/anytouch2/README.md)、
+[Sparsh V-JEPA](../vtla/tac_encoder/frameworks/sparsh_vjepa/README.md)、
+[Wan2.2 VAE](../vtla/tac_encoder/frameworks/wan22_vae/README.md)。
 
 ## State 统计
 

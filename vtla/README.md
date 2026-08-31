@@ -179,7 +179,7 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | Diffusion | global conditioning | 不支持 |
 | FastWAM | Video DiT 或 action DiT context | Wan VAE history token，要求插入 encoder |
 
-触觉 backbone 训练见 [Tactile MAE](tac_encoder/tactile_mae/README.md)。
+触觉 backbone 训练见 [Tactile Encoders](tac_encoder/README.md)。
 训练初始化后，backbone 结构写入 policy 的 `config.json`，权重写入
 `model.safetensors`；推理只依赖 policy checkpoint，不再读取 `tactile_encoder_path`。
 
@@ -241,4 +241,8 @@ VISUALIZATION_ENABLED=true bash train.sh <dataset_id> dream_tac 1 1 50000 \
 - [StarVLA-GR00T](frameworks/starvla_groot/README.md)
 - [StarVLA-GR00T DINOAlign](frameworks/starvla_groot_dinoalign/README.md)
 - [Dream-Tac](frameworks/dream_tac/README.md)
-- [Tactile MAE](tac_encoder/tactile_mae/README.md)
+- [Tactile Encoders](tac_encoder/README.md)
+- [AnyTouch1 Backbone](tac_encoder/frameworks/anytouch1/README.md)
+- [AnyTouch2 Backbone](tac_encoder/frameworks/anytouch2/README.md)
+- [Sparsh V-JEPA Backbone](tac_encoder/frameworks/sparsh_vjepa/README.md)
+- [Wan2.2 VAE Backbone](tac_encoder/frameworks/wan22_vae/README.md)
