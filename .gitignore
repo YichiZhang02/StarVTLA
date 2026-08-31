@@ -42,10 +42,6 @@ deployment/sdk/
 
 # Local reference repositories.
 /ref_repo/
-/tests/*
-!/tests/deployment/
-/tests/deployment/*
-!/tests/deployment/test_async_inference.py
 
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/
