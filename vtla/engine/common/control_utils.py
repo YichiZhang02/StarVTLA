@@ -231,6 +231,7 @@ def init_keyboard_listener():
     from pynput import keyboard
 
     space_held = False
+    reset_keys_held = set()
 
     def on_press(key):
         nonlocal space_held
@@ -239,10 +240,14 @@ def init_keyboard_listener():
                 print("Up arrow key pressed. Starting episode...")
                 events["start_episode"] = True
             elif key == keyboard.Key.right:
-                print("Right arrow key pressed. Resetting, then saving episode...")
+                if key in reset_keys_held:
+                    return
+                reset_keys_held.add(key)
                 events["exit_early"] = True
             elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Resetting, then rerecording episode...")
+                if key in reset_keys_held:
+                    return
+                reset_keys_held.add(key)
                 events["rerecord_episode"] = True
                 events["exit_early"] = True
             elif key == keyboard.Key.esc:
@@ -260,6 +265,8 @@ def init_keyboard_listener():
         nonlocal space_held
         if key == keyboard.Key.space:
             space_held = False
+        if key in (keyboard.Key.left, keyboard.Key.right):
+            reset_keys_held.discard(key)
 
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()

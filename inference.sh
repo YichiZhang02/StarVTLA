@@ -6,22 +6,21 @@ cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效,
 pretrained_id=${1:-20260827_rm_isf_umi_left_20260825_assemble_gearL_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
 step=${2:-10000}
 
-robot_type=${3:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
+inference_mode=${3:-async}                # sync=同步推理; async=异步推理
+
+robot_type=${4:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
 
 # 动作配置
-n_action_steps=${4:-16}
-action_start_offset=${5:-6}
-control_fps=${6:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
+n_action_steps=${5:-16}
+action_start_offset=${6:-6}
+control_fps=${7:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
 
 # 复位选项
-reset_before_episode=${7:-true}           # 与其他参数独立: true=按左右键结束时先复位确认
-home_duration_s=4.0                       # 平滑复位耗时（秒）
+reset_before_episode=${8:-true}           # 与其他参数独立: true=按左右键结束时先复位确认
+home_duration_s=2.0                       # 普通 movej 目标复位耗时（秒）
 
 # 任务描述
-single_task=${8:-}                        # 任务描述，留空则自动匹配
-
-# 推理调度
-inference_mode=${9:-async}                 # sync=同步推理; async=异步推理
+single_task=${9:-}                        # 任务描述，留空则自动匹配
 
 max_ee_pos_step=0.1                      # 关节角限速
 # ===============================================
@@ -31,7 +30,7 @@ step=$(printf "%06d" "$(expr "$step" + 0)")
 policy_path=playground/results/models/${pretrained_id}/checkpoints/${step}/pretrained_model
 checkpoint_robot_type=$(python -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("robot_type", ""))' "${policy_path}/config.json")
 if [ "${checkpoint_robot_type}" = "umi" ] && [ -z "${robot_type}" ]; then
-  echo "错误: UMI checkpoint 必须显式传入具体 robot_type（inference.sh 的第 3 个参数）" >&2
+  echo "错误: UMI checkpoint 必须显式传入具体 robot_type（inference.sh 的第 4 个参数）" >&2
   exit 1
 fi
 # 普通 checkpoint 的物理类型以 checkpoint 为准；这里的默认值只用于 Draccus 创建启动配置。

@@ -3,12 +3,14 @@ from types import SimpleNamespace
 import numpy as np
 
 from deployment import _record_engine
+from deployment.hardware.follower_arms.realman_tcp import RealmanTcpFollower
 
 
 class FakeRobot:
     def __init__(self, *, settle_timeout_s=2.0):
         self.observation_count = 0
         self.actions = []
+        self.move_durations = []
         self.joint = 4.0
         self.config = SimpleNamespace(
             home_joint_tolerance_deg=1.0,
@@ -28,12 +30,18 @@ class FakeRobot:
         self.joint = action["joint"]
         return action.copy()
 
+    def move_to_joint_action(self, action, duration_s):
+        self.actions.append(action.copy())
+        self.move_durations.append(duration_s)
+        self.joint = action["joint"]
+        return action.copy()
 
-def test_move_to_home_interpolates_and_confirms_feedback(monkeypatch):
+
+def test_move_to_home_submits_one_movej_and_confirms_feedback(monkeypatch):
     robot = FakeRobot()
     monkeypatch.setattr(_record_engine, "busy_wait", lambda _seconds: None)
 
-    at_home = _record_engine.move_to_home_smooth(
+    at_home = _record_engine.move_to_home_and_confirm(
         robot,
         {"joint": 0.0},
         fps=2,
@@ -41,19 +49,19 @@ def test_move_to_home_interpolates_and_confirms_feedback(monkeypatch):
     )
 
     assert at_home is True
-    assert robot.observation_count == 2
-    np.testing.assert_allclose(
-        [action["joint"] for action in robot.actions],
-        [3.41421356, 2.0, 0.58578644, 0.0, 0.0],
-    )
+    assert robot.observation_count == 1
+    assert robot.actions == [{"joint": 0.0}]
+    assert robot.move_durations == [2.0]
 
 
 def test_move_to_home_timeout_is_not_confirmed(monkeypatch, caplog):
     robot = FakeRobot(settle_timeout_s=0.0)
-    robot.send_action = lambda action: robot.actions.append(action.copy()) or action.copy()
+    robot.move_to_joint_action = (
+        lambda action, duration_s: robot.actions.append(action.copy()) or action.copy()
+    )
     monkeypatch.setattr(_record_engine, "busy_wait", lambda _seconds: None)
 
-    at_home = _record_engine.move_to_home_smooth(
+    at_home = _record_engine.move_to_home_and_confirm(
         robot,
         {"joint": 0.0},
         fps=2,
@@ -62,6 +70,29 @@ def test_move_to_home_timeout_is_not_confirmed(monkeypatch, caplog):
 
     assert at_home is False
     assert "等待关节到位超时" in caplog.text
+
+
+def test_realman_move_to_uses_one_blocking_movej():
+    class FakeSdkArm:
+        def __init__(self):
+            self.movej_calls = []
+
+        def rm_get_joint_max_speed(self):
+            return 0, [100.0] * 7
+
+        def rm_movej(self, *args):
+            self.movej_calls.append(args)
+            return 0
+
+    follower = RealmanTcpFollower.__new__(RealmanTcpFollower)
+    follower.name = "test"
+    follower._arm = FakeSdkArm()
+    follower._use_degrees = False
+    follower.read_joints_now = lambda: np.zeros(7)
+
+    follower.move_to([np.pi / 2] * 7, duration_s=2.0)
+
+    assert follower._arm.movej_calls == [([90.0] * 7, 45, 0, 0, 1)]
 
 
 def _events():
@@ -85,7 +116,7 @@ def test_up_starts_episode_without_reset(monkeypatch):
     monkeypatch.setattr(_record_engine.time, "sleep", request_start)
     monkeypatch.setattr(
         _record_engine,
-        "move_to_home_smooth",
+        "move_to_home_and_confirm",
         lambda *_args: (_ for _ in ()).throw(AssertionError("up must not reset")),
     )
     monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
@@ -102,15 +133,6 @@ def test_up_starts_episode_without_reset(monkeypatch):
     assert events["start_episode"] is False
 
 
-def test_wait_for_inflight_policy_action_has_no_artificial_delay(monkeypatch):
-    waits = []
-    monkeypatch.setattr(_record_engine, "busy_wait", waits.append)
-
-    _record_engine.wait_for_inflight_policy_action(fps=30)
-
-    assert waits == [0.0]
-
-
 def test_right_resets_before_save(monkeypatch):
     events = _events()
     events["exit_early"] = True
@@ -121,7 +143,7 @@ def test_right_resets_before_save(monkeypatch):
         order.append("home_confirmed" if confirmed else "reset_failed")
         return confirmed
 
-    monkeypatch.setattr(_record_engine, "move_to_home_smooth", reset_with_retry)
+    monkeypatch.setattr(_record_engine, "move_to_home_and_confirm", reset_with_retry)
     monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
 
     finalized = _record_engine.reset_then_finalize_episode(
@@ -147,7 +169,7 @@ def test_left_resets_before_discard(monkeypatch):
     order = []
     monkeypatch.setattr(
         _record_engine,
-        "move_to_home_smooth",
+        "move_to_home_and_confirm",
         lambda *_args: order.append("home_confirmed") or True,
     )
     monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
@@ -181,7 +203,7 @@ def test_failed_reset_does_not_finalize(monkeypatch):
         events["stop_recording"] = True
         return False
 
-    monkeypatch.setattr(_record_engine, "move_to_home_smooth", fail_and_stop)
+    monkeypatch.setattr(_record_engine, "move_to_home_and_confirm", fail_and_stop)
     monkeypatch.setattr(_record_engine, "log_say", lambda *_args: None)
 
     result = _record_engine.reset_then_finalize_episode(

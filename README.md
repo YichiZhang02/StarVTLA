@@ -221,7 +221,7 @@ bash scripts/evaluate_policy_offline.sh \
 
 ```bash
 bash inference.sh \
-  <pretrained_id> <step> [robot_type] [n_action_steps] [action_start_offset] \
+  <pretrained_id> <step> [inference_mode] [robot_type] [n_action_steps] [action_start_offset] \
   [control_fps] [reset_before_episode] [single_task]
 ```
 
@@ -229,15 +229,20 @@ bash inference.sh \
 
 ```bash
 pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
-bash inference.sh "${pretrained_id}" 5000
+bash inference.sh "${pretrained_id}" 5000 async rm_isf_umi_left
 ```
 
-`control_fps` 是机器人动作下发目标频率，默认 `30 Hz`。模型按 `30 Hz` 数据训练，降低该值会按比例放慢轨迹的真实执行速度；实际频率仍受新 chunk 推理耗时限制。
+`inference_mode` 可选 `sync` 或 `async`：
+
+- `sync`：当前 action queue 执行完后读取最新观测，完成一次推理并执行新 chunk。
+- `async`：观测与模型推理持续并行刷新最新 chunk；执行端保证当前 chunk 完整下发，结束后只领取最新推理结果。
+
+`control_fps` 是机器人动作下发目标频率，默认 `30 Hz`。模型按 `30 Hz` 数据训练，降低该值会按比例放慢轨迹的真实执行速度。同步模式在 chunk 交界处受推理耗时影响；异步模式在已有最新 chunk 时不会等待推理。
 
 `single_task` 默认为空，此时 `match_policy` 从 checkpoint 自动读取任务；多任务模型可以显式传入任务文本，控制本次推理的语言语义输入。
 
 普通 checkpoint 的实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。
-当 checkpoint 的 `robot_type=umi` 时，必须把具体物理机器人类型作为 `inference.sh` 第 3 个参数
+当 checkpoint 的 `robot_type=umi` 时，必须把具体物理机器人类型作为 `inference.sh` 第 4 个参数
 显式传入；此时以 CLI 为准。两种情况都会启用对应 B/ISF 构型的在线 FK/IK。
 
 ## 文档
@@ -268,6 +273,5 @@ git push origin main
 ## TODO List
 ```bash
 1 DAgger的采集
-2 controller实现与异步推理
-3 Backbone重构
+2 Controller实现
 ```

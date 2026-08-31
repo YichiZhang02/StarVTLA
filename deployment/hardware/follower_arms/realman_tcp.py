@@ -289,32 +289,54 @@ class RealmanTcpFollower(FollowerArmBase):
             logger.debug(f"[{self.name}] 读取工作坐标系失败: {e}")
         return tool, work
 
-    def move_to(self, target_positions, duration_s: float = 4.0, fps: float = 30.0) -> None:
-        """平滑运动到目标关节位置 (cosine ease-in/out 插值, 通过 rm_movej_canfd 分步执行)。
+    def move_to(self, target_positions, duration_s: float = 2.0, fps: float = 30.0) -> None:
+        """使用控制器轨迹规划单次 movej 到目标关节位置。
 
         target_positions: 与 send_joints / read_joints 单位相同 (取决于 use_degrees 配置)。
+        duration_s: 用于根据关节角差和关节最大速度估算 movej 速度百分比。
+        fps: 为兼容旧调用保留，不参与普通 movej 规划。
         """
         if self._arm is None:
-            return
+            raise RuntimeError(f"[{self.name}] 机械臂未连接，无法执行 movej")
+        if not np.isfinite(duration_s) or duration_s <= 0:
+            raise ValueError(f"duration_s 必须大于 0，当前为 {duration_s}")
 
         current = self.read_joints_now()
         if current is None:
             current = self.read_joints()
 
         target = np.asarray(target_positions, dtype=float)
-        start = np.asarray(current, dtype=float)
+        current = np.asarray(current, dtype=float)
+        if target.shape != current.shape:
+            raise ValueError(
+                f"movej 目标关节数不匹配: target={target.shape}, current={current.shape}"
+            )
 
-        n_steps = max(1, int(duration_s * fps))
-        dt = duration_s / n_steps
+        target_degrees = target if self._use_degrees else np.degrees(target)
+        current_degrees = current if self._use_degrees else np.degrees(current)
+        ret, max_speed_deg_s = self._arm.rm_get_joint_max_speed()
+        if ret != 0:
+            raise RuntimeError(f"[{self.name}] 读取关节最大速度失败，错误码: {ret}")
+        max_speed_deg_s = np.asarray(max_speed_deg_s, dtype=float)
+        if max_speed_deg_s.shape != target_degrees.shape or np.any(max_speed_deg_s <= 0):
+            raise RuntimeError(
+                f"[{self.name}] 无效的关节最大速度: {max_speed_deg_s.tolist()}"
+            )
 
-        for i in range(1, n_steps + 1):
-            t = i / n_steps
-            t_smooth = 0.5 * (1.0 - np.cos(np.pi * t))
-            interp = start + (target - start) * t_smooth
-            self.send_joints(interp.tolist())
-            time.sleep(dt)
+        required_ratio = float(
+            np.max(np.abs(target_degrees - current_degrees) / (max_speed_deg_s * duration_s))
+        )
+        speed_percent = max(1, min(100, int(np.ceil(required_ratio * 100))))
+        if required_ratio > 1.0:
+            logger.warning(
+                f"[{self.name}] 目标 {duration_s:.2f}s 超出关节速度上限，使用 100% 速度"
+            )
 
-        logger.info(f"[{self.name}] move_to 完成")
+        ret = self._arm.rm_movej(
+            target_degrees.tolist(), speed_percent, 0, 0, 1
+        )
+        if ret != 0:
+            raise RuntimeError(f"[{self.name}] movej 执行失败，错误码: {ret}")
 
     def disconnect(self) -> None:
         if self._force_drag_active:

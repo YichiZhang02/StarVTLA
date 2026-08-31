@@ -531,42 +531,42 @@ class RmBaseUmiDual(Robot):
             if pos is None:
                 pos = arm.follower.read_joints()
             target = list(pos)
-            logger.info(f"[{side}] home 位置自动捕获 (连接后当前姿态): {target}")
             self._home_joints[side] = target
 
-    def move_to_home(self) -> None:
-        """机械臂和夹爪复位到连接时的初始位置。
-
-        流程: 先立即张开夹爪 (非阻塞), 再并行将双臂平滑插值到 home 位置。
-        """
+    def move_to_joint_action(
+        self, action: dict[str, Any], duration_s: float
+    ) -> dict[str, Any]:
+        """用每臂一次控制器规划 movej 执行 joint 动作。"""
         if not self.is_connected:
-            logger.warning("move_to_home: 机器人未连接, 跳过")
-            return
+            raise DeviceNotConnectedError(f"{self} 未连接")
 
-        # 1. 立即张开夹爪 (与臂运动并行)
+        sent_action: dict[str, Any] = {}
         for side, arm in self._arms.items():
+            gripper_key = f"{side}_{self.GRIPPER_NAME}"
+            gripper_value = action.get(gripper_key)
             if arm.gripper is not None:
                 try:
-                    arm.gripper.move_norm(self.config.home_gripper)
-                    logger.info(f"[{side}] 夹爪复位: {self.config.home_gripper:.2f}")
+                    if gripper_value is not None:
+                        arm.gripper.move_norm(float(gripper_value))
                 except Exception as e:
-                    logger.warning(f"[{side}] 夹爪复位出错: {e}")
+                    logger.warning(f"[{side}] movej 期间夹爪动作出错: {e}")
+            if gripper_value is not None:
+                sent_action[gripper_key] = float(gripper_value)
 
-        # 2. 双臂并行平滑运动到 home 位置
-        def _home_arm(side: str, arm: _ArmDevices) -> None:
-            target = self._home_joints.get(side)
-            if target is None:
-                logger.warning(f"[{side}] home 位置未记录, 跳过臂复位")
-                return
-            logger.info(f"[{side}] 机械臂复位目标: {[f'{v:.3f}' for v in target]}")
+        errors: list[Exception] = []
+
+        def _move_arm(side: str, arm: _ArmDevices) -> None:
             try:
-                arm.follower.move_to(target, duration_s=self.config.home_duration_s)
-                logger.info(f"[{side}] 机械臂复位完成")
+                target = [float(action[f"{side}_{joint}"]) for joint in self.JOINT_NAMES]
+                arm.follower.move_to(target, duration_s=duration_s)
+                sent_action.update(
+                    {f"{side}_{joint}": value for joint, value in zip(self.JOINT_NAMES, target)}
+                )
             except Exception as e:
-                logger.warning(f"[{side}] 机械臂复位出错: {e}")
+                errors.append(e)
 
         threads = [
-            threading.Thread(target=_home_arm, args=(side, arm), name=f"home-{side}")
+            threading.Thread(target=_move_arm, args=(side, arm), name=f"movej-{side}")
             for side, arm in self._arms.items()
             if arm.follower is not None
         ]
@@ -574,6 +574,20 @@ class RmBaseUmiDual(Robot):
             t.start()
         for t in threads:
             t.join()
+        if errors:
+            raise RuntimeError(f"joint move failed: {errors[0]}") from errors[0]
+        return sent_action
+
+    def move_to_home(self) -> None:
+        """使用每臂一次普通 movej 复位到连接时的初始位置。"""
+        action = {
+            f"{side}_{joint}": float(target[index])
+            for side, target in self._home_joints.items()
+            for index, joint in enumerate(self.JOINT_NAMES)
+        }
+        for side in self._arms:
+            action[f"{side}_{self.GRIPPER_NAME}"] = float(self.config.home_gripper)
+        self.move_to_joint_action(action, duration_s=self.config.home_duration_s)
 
     # ==================== 读取观测 ====================
 

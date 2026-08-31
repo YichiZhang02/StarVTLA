@@ -233,9 +233,23 @@ decode:      rgb48le, uint16 HWC
 
 ```bash
 bash inference.sh \
-  <pretrained_id> <step> [robot_type] [n_action_steps] [action_start_offset] \
+  <pretrained_id> <step> [inference_mode] [robot_type] [n_action_steps] [action_start_offset] \
   [control_fps] [reset_before_episode] [single_task]
 ```
+
+位置参数如下：
+
+| 位置 | 参数 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `pretrained_id` | 脚本内当前模型 | checkpoint 所属训练结果目录名 |
+| 2 | `step` | `10000` | checkpoint step，自动补齐为 6 位 |
+| 3 | `inference_mode` | `async` | `sync` 同步推理或 `async` 异步推理 |
+| 4 | `robot_type` | 空 | UMI checkpoint 必须指定具体单臂或双臂类型 |
+| 5 | `n_action_steps` | `16` | 每个 chunk 执行的动作数 |
+| 6 | `action_start_offset` | `6` | chunk 起始切片偏移 |
+| 7 | `control_fps` | `30` | 动作下发和录像目标频率 |
+| 8 | `reset_before_episode` | `true` | 左右键结束 episode 后是否先复位确认 |
+| 9 | `single_task` | 空 | 空值由 checkpoint 自动匹配任务文本 |
 
 脚本加载：
 
@@ -249,11 +263,16 @@ playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained
 
 ```bash
 pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
-bash inference.sh "${pretrained_id}" 3000 rm_isf_umi_left 16 6 20 true \
+bash inference.sh "${pretrained_id}" 3000 async rm_isf_umi_left 16 6 20 true \
   "Grasp the cap and pull it off the pen."
 ```
 
-训练数据的时间基准是 `30 Hz`；降低下发频率会放慢真实轨迹，实际可达到的频率还受新 chunk 的同步推理耗时限制。
+推理调度模式：
+
+- `sync`：执行端在当前 action queue 为空时读取最新观测、运行一次模型推理，再逐个下发该 chunk。chunk 交界处会等待推理完成。
+- `async`：Robot I/O 进程持续刷新最新观测，推理进程始终基于最新观测生成结果并覆盖“最新完成 chunk”；执行端领取 chunk 后保证完整下发，不会被新推理结果截断，queue 为空时只领取当时最新的 chunk。
+
+训练数据的时间基准是 `30 Hz`；降低下发频率会放慢真实轨迹。同步模式在 chunk 交界处受推理耗时限制；异步模式只在尚无可用 chunk 时等待。
 
 `single_task` 默认留空，由 `match_policy` 从 checkpoint 自动读取。多数据集混合训练的多任务模型可以显式传入任务文本；该文本会作为本次推理运行的语言语义输入，并且不会被 `match_policy` 覆盖。
 

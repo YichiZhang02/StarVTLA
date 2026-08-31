@@ -80,7 +80,7 @@ class RmIsfUmiRightConfig(RobotConfig):
 
     # 自动复位。
     home_gripper: float = 1.0
-    home_duration_s: float = 4.0
+    home_duration_s: float = 2.0
     home_joint_tolerance_deg: float = 1.0
     home_settle_timeout_s: float = 2.0
 

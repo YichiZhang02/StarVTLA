@@ -115,7 +115,7 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
     if not cfg.reset_before_episode:
         return
 
-    home_duration_s = float(getattr(cfg.robot, "home_duration_s", 4.0))
+    home_duration_s = float(getattr(cfg.robot, "home_duration_s", 2.0))
     tolerance_deg = float(getattr(cfg.robot, "home_joint_tolerance_deg", 1.0))
     settle_timeout_s = float(getattr(cfg.robot, "home_settle_timeout_s", 2.0))
     if not math.isfinite(home_duration_s) or home_duration_s <= 0:

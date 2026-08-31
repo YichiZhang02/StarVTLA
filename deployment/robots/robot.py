@@ -182,6 +182,14 @@ class Robot(abc.ABC):
         """
         pass
 
+    def move_to_joint_action(
+        self, action: dict[str, Any], duration_s: float
+    ) -> dict[str, Any]:
+        """Execute one controller-planned joint trajectory for reset motions."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement controller-planned joint motion"
+        )
+
     @abc.abstractmethod
     def disconnect(self) -> None:
         """Disconnect from the robot and perform any necessary cleanup."""

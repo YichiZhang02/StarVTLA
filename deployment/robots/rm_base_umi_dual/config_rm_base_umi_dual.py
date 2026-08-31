@@ -164,9 +164,9 @@ class RmBaseUmiDualConfig(RobotConfig):
     # 连接时自动读取当前位置；启动前先把机械臂摆到安全的初始姿态。
     # 复位时夹爪目标开度 (归一化 [0,1], 1.0=张开, 0.0=夹紧)
     home_gripper: float = 1.0
-    # 复位运动总耗时 (秒), 使用 cosine ease-in/out 插值
-    home_duration_s: float = 4.0
-    # 插值结束后以关节反馈确认到位；容差统一用角度表示。
+    # 普通 movej 的目标复位耗时 (秒)，用于估算控制器速度百分比。
+    home_duration_s: float = 2.0
+    # movej 返回后以关节反馈确认到位；容差统一用角度表示。
     home_joint_tolerance_deg: float = 1.0
     home_settle_timeout_s: float = 2.0
 

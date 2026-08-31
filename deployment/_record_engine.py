@@ -184,25 +184,16 @@ def capture_home_action(robot: Robot) -> dict[str, float]:
     home = {key: float(source[key]) for key in joint_keys}
     for side in sides:
         home[f"{side}_{gripper_name}"] = float(home_gripper)
-    logging.info(
-        "[home] 固定复位目标来自机械臂连接时关节快照，仅捕获一次: joints=%s, gripper=%.3f",
-        {key: home[key] for key in joint_keys},
-        home_gripper,
-    )
     return home
 
 
-def move_to_home_smooth(
+def move_to_home_and_confirm(
     robot: Robot,
     home_action: dict[str, float],
     fps: int,
     duration_s: float,
 ) -> bool:
-    """从当前姿态余弦插值到 home，然后根据关节反馈等待实际到位。"""
-    logging.info("[home] 本次复位使用固定启动目标: %s", dict(home_action))
-    first_obs = robot.get_observation()
-    start = {k: float(first_obs[k]) for k in home_action if k in first_obs}
-
+    """Submit one controller-planned movej, then confirm home from joint feedback."""
     config = getattr(robot, "config", None)
     tolerance_deg = float(getattr(config, "home_joint_tolerance_deg", 1.0))
     use_degrees = bool(getattr(config, "use_degrees", False))
@@ -212,23 +203,12 @@ def move_to_home_smooth(
         key: float(value) for key, value in home_action.items() if "joint" in key
     }
 
-    steps = max(1, int(duration_s * fps))
-    for i in range(1, steps + 1):
-        t0 = time.perf_counter()
-        progress = i / steps
-        alpha = 0.5 * (1.0 - math.cos(math.pi * progress))
-        target = {
-            k: start.get(k, home_action[k]) * (1 - alpha) + home_action[k] * alpha
-            for k in home_action
-        }
-        robot.send_action(target)
-        busy_wait(1 / fps - (time.perf_counter() - t0))
+    robot.move_to_joint_action(home_action, duration_s)
 
     settle_start = time.perf_counter()
     while True:
         t0 = time.perf_counter()
         obs = robot.get_observation()
-        robot.send_action(home_action)
         errors = {
             key: abs(float(obs[key]) - target)
             for key, target in joint_targets.items()
@@ -291,19 +271,6 @@ def wait_for_episode_start(
     return True
 
 
-def wait_for_inflight_policy_action(fps: int) -> None:
-    """Apply the configured reset pre-delay before starting home motion."""
-    wait_frames = 0
-    wait_s = wait_frames / fps
-    logging.info(
-        "[reset] 复位前人为等待: %.3fs (%d 帧, %d Hz)",
-        wait_s,
-        wait_frames,
-        fps,
-    )
-    busy_wait(wait_s)
-
-
 def reset_then_finalize_episode(
     *,
     robot: Robot,
@@ -331,7 +298,7 @@ def reset_then_finalize_episode(
 
     while not events["stop_recording"]:
         log_say(f"{episode_label}: 机械臂按连接初始位姿复位中...", play_sounds)
-        if move_to_home_smooth(robot, home_action, fps, home_duration_s):
+        if move_to_home_and_confirm(robot, home_action, fps, home_duration_s):
             if events["stop_recording"]:
                 return False
             log_say(f"{episode_label}: 复位已确认", play_sounds)
@@ -1037,7 +1004,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
-                _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
+                _home_duration = getattr(getattr(robot, "config", None), "home_duration_s", 2.0)
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                     if not wait_for_episode_start(
                         events=events,
@@ -1083,13 +1050,6 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             getattr(cfg, "drag_gripper_close_value", 0.0)
                         ),
                     )
-
-                    if (
-                        policy is not None
-                        and cfg.reset_before_episode
-                        and not events["stop_recording"]
-                    ):
-                        wait_for_inflight_policy_action(cfg.dataset.fps)
 
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
@@ -1161,7 +1121,7 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
 
                 recorded_episodes = 0
                 episode_index = episode_start
-                _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 4.0)
+                _home_duration_s = getattr(getattr(robot, "config", None), "home_duration_s", 2.0)
                 while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
                     if not wait_for_episode_start(
                         events=events,
@@ -1205,13 +1165,6 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             getattr(cfg, "drag_gripper_close_value", 0.0)
                         ),
                     )
-
-                    if (
-                        policy is not None
-                        and cfg.reset_before_episode
-                        and not events["stop_recording"]
-                    ):
-                        wait_for_inflight_policy_action(cfg.dataset.fps)
 
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()

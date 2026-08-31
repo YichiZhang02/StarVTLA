@@ -34,7 +34,6 @@ from deployment._record_engine import (
     resolve_compute_stats,
     resolve_dataset_root,
     wait_for_episode_start,
-    wait_for_inflight_policy_action,
 )
 from deployment.hardware.tactile_sensors import TactileMkvWriter
 from deployment.robots import RobotConfig, make_robot_from_config
@@ -380,8 +379,14 @@ def _robot_io_worker(
                 command = None
 
             if command is not None:
-                request_id, action = command
-                sent_action = robot.send_action(action)
+                request_id, operation, payload = command
+                if operation == "send_action":
+                    sent_action = robot.send_action(payload)
+                elif operation == "move_to_joint_action":
+                    action, duration_s = payload
+                    sent_action = robot.move_to_joint_action(action, duration_s)
+                else:
+                    raise ValueError(f"Unknown robot I/O operation: {operation}")
                 response_queue.put((request_id, sent_action))
 
             if time.perf_counter() >= next_observation_at:
@@ -555,17 +560,33 @@ class RobotIOClient:
         raise TimeoutError("Timed out waiting for the first asynchronous robot observation")
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "send_action", action, response_timeout_s=5.0
+        )
+
+    def move_to_joint_action(
+        self, action: dict[str, Any], duration_s: float
+    ) -> dict[str, Any]:
+        return self._request(
+            "move_to_joint_action",
+            (action, duration_s),
+            response_timeout_s=max(10.0, duration_s + 5.0),
+        )
+
+    def _request(
+        self, operation: str, payload: Any, *, response_timeout_s: float
+    ) -> dict[str, Any]:
         if self.shutdown_event.is_set():
             _raise_worker_error(self.error_queue)
             raise RuntimeError("Robot I/O worker is shutting down")
         self._request_id += 1
         request_id = self._request_id
         try:
-            self.command_queue.put((request_id, action), timeout=2.0)
+            self.command_queue.put((request_id, operation, payload), timeout=2.0)
         except queue.Full as exc:
             raise TimeoutError("Robot command mailbox did not drain") from exc
 
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + response_timeout_s
         while time.monotonic() < deadline:
             _raise_worker_error(self.error_queue)
             try:
@@ -577,7 +598,9 @@ class RobotIOClient:
                     f"Robot response id mismatch: expected {request_id}, got {response_id}"
                 )
             return sent_action
-        raise TimeoutError(f"Robot action {request_id} was not acknowledged")
+        raise TimeoutError(
+            f"Robot operation {operation!r} request {request_id} was not acknowledged"
+        )
 
 
 @safe_stop_image_writer
@@ -913,7 +936,7 @@ def run_async_record(cfg) -> LeRobotDataset | None:
                 raise RuntimeError("Episode mode requires a dataset")
             with VideoEncodingManager(dataset):
                 recorded_episodes = 0
-                home_duration = float(getattr(cfg.robot, "home_duration_s", 4.0))
+                home_duration = float(getattr(cfg.robot, "home_duration_s", 2.0))
                 while (
                     recorded_episodes < cfg.dataset.num_episodes
                     and not events["stop_recording"]
@@ -953,9 +976,6 @@ def run_async_record(cfg) -> LeRobotDataset | None:
                         )
                     finally:
                         _end_episode(generation, chunk_slot, inference_enabled_event)
-
-                    if cfg.reset_before_episode and not events["stop_recording"]:
-                        wait_for_inflight_policy_action(cfg.dataset.fps)
 
                     episode_label = f"Episode {dataset.num_episodes + 1}"
                     if events["rerecord_episode"]:
@@ -1016,7 +1036,7 @@ def run_async_record(cfg) -> LeRobotDataset | None:
                         except (ValueError, IndexError):
                             episode_index = len(existing)
                 recorded_episodes = 0
-                home_duration = float(getattr(cfg.robot, "home_duration_s", 4.0))
+                home_duration = float(getattr(cfg.robot, "home_duration_s", 2.0))
                 while (
                     recorded_episodes < cfg.dataset.num_episodes
                     and not events["stop_recording"]
@@ -1057,9 +1077,6 @@ def run_async_record(cfg) -> LeRobotDataset | None:
                         )
                     finally:
                         _end_episode(generation, chunk_slot, inference_enabled_event)
-
-                    if cfg.reset_before_episode and not events["stop_recording"]:
-                        wait_for_inflight_policy_action(cfg.dataset.fps)
 
                     episode_label = f"Stream episode {episode_index + 1}"
                     if events["rerecord_episode"]:
