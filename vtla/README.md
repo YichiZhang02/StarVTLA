@@ -14,6 +14,7 @@
 | `starvla_groot` | 本地 Qwen3.5-0.8B | Qwen vision-language backbone + GR00T action head |
 | `starvla_groot_dinoalign` | Qwen3.5 + DINOv3 teacher | 训练期视觉对齐，部署不加载 teacher |
 | `fastwam` | 本地 Wan2.2 组件 | 联合视频与动作生成的 world-action model |
+| `dream_tac` | 本地 Cosmos-Predict2-2B-Video2World | 联合 RGB、触觉、状态和动作生成的 world-action model |
 
 ## 训练命令
 
@@ -28,7 +29,7 @@ bash train.sh \
 | 位置 | 参数 | 脚本默认值 | 可选值或含义 |
 | ---: | --- | --- | --- |
 | 1 | `dataset_id` | 脚本内当前数据集 | `playground/data/` 下的目录名 |
-| 2 | `policy_type` | `starvla_groot_dinoalign` | 上表六种类型 |
+| 2 | `policy_type` | `starvla_groot_dinoalign` | 上表所列 policy 类型 |
 | 3 | `num_processes` | `4` | Accelerate 进程数 |
 | 4 | `batch_size` | `4` | 每进程 batch size |
 | 5 | `steps` | `40000` | 训练步数 |
@@ -220,8 +221,24 @@ VISUALIZATION_ENABLED=true \
   true encode absolute_joint absolute_joint 6 none
 ```
 
+## Dream-Tac
+
+Dream-Tac 使用仓库内置的 Cosmos Policy core，并接入 StarVTLA 的 LeRobot 数据、动态
+sensor slot、Accelerate 训练、checkpoint、文本 embedding 缓存和 visualization eval。
+它支持 `tactile_mode=none|as_image`，state/action 可选 joint、rot6d 或 quaternion，单双臂
+由数据 feature 和相机、触觉 key 共同确定。
+
+```bash
+VISUALIZATION_ENABLED=true bash train.sh <dataset_id> dream_tac 1 1 50000 \
+  false as_image absolute_rot6d absolute_rot6d 0 none
+```
+
+环境安装、预训练资产、slot 布局、T5 预计算、loss、推理、可视化和 checkpoint 语义见
+[Dream-Tac 专项文档](frameworks/dream_tac/README.md)。
+
 ## 专项文档
 
 - [StarVLA-GR00T](frameworks/starvla_groot/README.md)
 - [StarVLA-GR00T DINOAlign](frameworks/starvla_groot_dinoalign/README.md)
+- [Dream-Tac](frameworks/dream_tac/README.md)
 - [Tactile MAE](tac_encoder/tactile_mae/README.md)

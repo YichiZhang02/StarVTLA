@@ -49,3 +49,24 @@ pynput==1.8.1
 pyserial==3.5
 pyudev==0.24.4
 rerun-sdk==0.26.2
+
+# ============================================================
+# Dream-Tac optional dependencies
+# Documentation only: commented entries are not installed by
+# `pip install -r requirements.txt`.
+# See vtla/frameworks/dream_tac/README.md#环境安装.
+#
+# Validated with Python 3.10, PyTorch 2.7.1+cu128, CUDA 12.8,
+# cuDNN 9.7 and NVIDIA A100 (sm_80).
+# ============================================================
+# peft==0.20.0
+# loguru==0.7.3
+# sentencepiece==0.2.1
+# boto3==1.42.70
+# ftfy==6.3.1
+# better-profanity==0.7.0
+# mediapy==1.2.2
+# webdataset==0.2.111
+# hydra-core==1.3.2
+# megatron-core==0.10.0  # Install separately with --no-deps.
+# transformer-engine[pytorch]==2.2.0

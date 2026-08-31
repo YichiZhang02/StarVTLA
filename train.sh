@@ -5,7 +5,7 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
 dataset_id=${1:-260821_boarderaser_to_cup_trainready_rgb640x480_camlr_egor}  # 数据集名
-policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam
+policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac
 
 # 训练配置
 num_processes=${3:-4}
@@ -86,13 +86,14 @@ case "${action_mode}" in
 esac
 
 # 预训练模型路径和基础 VLM 配置
-pretrained_path=
-base_vlm=
+pretrained_path=${PRETRAINED_PATH:-}
+base_vlm=${BASE_VLM:-}
 case "${policy_type}" in
-  pi05)          pretrained_path=playground/pretrained_models/pi05_base ;;
-  starvla_groot|starvla_groot_dinoalign) base_vlm=playground/pretrained_models/Qwen3.5-0.8B ;;
+  pi05)          pretrained_path=${pretrained_path:-playground/pretrained_models/pi05_base} ;;
+  starvla_groot|starvla_groot_dinoalign) base_vlm=${base_vlm:-playground/pretrained_models/Qwen3.5-0.8B} ;;
+  dream_tac)     pretrained_path=playground/pretrained_models/Cosmos-Predict2-2B-Video2World ;;
   act|diffusion|fastwam) : ;;  # 从底座或随机初始化，不加载 VTLA policy checkpoint
-  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam)"; exit 1 ;;
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac)"; exit 1 ;;
 esac
 
 
@@ -112,11 +113,19 @@ case "${policy_type}" in
     extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"
     extra_args="${extra_args} --policy.visualization_enabled=${visualization_enabled}"
     ;;
+  dream_tac)
+    if [ "${tactile_mode}" = "encode" ]; then
+      echo "dream_tac supports tactile_mode=none or as_image, not encode"
+      exit 1
+    fi
+    extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16"
+    extra_args="${extra_args} --policy.visualization_enabled=${visualization_enabled}"
+    ;;
   act|diffusion)
     : # 这两个没有 VLM/dtype 相关字段
     ;;
   *)
-    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam)"; exit 1
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac)"; exit 1
     ;;
 esac
 
@@ -144,7 +153,7 @@ if [ "${tactile_mode}" = "encode" ]; then
 fi
 
 # 触觉时序窗口（encode 和 as_image 均生效；F=1 时完全向后兼容）
-if [ "${tactile_mode}" != "none" ]; then
+if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "dream_tac" ]; then
   extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
   extra_args="${extra_args} --policy.tactile_num_frames=${tactile_num_frames}"
   extra_args="${extra_args} --policy.tactile_frame_offset=${tactile_frame_offset}"
@@ -176,19 +185,31 @@ echo "Output dir: $output_dir"
 echo "Extra args: ${extra_args}"
 
 # wam相关
-WM_List="fastwam"
+WM_List="fastwam dream_tac"
 case " ${WM_List} " in
   *" ${policy_type} "*)
     echo "Video visualization: ${visualization_enabled}"
     for member_root in "${dataset_member_roots[@]}"; do
-      text_embedding_dir="${member_root}/text_embeddings/wan22"
-      if [ -f "${text_embedding_dir}/manifest.json" ] && [ -f "${text_embedding_dir}/embeddings.safetensors" ]; then
+      world_model=wan22
+      [ "${policy_type}" = "dream_tac" ] && world_model=dream_tac
+      text_embedding_dir="${member_root}/text_embeddings/${world_model}"
+      required_assets=("${text_embedding_dir}/manifest.json" "${text_embedding_dir}/embeddings.safetensors")
+      assets_ready=true
+      for required_asset in "${required_assets[@]}"; do
+        [ -f "${required_asset}" ] || assets_ready=false
+      done
+      if [ "${assets_ready}" = "true" ]; then
         echo "Reusing precomputed text embeddings: ${text_embedding_dir}"
       else
         echo "Precomputing text embeddings for ${policy_type}: ${member_root}"
+        precompute_extra_args=()
+        if [ "${policy_type}" = "dream_tac" ]; then
+          precompute_extra_args+=(--pretrained-path "${pretrained_path}")
+        fi
         PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/precompute_world_model_text_embeddings.py \
           --dataset-root "${member_root}" \
-          --world-model wan22 || exit 1
+          --world-model "${world_model}" \
+          "${precompute_extra_args[@]}" || exit 1
       fi
     done
     ;;

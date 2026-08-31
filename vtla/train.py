@@ -257,32 +257,31 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if is_main_process:
         logging.info("Creating policy")
     active_cfg = cfg.trainable_config
-    if getattr(active_cfg, "type", None) == "fastwam":
-        if active_cfg.load_text_encoder and is_main_process:
+    if getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"}:
+        cache_name = "wan22" if active_cfg.type == "fastwam" else "dream_tac"
+        if active_cfg.type == "fastwam" and active_cfg.load_text_encoder and is_main_process:
             logging.warning(
                 "Ignoring load_text_encoder=True for FastWAM training; training always uses cached text contexts."
             )
-        active_cfg.load_text_encoder = False
-        if not cfg.resume:
-            if hasattr(dataset, "text_embedding_cache_dirs"):
-                cache_dirs = dataset.text_embedding_cache_dirs
+        if active_cfg.type == "fastwam":
+            active_cfg.load_text_encoder = False
+        if not cfg.resume or active_cfg.type == "dream_tac":
+            if hasattr(dataset, "roots"):
+                cache_dirs = [Path(root) / "text_embeddings" / cache_name for root in dataset.roots]
             else:
-                cache_dirs = [Path(dataset.root) / "text_embeddings" / "wan22"]
+                cache_dirs = [Path(dataset.root) / "text_embeddings" / cache_name]
             active_cfg.text_embedding_cache_dirs = list(cache_dirs)
             active_cfg.text_embedding_cache_dir = cache_dirs[0] if len(cache_dirs) == 1 else None
-            required_text_assets = [
-                path
-                for cache_dir in cache_dirs
-                for path in (cache_dir / "manifest.json", cache_dir / "embeddings.safetensors")
-            ]
+            asset_names = ["manifest.json", "embeddings.safetensors"]
+            required_text_assets = [cache_dir / name for cache_dir in cache_dirs for name in asset_names]
             missing_text_assets = [path for path in required_text_assets if not path.is_file()]
             if missing_text_assets:
                 raise FileNotFoundError(
-                    "Missing dataset-local Wan2.2 text embeddings: "
-                    f"{missing_text_assets}. Precompute the wan22 cache for each listed dataset root."
+                    f"Missing dataset-local {cache_name} assets: {missing_text_assets}. "
+                    f"Precompute the {cache_name} cache for each listed dataset root."
                 )
             if is_main_process:
-                logging.info("Using dataset-local FastWAM text caches: %s", cache_dirs)
+                logging.info("Using dataset-local %s caches: %s", active_cfg.type, cache_dirs)
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
@@ -321,7 +320,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     accelerator.wait_for_everyone()
 
     active_cfg = cfg.trainable_config
-    processor_pretrained_path = active_cfg.pretrained_path
+    processor_pretrained_path = getattr(
+        active_cfg, "_starvtla_checkpoint_path", active_cfg.pretrained_path
+    )
     # EE modes (episode_ee / absolute_ee / relative_ee), joint relative actions, and FastWAM
     # dataset-local text contexts change the
     # processor's feature dims and steps, so the pretrained/checkpoint processor must NOT be reused —
@@ -340,7 +341,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         getattr(active_cfg, "action_reference", "absolute") == "relative"
         or getattr(active_cfg, "state_mode", "absolute_joint") in _ee_state_modes
         or getattr(active_cfg, "action_mode", "absolute_joint") in _ee_action_modes
-        or (getattr(active_cfg, "type", None) == "fastwam" and not cfg.resume)
+        or (getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"} and not cfg.resume)
     )
     if _needs_rebuilt_processor and processor_pretrained_path is not None:
         logging.warning(
@@ -399,23 +400,24 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         **processor_kwargs,
         **postprocessor_kwargs,
     )
-    if getattr(active_cfg, "type", None) == "fastwam" and not active_cfg.load_text_encoder:
-        fastwam_step = next(
+    if getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"}:
+        prepare_registry_name = f"{active_cfg.type}_prepare_batch"
+        prepare_step = next(
             (
                 processor_step
                 for processor_step in preprocessor.steps
                 if getattr(processor_step.__class__, "_registry_name", None)
-                == "fastwam_prepare_batch"
+                == prepare_registry_name
             ),
             None,
         )
-        if fastwam_step is None:
-            raise RuntimeError("FastWAM preprocessor is missing its prepare-batch step.")
+        if prepare_step is None:
+            raise RuntimeError(f"{active_cfg.type} preprocessor is missing its prepare-batch step.")
         required_tasks = {str(task) for task in dataset.meta.tasks.index}
-        missing_tasks = sorted(required_tasks - set(fastwam_step.task_to_slot))
+        missing_tasks = sorted(required_tasks - set(prepare_step.task_to_slot))
         if missing_tasks:
             raise ValueError(
-                f"FastWAM text caches do not contain all dataset tasks. Missing: {missing_tasks}"
+                f"{active_cfg.type} text caches do not contain all dataset tasks. Missing: {missing_tasks}"
             )
 
     if is_main_process:
@@ -482,7 +484,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     dl_iter = cycle(dataloader)
 
     policy.train()
-    fastwam_visualization_samples = []
+    world_model_visualization_samples = []
 
     train_metrics = {
         "action_loss": AverageMeter("action_loss", ":.3f"),
@@ -539,22 +541,26 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
         batch = preprocessor(batch)
         if (
-            getattr(active_cfg, "type", None) == "fastwam"
+            getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"}
             and active_cfg.visualization_enabled
-            and len(fastwam_visualization_samples) < active_cfg.visualization_num_samples
+            and len(world_model_visualization_samples) < active_cfg.visualization_num_samples
         ):
-            from vtla.frameworks.fastwam.visualization import capture_samples
+            if active_cfg.type == "fastwam":
+                from vtla.frameworks.fastwam.visualization import capture_samples
 
-            fastwam_visualization_samples.extend(
-                capture_samples(
+                captured = capture_samples(
                     batch,
                     tactile_keys=active_cfg.tactile_windowed_keys(),
-                    num_samples=(
-                        active_cfg.visualization_num_samples
-                        - len(fastwam_visualization_samples)
-                    ),
+                    num_samples=active_cfg.visualization_num_samples - len(world_model_visualization_samples),
                 )
-            )
+            else:
+                from vtla.frameworks.dream_tac.visualization import capture_samples
+
+                captured = capture_samples(
+                    batch,
+                    num_samples=active_cfg.visualization_num_samples - len(world_model_visualization_samples),
+                )
+            world_model_visualization_samples.extend(captured)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(
@@ -590,10 +596,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             mixture_sample_counts.zero_()
         is_log_step = is_log_interval and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-        is_fastwam_visualization_step = (
-            getattr(active_cfg, "type", None) == "fastwam"
+        is_world_model_visualization_step = (
+            getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"}
             and active_cfg.visualization_enabled
-            and len(fastwam_visualization_samples) >= active_cfg.visualization_num_samples
+            and len(world_model_visualization_samples) >= active_cfg.visualization_num_samples
             and step % active_cfg.visualization_freq == 0
         )
 
@@ -625,27 +631,29 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
-        if is_fastwam_visualization_step:
+        if is_world_model_visualization_step:
             accelerator.wait_for_everyone()
             if is_main_process:
-                if not fastwam_visualization_samples:
-                    logging.warning("FastWAM visualization skipped because no sample was captured.")
+                if not world_model_visualization_samples:
+                    logging.warning("World-model visualization skipped because no sample was captured.")
                 else:
                     try:
                         unwrapped_policy = accelerator.unwrap_model(policy)
                         visualization_summary = unwrapped_policy.generate_training_visualizations(
-                            fastwam_visualization_samples,
+                            world_model_visualization_samples,
                             output_dir=cfg.output_dir,
                             step=step,
                         )
                         for sample_metrics in visualization_summary["samples"]:
                             logging.info(
-                                "FastWAM visualization sample %d saved to %s",
+                                "%s visualization sample %d saved to %s",
+                                active_cfg.type,
                                 sample_metrics["sample_index"],
                                 sample_metrics["image_path"],
                             )
                         logging.info(
-                            "FastWAM visualization metrics saved to %s",
+                            "%s visualization metrics saved to %s",
+                            active_cfg.type,
                             visualization_summary["metrics_path"],
                         )
                         if wandb_logger:
@@ -654,7 +662,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                             )
                     except Exception:
                         logging.exception(
-                            "FastWAM visualization failed at step %d; training will continue.",
+                            "%s visualization failed at step %d; training will continue.",
+                            active_cfg.type,
                             step,
                         )
             accelerator.wait_for_everyone()

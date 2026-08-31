@@ -17,12 +17,15 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from typing_extensions import Unpack
 
 import torch
+from huggingface_hub.constants import CONFIG_NAME, SAFETENSORS_SINGLE_FILE
 
 from deployment.robots import RobotConfig
 
@@ -50,6 +53,7 @@ from vtla.engine.utils.feature_utils import dataset_to_policy_features
 from .act.configuration_act import ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig
 from .fastwam.configuration_fastwam import FastWAMConfig
+from .dream_tac.configuration_dream_tac import DreamTacConfig
 from .pi05.configuration_pi05 import PI05Config
 from .pretrained import PreTrainedPolicy
 from .sensor_routing import (
@@ -65,6 +69,22 @@ from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
     StarvlaGrootDinoAlignConfig,
 )
 from .utils import validate_visual_features_consistency
+
+
+def _is_dream_tac_policy_checkpoint(path: str | Path | None) -> bool:
+    """Distinguish a local StarVTLA checkpoint from Cosmos base artifacts."""
+    if path is None:
+        return False
+    root = Path(path).expanduser()
+    config_path = root / CONFIG_NAME
+    weights_path = root / SAFETENSORS_SINGLE_FILE
+    if not root.is_dir() or not config_path.is_file() or not weights_path.is_file():
+        return False
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            return json.load(handle).get("type") == "dream_tac"
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def _reconnect_relative_absolute_steps(
@@ -113,6 +133,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .fastwam.modeling_fastwam import FastWAMPolicy
 
         return FastWAMPolicy
+    elif name == "dream_tac":
+        from .dream_tac.modeling_dream_tac import DreamTacPolicy
+
+        return DreamTacPolicy
     elif name == "pi05":
         from .pi05.modeling_pi05 import PI05Policy
 
@@ -159,6 +183,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DiffusionConfig(**kwargs)
     elif policy_type == "fastwam":
         return FastWAMConfig(**kwargs)
+    elif policy_type == "dream_tac":
+        return DreamTacConfig(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
     elif policy_type == "starvla_groot":
@@ -244,6 +270,8 @@ def make_pre_post_processors(
             from .diffusion import processor_diffusion  # noqa: F401
         elif isinstance(policy_cfg, FastWAMConfig):
             from .fastwam import processor_fastwam  # noqa: F401
+        elif isinstance(policy_cfg, DreamTacConfig):
+            from .dream_tac import processor_dream_tac  # noqa: F401
         elif isinstance(policy_cfg, PI05Config):
             from .pi05 import processor_pi05  # noqa: F401
         elif isinstance(policy_cfg, StarvlaGrootConfig):
@@ -344,6 +372,14 @@ def make_pre_post_processors(
         from .fastwam.processor_fastwam import make_fastwam_pre_post_processors
 
         processors = make_fastwam_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, DreamTacConfig):
+        from .dream_tac.processor_dream_tac import make_dream_tac_pre_post_processors
+
+        processors = make_dream_tac_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )
@@ -518,7 +554,15 @@ def make_policy(
     if not cfg.input_features:
         cfg.input_features = {key: ft for key, ft in features.items() if key not in cfg.output_features}
 
-    if cfg.pretrained_path:
+    requested_pretrained_path = cfg.pretrained_path
+    dream_tac_cosmos_initialization = isinstance(
+        cfg, DreamTacConfig
+    ) and not _is_dream_tac_policy_checkpoint(requested_pretrained_path)
+    policy_checkpoint_path = (
+        None if dream_tac_cosmos_initialization else requested_pretrained_path
+    )
+
+    if policy_checkpoint_path:
         # A pretrained checkpoint may have been trained with a different proprioceptive (STATE) dim
         # than the raw dataset (e.g. OpenPI's 32-dim padded state, or a 20-dim EE state). Pull only
         # the NON-VISUAL feature shapes from the ckpt config so the model is built to match the
@@ -528,7 +572,21 @@ def make_policy(
         # For EE state modes apply_state_mode then re-routes observation.state to the dataset's
         # 20-dim EE column anyway, so this only matters for joint/none modes.
         from vtla.engine.configs.policies import PreTrainedConfig as _BaseCfg  # noqa: PLC0415
-        _ckpt_cfg = _BaseCfg.from_pretrained(cfg.pretrained_path)
+        _ckpt_cfg = _BaseCfg.from_pretrained(policy_checkpoint_path)
+        if isinstance(cfg, DreamTacConfig):
+            if not isinstance(_ckpt_cfg, DreamTacConfig):
+                raise ValueError(
+                    "The detected StarVTLA checkpoint is not a Dream-Tac policy."
+                )
+            cfg.validate_checkpoint_layout(_ckpt_cfg)
+            if _ckpt_cfg.pretrained_path is None:
+                raise ValueError(
+                    "Dream-Tac checkpoint does not record its Cosmos pretrained_path."
+                )
+            # Keep the policy checkpoint available to processor loading while the saved
+            # config continues to record the Cosmos source needed to construct the core.
+            cfg._starvtla_checkpoint_path = Path(policy_checkpoint_path)
+            cfg.pretrained_path = _ckpt_cfg.pretrained_path
         for key, ft in (_ckpt_cfg.input_features or {}).items():
             if ft.type is not FeatureType.VISUAL:
                 cfg.input_features[key] = ft
@@ -555,18 +613,18 @@ def make_policy(
     if ds_meta is not None:
         kwargs["dataset_meta"] = ds_meta
 
-    if not cfg.pretrained_path and cfg.use_peft:
+    if not policy_checkpoint_path and cfg.use_peft:
         raise ValueError(
             "Instantiating a policy with `use_peft=True` without a checkpoint is not supported since that requires "
             "the PEFT config parameters to be set. For training with PEFT, see `lerobot_train.py` on how to do that."
         )
 
-    if cfg.pretrained_path and not cfg.use_peft:
+    if policy_checkpoint_path and not cfg.use_peft:
         # Load a pretrained policy and override the config if needed (for example, if there are inference-time
         # hyperparameters that we want to vary).
-        kwargs["pretrained_name_or_path"] = cfg.pretrained_path
+        kwargs["pretrained_name_or_path"] = policy_checkpoint_path
         policy = policy_cls.from_pretrained(**kwargs)
-    elif cfg.pretrained_path and cfg.use_peft:
+    elif policy_checkpoint_path and cfg.use_peft:
         # Load a pretrained PEFT model on top of the policy. The pretrained path points to the folder/repo
         # of the adapter and the adapter's config contains the path to the base policy. So we need the
         # adapter config first, then load the correct policy and then apply PEFT.
@@ -574,7 +632,7 @@ def make_policy(
 
         logging.info("Loading policy's PEFT adapter.")
 
-        peft_pretrained_path = str(cfg.pretrained_path)
+        peft_pretrained_path = str(policy_checkpoint_path)
         peft_config = PeftConfig.from_pretrained(peft_pretrained_path)
 
         kwargs["pretrained_name_or_path"] = peft_config.base_model_name_or_path

@@ -1,6 +1,6 @@
 # StarVTLA
 
-StarVTLA 是面向视觉、触觉和机器人动作学习的训练与真机部署仓库。它包含 LeRobot 数据采集与处理、ACT/Diffusion/pi05/StarVLA-GR00T/FastWAM 策略训练、触觉 MAE 预训练，以及 RealMan 机械臂的在线推理。
+StarVTLA 是面向视觉、触觉和机器人动作学习的训练与真机部署仓库。它包含 LeRobot 数据采集与处理、ACT/Diffusion/pi05/StarVLA-GR00T/FastWAM/Dream-Tac 策略训练、触觉 MAE 预训练，以及 RealMan 机械臂的在线推理。
 
 ## 支持的机器人
 
@@ -250,6 +250,7 @@ bash inference.sh "${pretrained_id}" 5000
 | 对外数据采集、处理与交付规范 | [docs/data_collection_and_handoff_spec_cn.md](docs/data_collection_and_handoff_spec_cn.md) |
 | 独立离线工具 | [tools/README.md](tools/README.md) |
 | Policy、state/action 和触觉路由 | [vtla/README.md](vtla/README.md) |
+| Dream-Tac | [vtla/frameworks/dream_tac/README.md](vtla/frameworks/dream_tac/README.md) |
 | StarVLA-GR00T | [vtla/frameworks/starvla_groot/README.md](vtla/frameworks/starvla_groot/README.md) |
 | StarVLA-GR00T DINOAlign | [vtla/frameworks/starvla_groot_dinoalign/README.md](vtla/frameworks/starvla_groot_dinoalign/README.md) |
 | 触觉 MAE | [vtla/tac_encoder/tactile_mae/README.md](vtla/tac_encoder/tactile_mae/README.md) |
