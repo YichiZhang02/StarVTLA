@@ -29,6 +29,7 @@ omegaconf==2.3.0
 safetensors==0.7.0
 scikit-learn==1.7.2
 scipy==1.15.3
+rich==15.0.0
 timm==1.0.26
 tokenizers==0.22.2
 transformers==5.5.0
@@ -54,7 +55,7 @@ rerun-sdk==0.26.2
 # Dream-Tac optional dependencies
 # Documentation only: commented entries are not installed by
 # `pip install -r requirements.txt`.
-# See vtla/frameworks/dream_tac/README.md#环境安装.
+# See vtla/frameworks/dream_tac/requirements.txt and README.md#最小环境.
 #
 # Validated with Python 3.10, PyTorch 2.7.1+cu128, CUDA 12.8,
 # cuDNN 9.7 and NVIDIA A100 (sm_80).

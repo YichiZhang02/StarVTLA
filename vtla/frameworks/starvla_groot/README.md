@@ -24,6 +24,32 @@
 
 配置使用 Draccus dataclass，不需要 YAML。共享的数据集、`robot_type`、state/action 和触觉约定见 [VTLA Training](../../README.md)。
 
+## 最小环境
+
+当前仓库验证基线为 Python 3.10.19、PyTorch 2.7.1+cu128、torchvision
+0.22.1+cu128 和 CUDA 12.8。该 policy 的核心额外依赖是 `transformers==5.5.0`、
+`diffusers==0.35.2` 和 `safetensors==0.7.0`，均已固定在仓库根目录的
+`requirements.txt`。
+
+```bash
+conda create -n starvtla-groot python=3.10 -y
+conda activate starvtla-groot
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+```
+
+安装检查：
+
+```bash
+python -c "import torch, transformers, diffusers; from vtla.frameworks.starvla_groot.modeling_starvla_groot import StarvlaGrootPolicy; print(torch.__version__, transformers.__version__)"
+```
+
+默认 `dtype=bfloat16`，正式训练需要支持 BF16 的 CUDA GPU。非 CUDA 12.8 环境应从 PyTorch
+官方索引选择匹配 wheel，并保持 torch/torchvision 版本配对。默认 attention 实现是 PyTorch
+`sdpa`，不要求安装 FlashAttention；只有显式设置 `attn_implementation=flash_attention_2` 时才需要
+额外安装与当前 torch/CUDA ABI 匹配的 `flash-attn`。
+
 ## 训练
 
 推荐使用根目录包装脚本，它会从数据集自动推断相机 key，并把数据集 `robot_type` 写入 checkpoint：

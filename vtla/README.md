@@ -8,13 +8,13 @@
 
 | `policy_type` | 初始化 | 说明 |
 | --- | --- | --- |
-| `act` | 随机初始化 | Transformer action chunk policy |
-| `diffusion` | 随机初始化 | Conditional diffusion policy |
-| `pi05` | 本地 `pi05_base` | VLM prefix + flow-matching action expert |
-| `starvla_groot` | 本地 Qwen3.5-0.8B | Qwen vision-language backbone + GR00T action head |
-| `starvla_groot_dinoalign` | Qwen3.5 + DINOv3 teacher | 训练期视觉对齐，部署不加载 teacher |
-| `fastwam` | 本地 Wan2.2 组件 | 联合视频与动作生成的 world-action model |
-| `dream_tac` | 本地 Cosmos-Predict2-2B-Video2World | 联合 RGB、触觉、状态和动作生成的 world-action model |
+| [`act`](frameworks/act/README.md) | 随机初始化 | Transformer action chunk policy |
+| [`diffusion`](frameworks/diffusion/README.md) | 随机初始化 | Conditional diffusion policy |
+| [`pi05`](frameworks/pi05/README.md) | 本地 `pi05_base` | VLM prefix + flow-matching action expert |
+| [`starvla_groot`](frameworks/starvla_groot/README.md) | 本地 Qwen3.5-0.8B | Qwen vision-language backbone + GR00T action head |
+| [`starvla_groot_dinoalign`](frameworks/starvla_groot_dinoalign/README.md) | Qwen3.5 + DINOv3 teacher | 训练期视觉对齐，部署不加载 teacher |
+| [`fastwam`](frameworks/fastwam/README.md) | 本地 Wan2.2 组件 | 联合视频与动作生成的 world-action model |
+| [`dream_tac`](frameworks/dream_tac/README.md) | 本地 Cosmos-Predict2-2B-Video2World | 联合 RGB、触觉、状态和动作生成的 world-action model |
 
 ## 训练命令
 
@@ -177,7 +177,7 @@ TACTILE_KEYS='[observation.images.left_cam_finger0,observation.images.left_cam_f
 | StarVLA-GR00T | hidden-state context | 独立图像视角 |
 | DINOAlign | hidden-state context | 独立图像并参与训练期对齐 |
 | Diffusion | global conditioning | 不支持 |
-| FastWAM | Video DiT 或 action DiT context | 不支持 |
+| FastWAM | Video DiT 或 action DiT context | Wan VAE history token，要求插入 encoder |
 
 触觉 backbone 训练见 [Tactile MAE](tac_encoder/tactile_mae/README.md)。
 训练初始化后，backbone 结构写入 policy 的 `config.json`，权重写入

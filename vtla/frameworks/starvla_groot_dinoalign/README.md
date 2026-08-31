@@ -4,6 +4,30 @@
 
 共享的数据集、`robot_type`、state/action 和触觉契约见 [VTLA Training](../../README.md)。
 
+## 最小环境
+
+当前仓库验证基线为 Python 3.10.19、PyTorch 2.7.1+cu128、torchvision
+0.22.1+cu128 和 CUDA 12.8。除 StarVLA-GR00T 的 `transformers==5.5.0`、
+`diffusers==0.35.2` 外，训练期 teacher 还要求 `timm==1.0.26`。这些版本均固定在根目录
+`requirements.txt`。
+
+```bash
+conda create -n starvtla-dinoalign python=3.10 -y
+conda activate starvtla-dinoalign
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+```
+
+安装检查：
+
+```bash
+python -c "import torch, transformers, diffusers, timm; from vtla.frameworks.starvla_groot_dinoalign.modeling_starvla_groot_dinoalign import StarvlaGrootDinoAlignPolicy; print(torch.__version__, timm.__version__)"
+```
+
+默认 student 与 teacher 都使用 BF16，训练需要支持 BF16 的 CUDA GPU。推理不构造 DINO teacher，
+但仍使用 Qwen 与 GR00T action head 的运行依赖。
+
 ## 对齐路径
 
 ```text
@@ -107,11 +131,13 @@ hidden:     768
 dtype:      bfloat16
 ```
 
-checkpoint 可以是 timm 权重文件，也可以是包含 `model.safetensors` 或 `pytorch_model.bin` 的目录。通过环境变量覆盖：
+checkpoint 可以是 timm 权重文件，也可以是包含 `model.safetensors` 或 `pytorch_model.bin` 的目录。
+通过环境变量覆盖：
 
 ```bash
 DINOV3_CHECKPOINT=/path/to/dinov3 \
-  bash train.sh <dataset_id> starvla_groot_dinoalign
+  bash train.sh <dataset_id> starvla_groot_dinoalign 1 4 20000 \
+  true none absolute_joint absolute_joint 6 none
 ```
 
 ## 训练
@@ -119,7 +145,8 @@ DINOV3_CHECKPOINT=/path/to/dinov3 \
 最小命令：
 
 ```bash
-bash train.sh <dataset_id> starvla_groot_dinoalign
+bash train.sh <dataset_id> starvla_groot_dinoalign 1 4 20000 \
+  true none absolute_joint absolute_joint 6 none
 ```
 
 完整示例：

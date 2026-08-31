@@ -5,10 +5,10 @@ StarVTLA 的 Dream-Tac policy 使用 Cosmos-Predict2-2B-Video2World 作为生成
 checkpoint 和部署接口。Cosmos Policy 源码位于 `vendor/cosmos_policy/`，运行时不依赖
 `ref_repo/` 或系统安装的 `cosmos-policy` 包。
 
-## 环境安装
+## 最小环境
 
-Dream-Tac 是可选 policy，因此它的额外依赖以注释形式记录在仓库根目录
-`requirements.txt`，不会被默认的 `pip install -r requirements.txt` 安装。当前验证环境为：
+Dream-Tac 是可选 policy，因此它的额外依赖位于当前目录的 `requirements.txt`，不会被默认的
+`pip install -r requirements.txt` 安装。当前验证环境为：
 
 ```text
 Python 3.10
@@ -18,15 +18,15 @@ cuDNN 9.7
 NVIDIA A100 (sm_80)
 ```
 
-先安装 StarVTLA 的通用依赖和与当前 CUDA 匹配的 PyTorch，再安装 Dream-Tac 依赖：
+从仓库根目录先安装与当前 CUDA 匹配的 PyTorch、StarVTLA 通用依赖，再安装 Dream-Tac 依赖：
 
 ```bash
-python -m pip install \
-  peft==0.20.0 loguru==0.7.3 sentencepiece==0.2.1 \
-  boto3==1.42.70 ftfy==6.3.1 better-profanity==0.7.0 \
-  mediapy==1.2.2 webdataset==0.2.111 hydra-core==1.3.2 \
-  "transformer-engine[pytorch]==2.2.0"
-
+conda create -n starvtla-dream-tac python=3.10 -y
+conda activate starvtla-dream-tac
+python -m pip install torch==2.7.1 torchvision==0.22.1 \
+  --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+python -m pip install -r vtla/frameworks/dream_tac/requirements.txt
 python -m pip install --no-deps megatron-core==0.10.0
 ```
 

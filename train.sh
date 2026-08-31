@@ -88,6 +88,7 @@ esac
 # 预训练模型路径和基础 VLM 配置
 pretrained_path=${PRETRAINED_PATH:-}
 base_vlm=${BASE_VLM:-}
+dinov3_checkpoint=${DINOV3_CHECKPOINT:-}
 case "${policy_type}" in
   pi05)          pretrained_path=${pretrained_path:-playground/pretrained_models/pi05_base} ;;
   starvla_groot|starvla_groot_dinoalign) base_vlm=${base_vlm:-playground/pretrained_models/Qwen3.5-0.8B} ;;
@@ -108,6 +109,9 @@ case "${policy_type}" in
     ;;
   starvla_groot_dinoalign)
     extra_args="${extra_args} --policy.dtype=bfloat16 --policy.gradient_checkpointing=false --policy.base_vlm=${base_vlm}"
+    if [ -n "${dinov3_checkpoint}" ]; then
+      extra_args="${extra_args} --policy.dinov3_checkpoint=${dinov3_checkpoint}"
+    fi
     ;;
   fastwam)
     extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"

@@ -245,20 +245,21 @@ bash inference.sh "${pretrained_id}" 5000 async rm_isf_umi_left
 当 checkpoint 的 `robot_type=umi` 时，必须把具体物理机器人类型作为 `inference.sh` 第 4 个参数
 显式传入；此时以 CLI 为准。两种情况都会启用对应 B/ISF 构型的在线 FK/IK。
 
-## 文档
 
-| 内容 | 文档 |
+## VTLA模型文档
+
+| 模型 | 文档 |
 | --- | --- |
-| 本地数据、权重和输出布局 | [playground/README.md](playground/README.md) |
-| 机器人、SDK、采集、推理和安全 | [deployment/README.md](deployment/README.md) |
-| 数据处理和训练脚本 | [scripts/README.md](scripts/README.md) |
-| 对外数据采集、处理与交付规范 | [docs/data_collection_and_handoff_spec_cn.md](docs/data_collection_and_handoff_spec_cn.md) |
-| 独立离线工具 | [tools/README.md](tools/README.md) |
-| Policy、state/action 和触觉路由 | [vtla/README.md](vtla/README.md) |
-| Dream-Tac | [vtla/frameworks/dream_tac/README.md](vtla/frameworks/dream_tac/README.md) |
+| ACT | [vtla/frameworks/act/README.md](vtla/frameworks/act/README.md) |
+| Diffusion Policy | [vtla/frameworks/diffusion/README.md](vtla/frameworks/diffusion/README.md) |
+| pi0.5 | [vtla/frameworks/pi05/README.md](vtla/frameworks/pi05/README.md) |
 | StarVLA-GR00T | [vtla/frameworks/starvla_groot/README.md](vtla/frameworks/starvla_groot/README.md) |
 | StarVLA-GR00T DINOAlign | [vtla/frameworks/starvla_groot_dinoalign/README.md](vtla/frameworks/starvla_groot_dinoalign/README.md) |
-| 触觉 MAE | [vtla/tac_encoder/tactile_mae/README.md](vtla/tac_encoder/tactile_mae/README.md) |
+| FastWAM | [vtla/frameworks/fastwam/README.md](vtla/frameworks/fastwam/README.md) |
+| Dream-Tac | [vtla/frameworks/dream_tac/README.md](vtla/frameworks/dream_tac/README.md) |
+
+
+
 
 ## Git Usage
 ```bash
