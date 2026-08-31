@@ -3,7 +3,7 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260829_rm_isf_umi_left_20260828_insert_usb_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
+pretrained_id=${1:-20260827_rm_isf_umi_left_20260825_assemble_gearL_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
 step=${2:-10000}
 
 robot_type=${3:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
@@ -20,6 +20,9 @@ home_duration_s=4.0                       # 平滑复位耗时（秒）
 # 任务描述
 single_task=${8:-}                        # 任务描述，留空则自动匹配
 
+# 推理调度
+inference_mode=${9:-async}                 # sync=同步推理; async=异步推理
+
 max_ee_pos_step=0.1                      # 关节角限速
 # ===============================================
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
@@ -35,6 +38,14 @@ fi
 robot_type=${robot_type:-rm_base_umi_dual}
 echo "测试policy: ${policy_path}"
 echo "动作下发目标频率: ${control_fps} Hz"
+case "${inference_mode}" in
+  sync|async) ;;
+  *)
+    echo "错误: inference_mode 必须是 sync 或 async，当前为: ${inference_mode}" >&2
+    exit 1
+    ;;
+esac
+echo "推理调度模式: ${inference_mode}"
 
 # 按时间命名: local/<时间戳>_<基础名>
 name=${pretrained_id}_step_${step}    
@@ -47,6 +58,7 @@ set -- python -m deployment.inference \
   "--policy.path=${policy_path}" \
   "--dataset.repo_id=${repo_id}" \
   "--dataset.fps=${control_fps}" \
+  "--inference_mode=${inference_mode}" \
   "--match_policy=true" \
   "--reset_before_episode=${reset_before_episode}" \
   "--robot.home_duration_s=${home_duration_s}" \

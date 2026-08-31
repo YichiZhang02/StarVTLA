@@ -141,6 +141,62 @@ def predict_action(
     return action
 
 
+def preprocess_policy_observation(
+    observation: dict[str, np.ndarray],
+    device: torch.device,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    task: str | None = None,
+    robot_type: str | None = None,
+):
+    """Update a stateful online preprocessor without running the policy."""
+    observation = copy(observation)
+    with torch.inference_mode():
+        observation = prepare_observation_for_inference(observation, device, task, robot_type)
+        return preprocessor(observation)
+
+
+def predict_action_chunk(
+    observation: dict[str, np.ndarray],
+    policy: PreTrainedPolicy,
+    device: torch.device,
+    preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction],
+    use_amp: bool,
+    task: str | None = None,
+    robot_type: str | None = None,
+):
+    """Predict and postprocess one complete action chunk from one observation anchor."""
+    observation = copy(observation)
+    with (
+        torch.inference_mode(),
+        torch.autocast(device_type=device.type) if device.type == "cuda" and use_amp else nullcontext(),
+    ):
+        observation = prepare_observation_for_inference(observation, device, task, robot_type)
+        observation = preprocessor(observation)
+
+        # Async inference bypasses policy.select_action(), so lock the relative-action
+        # anchor explicitly before predicting and decoding the complete chunk.
+        for step in preprocessor.steps:
+            if isinstance(step, RelativeActionsProcessorStep) and step.enabled:
+                step.lock_action_anchor()
+
+        actions = policy.predict_action_chunk(observation)
+        if actions.ndim != 3:
+            raise ValueError(
+                f"predict_action_chunk must return (batch, time, action), got {tuple(actions.shape)}"
+            )
+        offset = int(getattr(policy.config, "action_start_offset", 0))
+        count = int(getattr(policy.config, "n_action_steps", actions.shape[1] - offset))
+        if offset < 0 or count <= 0 or offset + count > actions.shape[1]:
+            raise ValueError(
+                "Invalid async action slice: "
+                f"offset={offset}, n_action_steps={count}, predicted_steps={actions.shape[1]}"
+            )
+        actions = postprocessor(actions[:, offset : offset + count])
+
+    return actions
+
+
 def init_keyboard_listener():
     """
     Initializes a non-blocking keyboard listener for real-time user interaction.

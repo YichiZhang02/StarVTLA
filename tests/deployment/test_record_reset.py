@@ -102,13 +102,13 @@ def test_up_starts_episode_without_reset(monkeypatch):
     assert events["start_episode"] is False
 
 
-def test_wait_for_inflight_policy_action_uses_ten_control_periods(monkeypatch):
+def test_wait_for_inflight_policy_action_has_no_artificial_delay(monkeypatch):
     waits = []
     monkeypatch.setattr(_record_engine, "busy_wait", waits.append)
 
     _record_engine.wait_for_inflight_policy_action(fps=30)
 
-    assert waits == [10 / 30]
+    assert waits == [0.0]
 
 
 def test_right_resets_before_save(monkeypatch):

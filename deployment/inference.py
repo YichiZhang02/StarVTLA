@@ -54,6 +54,16 @@ class InferenceConfig(RecordConfig):
     match_policy: bool = True
     # 默认每个推理 episode 复位，也允许调用方显式关闭。
     reset_before_episode: bool = True
+    # sync 保留现有 record_loop；async 使用最新观测持续推理和完整 chunk 调度。
+    inference_mode: str = "sync"
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.inference_mode = self.inference_mode.lower()
+        if self.inference_mode not in {"sync", "async"}:
+            raise ValueError(
+                f"inference_mode must be 'sync' or 'async', got {self.inference_mode!r}"
+            )
 
 
 def _task_from_checkpoint(pretrained_path: str) -> str | None:
@@ -289,6 +299,15 @@ def _resolve_action_space(cfg: InferenceConfig) -> None:
                 f"{cfg.robot.action_space}")
 
 
+def _run_inference_mode(cfg: InferenceConfig):
+    if cfg.inference_mode == "sync":
+        return run_record(cfg)
+
+    from deployment._async_inference import run_async_record
+
+    return run_async_record(cfg)
+
+
 @parser.wrap()
 def inference(cfg: InferenceConfig):
     # 注意: policy 由 RecordConfig.__post_init__ 从 --policy.path 加载, 解析后即就绪
@@ -315,7 +334,7 @@ def inference(cfg: InferenceConfig):
     # 钉在底行的保存提示 (推理时容易被日志刷掉)
     hint = " \033[30;43m 推理中 ↑开始 | →复位并保存 | ←复位并重录 | ESC退出 \033[0m"
     with StickyHint(hint):
-        return run_record(cfg)
+        return _run_inference_mode(cfg)
 
 
 def main():

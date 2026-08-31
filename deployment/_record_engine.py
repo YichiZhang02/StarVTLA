@@ -292,11 +292,11 @@ def wait_for_episode_start(
 
 
 def wait_for_inflight_policy_action(fps: int) -> None:
-    """Temporarily allow ten control periods for submitted policy motion to settle."""
-    wait_frames = 10
+    """Apply the configured reset pre-delay before starting home motion."""
+    wait_frames = 0
     wait_s = wait_frames / fps
     logging.info(
-        "[reset] 等待最后一个已下发模型动作完成: %.3fs (%d 帧, %d Hz)",
+        "[reset] 复位前人为等待: %.3fs (%d 帧, %d Hz)",
         wait_s,
         wait_frames,
         fps,
@@ -425,6 +425,7 @@ class StreamPolicyMeta:
     """用于 stream 模式下 policy 初始化的轻量 ds_meta 占位对象。"""
     features: dict[str, dict[str, Any]]
     stats: dict[str, Any] | None = None
+    robot_type: str | None = None
 
 
 def resolve_compute_stats(save_mode: str, compute_stats: bool | None) -> bool:
@@ -970,7 +971,11 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
             ds_meta_for_policy = dataset.meta
             dataset_stats = rename_stats(dataset.meta.stats, cfg.dataset.rename_map)
         else:
-            ds_meta_for_policy = StreamPolicyMeta(features=record_features, stats=None)
+            ds_meta_for_policy = StreamPolicyMeta(
+                features=record_features,
+                stats=None,
+                robot_type=robot.robot_type,
+            )
             dataset_stats = rename_stats({}, cfg.dataset.rename_map)
         policy = make_policy(cfg.policy, ds_meta=ds_meta_for_policy)
     else:
