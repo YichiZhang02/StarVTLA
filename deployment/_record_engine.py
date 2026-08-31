@@ -291,6 +291,19 @@ def wait_for_episode_start(
     return True
 
 
+def wait_for_inflight_policy_action(fps: int) -> None:
+    """Temporarily allow ten control periods for submitted policy motion to settle."""
+    wait_frames = 10
+    wait_s = wait_frames / fps
+    logging.info(
+        "[reset] 等待最后一个已下发模型动作完成: %.3fs (%d 帧, %d Hz)",
+        wait_s,
+        wait_frames,
+        fps,
+    )
+    busy_wait(wait_s)
+
+
 def reset_then_finalize_episode(
     *,
     robot: Robot,
@@ -1066,6 +1079,13 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                         ),
                     )
 
+                    if (
+                        policy is not None
+                        and cfg.reset_before_episode
+                        and not events["stop_recording"]
+                    ):
+                        wait_for_inflight_policy_action(cfg.dataset.fps)
+
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()
 
@@ -1180,6 +1200,13 @@ def run_record(cfg: RecordConfig) -> LeRobotDataset | None:
                             getattr(cfg, "drag_gripper_close_value", 0.0)
                         ),
                     )
+
+                    if (
+                        policy is not None
+                        and cfg.reset_before_episode
+                        and not events["stop_recording"]
+                    ):
+                        wait_for_inflight_policy_action(cfg.dataset.fps)
 
                     if drag_mode and cfg.reset_before_episode:
                         stop_force_drag()

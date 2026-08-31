@@ -3,14 +3,14 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260827_rm_isf_umi_left_20260825_assemble_gearL_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
+pretrained_id=${1:-20260829_rm_isf_umi_left_20260828_insert_usb_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
 step=${2:-10000}
 
 robot_type=${3:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
 
 # 动作配置
 n_action_steps=${4:-16}
-action_start_offset=${5:-0}
+action_start_offset=${5:-6}
 control_fps=${6:-30}                      # 机器人动作下发目标频率 (Hz, 正整数)
 
 # 复位选项
