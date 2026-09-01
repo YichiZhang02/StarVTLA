@@ -5,11 +5,11 @@ cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效,
 # =================== 可调参数 ===================
 robot_type=rm_isf_umi_left                    # rm_base_umi_dual | rm_isf_umi_left
 
-name=${1:-insert_usb}                # 数据集基础名
-single_task=${2:-"insert the usb to the hole"}        # 任务文字描述 (会写入每一帧)
+name=${1:-wipe_board}                # 数据集基础名
+single_task=${2:-"wipe the board"}        # 任务文字描述 (会写入每一帧)
 num_episodes=${3:-100}                      # 录制集数
 mode=${4:-drag}                          # teleop | drag
-drag_gripper_close_value=${5:-0.0}         # 0=最紧, 1=全开
+drag_gripper_close_value=${5:-0.3}         # 0=最紧, 1=全开
 
 # 复位选项
 reset_before_episode=${6:-true}           # true=按左右键结束时先复位确认，再保存或重录

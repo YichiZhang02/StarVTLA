@@ -7,8 +7,8 @@
 - 主臂夹爪 → 从臂夹爪 (领控夹爪通过 gRPC/CAN)
 
 配置:
-- 左臂从臂 IP: 192.168.1.200, 夹爪 gRPC: 192.168.1.10:55551
-- 右臂从臂 IP: 192.168.1.201, 夹爪 gRPC: 192.168.1.11:55551
+- 左臂从臂 IP: 192.168.1.201, 夹爪 gRPC: 192.168.1.11:55551
+- 右臂从臂 IP: 192.168.1.200, 夹爪 gRPC: 192.168.1.10:55551
 - 左主臂串口: /dev/ttyRealmanBaseLeaderL
 - 右主臂串口: /dev/ttyRealmanBaseLeaderR
 
@@ -57,18 +57,18 @@ signal.signal(signal.SIGINT, signal_handler)
 # 配置参数
 # ============================================================
 # 左臂配置
-LEFT_FOLLOWER_IP = "192.168.1.200"
+LEFT_FOLLOWER_IP = "192.168.1.201"
 LEFT_FOLLOWER_PORT = 8080
 LEFT_LEADER_PORT = "/dev/ttyRealmanBaseLeaderL"
 LEFT_LEADER_PORT_ALT = "/dev/ttyUSB0"  # 备用端口（没有udev规则时）
-LEFT_GRIPPER_SERVER = "192.168.1.10:55551"
+LEFT_GRIPPER_SERVER = "192.168.1.11:55551"
 
 # 右臂配置
-RIGHT_FOLLOWER_IP = "192.168.1.201"
+RIGHT_FOLLOWER_IP = "192.168.1.200"
 RIGHT_FOLLOWER_PORT = 8080
 RIGHT_LEADER_PORT = "/dev/ttyRealmanBaseLeaderR"
 RIGHT_LEADER_PORT_ALT = "/dev/ttyUSB1"  # 备用端口
-RIGHT_GRIPPER_SERVER = "192.168.1.11:55551"
+RIGHT_GRIPPER_SERVER = "192.168.1.10:55551"
 
 # CAN 配置
 CAN_INTERFACE = "can0"

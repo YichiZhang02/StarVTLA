@@ -4,7 +4,7 @@
 
 用法:
     python -m deployment.tools.read_home_joints
-    python -m deployment.tools.read_home_joints --left-ip 192.168.1.200 --right-ip 192.168.1.201
+    python -m deployment.tools.read_home_joints --left-ip 192.168.1.201 --right-ip 192.168.1.200
 
 输出示例:
     {"left_main_joint1": -0.091996, ..., "right_main_joint7": 0.111946}
@@ -38,8 +38,8 @@ def read_side(ip: str, port: int, side: str) -> dict[str, float]:
 
 def main():
     ap = argparse.ArgumentParser(description="读取双臂当前关节位置 JSON")
-    ap.add_argument("--left-ip",  default="192.168.1.200")
-    ap.add_argument("--right-ip", default="192.168.1.201")
+    ap.add_argument("--left-ip",  default="192.168.1.201")
+    ap.add_argument("--right-ip", default="192.168.1.200")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--side", choices=["left", "right", "both"], default="both")
     args = ap.parse_args()

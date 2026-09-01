@@ -44,19 +44,19 @@ PANEL_H = 360  # 每个画面显示高度
 
 ARMS = {
     "left": {
-        "ip": "192.168.1.10",
+        "ip": "192.168.1.11",
         "fisheye": {"grpc_port": 50088, "udp_port": 50100},
         "tactiles": [
-            {"name": "tac0", "remote": "192.168.1.10:50051", "dev_id": 0, "pc_port": 60000},
-            {"name": "tac1", "remote": "192.168.1.10:50052", "dev_id": 2, "pc_port": 60001},
+            {"name": "tac0", "remote": "192.168.1.11:50051", "dev_id": 0, "pc_port": 60000},
+            {"name": "tac1", "remote": "192.168.1.11:50052", "dev_id": 2, "pc_port": 60001},
         ],
     },
     "right": {
-        "ip": "192.168.1.11",
+        "ip": "192.168.1.10",
         "fisheye": {"grpc_port": 50088, "udp_port": 50101},
         "tactiles": [
-            {"name": "tac0", "remote": "192.168.1.11:50051", "dev_id": 0, "pc_port": 60002},
-            {"name": "tac1", "remote": "192.168.1.11:50052", "dev_id": 2, "pc_port": 60003},
+            {"name": "tac0", "remote": "192.168.1.10:50051", "dev_id": 0, "pc_port": 60002},
+            {"name": "tac1", "remote": "192.168.1.10:50052", "dev_id": 2, "pc_port": 60003},
         ],
     },
 }

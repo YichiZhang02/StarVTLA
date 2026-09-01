@@ -18,8 +18,8 @@
 睿尔曼 RM75b 双臂 (ugripper 集成版) 配置类
 
 每条手臂的设备:
-    - 从臂 (Follower): TCP/IP 网线  (左 192.168.1.200 / 右 192.168.1.201, 端口 8080)
-    - 领控电爪 (Gripper): gRPC/CAN  (左 192.168.1.10:55551 / 右 192.168.1.11:55551)
+    - 从臂 (Follower): TCP/IP 网线  (左 192.168.1.201 / 右 192.168.1.200, 端口 8080)
+    - 领控电爪 (Gripper): gRPC/CAN  (左 192.168.1.11:55551 / 右 192.168.1.10:55551)
     - 手腕鱼眼相机: fish_camera gRPC(50088) + UDP, 原生 1920x1080
     - 触觉传感器 x2: dmrobotics Flux gRPC(50051/50052), 输出 (288,384,3) uint16
 
@@ -59,13 +59,13 @@ class RmBaseUmiDualConfig(RobotConfig):
     use_tactile: bool = True
 
     # ============ 从臂 (Follower - TCP/IP) ============
-    left_follower_ip: str = "192.168.1.200"
-    right_follower_ip: str = "192.168.1.201"
+    left_follower_ip: str = "192.168.1.201"
+    right_follower_ip: str = "192.168.1.200"
     follower_tcp_port: int = 8080
 
     # ============ 每臂板子 IP (鱼眼/触觉/夹爪代理) ============
-    left_board_ip: str = "192.168.1.10"
-    right_board_ip: str = "192.168.1.11"
+    left_board_ip: str = "192.168.1.11"
+    right_board_ip: str = "192.168.1.10"
 
     # ============ 领控电爪 (gRPC/CAN via 板子) ============
     gripper_grpc_port: int = 55551

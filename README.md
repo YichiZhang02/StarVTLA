@@ -62,6 +62,7 @@ robot_type=rm_isf_umi_left
 第一步检查机械臂、末端板和主臂串口是否存在，不会驱动机械臂：
 
 ```bash
+robot_type=rm_base_umi_dual
 python -m deployment.tools.hardware_check \
   --robot-type "${robot_type}" \
   --stage existence
