@@ -22,7 +22,7 @@ action_mode=${9:-absolute_joint}  # absolute_joint | relative_joint | absolute_r
 action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
 
 # 数据增强
-augmentation_mode=${11:-strong}  # none | mild | strong
+augmentation_mode=${11:-strong}  # none | color | mild | strong
 color_temp_range=${COLOR_TEMP_RANGE-'[0,0]'}  # 色温增强 [min,max] (逗号后不要空格)
 
 # 触觉encoder配置（仅 tactile_mode=encode 时生效）
