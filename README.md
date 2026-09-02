@@ -145,7 +145,7 @@ TASK="Put the board eraser into the cup." \
 ```
 
 输出为 `<dataset_id>_processed`，相机统一为一组 top + 两组 wrist，数据集和后续 checkpoint 的
-`robot_type` 都保持 `umi`。该流程不依赖无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
+`robot_type` 都保持 `umi`。当前脚本显式使用 `--tactile-mode none`，不会复制触觉媒体，也会清除相应 metadata；该流程不依赖无效 joint 字段，推荐使用 episode EE state 和 relative EE action。
 
 #### 2.3 处理 Backbone 数据（可选）
 

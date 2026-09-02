@@ -29,7 +29,7 @@ undistort_dataset_videos.py
   -> convert_joints_to_eepose.py
 ```
 
-unified-format UMI v2.5 数据使用 `process_umi_data.py` 一次完成 key、metadata、视频、task、夹爪和 EE 转换；其中 `_undist` 相机已由来源数据完成去畸变。
+unified-format UMI v2.5 数据使用 `process_umi_data.py` 一次完成 key、metadata、视频、task、夹爪和 EE 转换；其中 `_undist` 相机已由来源数据完成去畸变。当前显式使用 `--tactile-mode none`：只输出 top + 双腕 RGB，并从全部 metadata 中移除未复制的触觉及旧相机声明。
 
 ## 鱼眼去畸变
 
@@ -153,12 +153,14 @@ python tools/process_umi_data.py \
   --src playground/data/<dataset_id> \
   --dst playground/data/<dataset_id>_processed \
   --task "Put the board eraser into the cup." \
-  --size 256 --horizon 32 --action-gap 6 --jobs 12
+  --size 256 --horizon 32 --action-gap 6 --jobs 12 \
+  --tactile-mode none
 ```
 
 它要求 v2.5 的三路 `_undist` 相机和左右 pose/gripper 字段，输出
 `robot_type=umi`、标准相机 key、8 个 EE feature、relative stats 及处理 manifest。源数据和失败时的
 partial 目录都会保留。若不同数据集必须共享夹爪尺度，可显式传入每侧 open/closed 四个参数。
+当前 UMI 导入器只支持 `tactile-mode=none`；需要触觉时应先实现触觉媒体转换和解码契约，不能仅保留源数据中的 `dtype=tactile` 声明。
 
 仅对已经具有正确 key、task、视频同步和 metadata 的数据集原地补 EE 列时，才直接运行：
 
