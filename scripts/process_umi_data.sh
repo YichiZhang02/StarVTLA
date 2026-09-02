@@ -40,6 +40,7 @@ python tools/process_umi_data.py \
   --size "${size}" \
   --horizon "${horizon}" \
   --action-gap "${action_gap}" \
+  --tactile-mode none \
   --jobs "${jobs}" \
   "${gripper_args[@]}"
 

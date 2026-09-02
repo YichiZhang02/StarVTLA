@@ -235,8 +235,14 @@ class ImageTransformConfig:
 
 _AUGMENTATION_PRESETS: dict[str, dict] = {
     # preset name -> overrides applied in ImageTransformsConfig.__post_init__
-    # Only brightness and contrast ranges differ between presets; other transforms stay at their defaults.
+    # Presets can override ranges and optionally restrict the active transform set.
     "none":   {"enable": False},
+    "color":  {
+        "enable": True,
+        "brightness": (0.8, 1.2),
+        "contrast": (0.8, 1.2),
+        "only": ("brightness", "contrast", "saturation"),
+    },
     "mild":   {"enable": True, "brightness": (0.8, 1.2), "contrast": (0.8, 1.2)},
     "strong": {"enable": True, "brightness": (0.5, 1.5), "contrast": (0.5, 1.5)},
 }
@@ -252,14 +258,15 @@ class ImageTransformsConfig:
 
     Use `preset` to pick a named brightness/contrast level:
       - "none"    : augmentation disabled
-      - "default" : brightness=(0.8, 1.2), contrast=(0.8, 1.2)
-      - "mild"    : brightness=(0.5, 1.5), contrast=(0.5, 1.5)
+      - "color"   : brightness/contrast/saturation only
+      - "mild"    : brightness=(0.8, 1.2), contrast=(0.8, 1.2)
+      - "strong"  : brightness=(0.5, 1.5), contrast=(0.5, 1.5)
     Setting `preset` overrides both `enable` and the brightness/contrast kwargs.
     Leave `preset` empty ("") to configure `enable` and `tfs` manually.
     """
 
     # Named preset — takes precedence over `enable` and brightness/contrast ranges when non-empty.
-    # Allowed values: "none" | "default" | "mild" | "" (manual).
+    # Allowed values: "none" | "color" | "mild" | "strong" | "" (manual).
     preset: str = "none"
     # Color-temperature (white-balance) augmentation range as (min, max), sampled uniformly.
     #   temp > 0 -> warmer (boost R, cut B, "偏黄/暖");  temp < 0 -> cooler ("偏蓝/冷").
@@ -330,6 +337,11 @@ class ImageTransformsConfig:
                 self.tfs["brightness"].kwargs["brightness"] = p["brightness"]
             if "contrast" in p:
                 self.tfs["contrast"].kwargs["contrast"] = p["contrast"]
+            if "only" in p:
+                enabled_names = set(p["only"])
+                for name, tf_cfg in self.tfs.items():
+                    if name not in enabled_names:
+                        tf_cfg.weight = 0.0
 
         # 2) Wire up color-temperature augmentation independently of the preset.
         #    When set, it always turns on the color_temp transform. If the base
@@ -341,6 +353,7 @@ class ImageTransformsConfig:
                 raise ValueError(
                     f"color_temp must be a (min, max) range with min <= max, got {self.color_temp}"
                 )
+        if self.color_temp is not None and tuple(self.color_temp) != (0, 0):
             base_enabled = self.enable
             self.tfs["color_temp"].weight = 1.0
             self.tfs["color_temp"].kwargs["temperature"] = tuple(self.color_temp)
