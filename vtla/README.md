@@ -4,6 +4,11 @@
 
 命名数据集 mixture 定义在 [`configs/data_mixtures.yaml`](../configs/data_mixtures.yaml)。mixture ID 与普通 dataset ID 一样直接传给 `train.sh`；数据只从各成员原目录读取，不会生成合并副本。
 
+mixture 成员必须具有相同的 `robot_type`、FPS，以及相同的 feature key、`dtype`、`shape`、
+`names`、`tactile_encoding` 和 `storage_dtype`。各设备自己的相机 `intrinsics`、
+`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 可以不同；
+这些标定和存储差异不会改变模型看到的 tensor 契约。
+
 ## Policy 类型
 
 | `policy_type` | 初始化 | 说明 |
@@ -111,7 +116,7 @@ EE 模式要求数据集先经过：
 ```bash
 bash scripts/process_joint_data.sh <dataset_id> 256 32
 # 或 unified-format UMI v2.5：
-TASK="..." bash scripts/process_umi_data.sh <dataset_id> 256 32 6
+TASK="..." bash scripts/process_umi_data.sh <dataset_id> 224 32 6
 ```
 
 每臂 rot6d 为 10 维 `[xyz, rot6d(6), gripper]`，quaternion 为 8 维 `[xyz, xyzw, gripper]`。`rm_base_umi_dual` 分别为 20/16 维，`rm_isf_umi_left` 分别为 10/8 维。

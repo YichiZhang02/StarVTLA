@@ -62,7 +62,6 @@ robot_type=rm_isf_umi_left
 第一步检查机械臂、末端板和主臂串口是否存在，不会驱动机械臂：
 
 ```bash
-robot_type=rm_base_umi_dual
 python -m deployment.tools.hardware_check \
   --robot-type "${robot_type}" \
   --stage existence
@@ -133,19 +132,27 @@ bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
 
 #### 2.2 处理UMI数据
 ```bash
-bash scripts/process_umi_data.sh <dataset_id> [size] [horizon]
+bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
+
+`size` 默认是 `224`，只控制三路 RGB 输出尺寸；四路触觉保持传感器原生的
+`96x128`（高 x 宽），后续模型预处理负责调整模型输入尺寸。源 RGB 使用 `_undist` key，
+已经去畸变，本流程不会再次去畸变。
 
 处理示例：
 
 ```bash
 dataset_id=260821_boarderaser_to_cup_trainready_rgb640x480_camlr_egor
 TASK="Put the board eraser into the cup." \
-  bash scripts/process_umi_data.sh "${dataset_id}" 256 32 6
+  bash scripts/process_umi_data.sh "${dataset_id}" 224 32 6
 ```
 
-输出为 `<dataset_id>_processed`，相机统一为一组 top + 两组 wrist，数据集和后续 checkpoint 的
-`robot_type` 都保持 `umi`。该流程不依赖无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
+输出为 `<dataset_id>_processed`。流程将三路 RGB 和四路触觉映射到标准
+`cam_top`、`left/right_cam_wrist`、`left/right_cam_finger0/1` key，把触觉从
+`uint16` 定点编码转换为训练使用的 `uint8`，并删除未使用的额外 RGB/video feature 及其陈旧统计。
+夹爪会分别扫描 `observation.state` 和 `action`：每侧数据集最小值映射为张开 `1`，原始值
+`0` 映射为闭合 `0`。数据集和后续 checkpoint 的 `robot_type` 都保持 `umi`。该流程不依赖
+无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
 
 #### 2.3 处理 Backbone 数据（可选）
 
@@ -230,7 +237,7 @@ bash train.sh <data_all>
 bash train_backbone.sh <data_all>
 ```
 
-每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type`、FPS 和 feature schema。
+每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type` 和 FPS。feature schema 对每个 feature 严格比较 key、`dtype`、`shape`、`names`、`tactile_encoding` 和 `storage_dtype`；相机 `intrinsics`、`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 允许不同。因此不同设备的相机标定和封装参数可以保留，不会阻止 mixture 训练。
 
 ### 4. 离线推理
 

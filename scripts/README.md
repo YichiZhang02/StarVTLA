@@ -138,9 +138,13 @@ TASK="Put the board eraser into the cup." \
 
 ```text
 复制非视频 metadata/data
-  -> 相机 key 改为 cam_top + left/right_cam_wrist
-  -> 修正视频 HWC metadata、缩放并裁掉超过 episode 长度的尾帧
+  -> 三路 RGB key 改为 cam_top + left/right_cam_wrist
+  -> 四路触觉 key 改为 left/right_cam_finger0/1
+  -> RGB 缩放到 size x size，所有视频裁掉超过 episode 长度的尾帧
+  -> 触觉从 uint16 定点编码转换为 uint8 无损 RGB MP4
+  -> 删除未使用的额外 RGB/video feature 及其陈旧统计
   -> 写入真实 task 和 robot_type=umi
+  -> 按全数据最小夹爪值和原始零点完成夹爪标定
   -> 从 UMI pose 生成 absolute/episode rot6d 与 quaternion EE 列
   -> 生成 relative-action stats 和 meta/umi_processing.json
   -> 完整验证后将临时目录原子改名为 <id>_processed
@@ -154,9 +158,27 @@ TASK="Put the board eraser into the cup." \
 | `observation.images.cam_left_undist` | `observation.images.left_cam_wrist` |
 | `observation.images.cam_right_undist` | `observation.images.right_cam_wrist` |
 
-`TASK` 必须是真实指令，不能是 `Unknown task`。`JOBS` 默认 `12`。夹爪默认按每侧全数据
-最小值=张开、最大值=闭合映射到 `[1,0]`；跨数据集训练时应通过
-`LEFT_GRIPPER_OPEN/CLOSED`、`RIGHT_GRIPPER_OPEN/CLOSED` 固定统一标定。
+触觉映射固定为：
+
+| UMI v2.5 key | VTLA key |
+| --- | --- |
+| `observation.depth_deformation.tactile_left_left` | `observation.images.left_cam_finger0` |
+| `observation.depth_deformation.tactile_left_right` | `observation.images.left_cam_finger1` |
+| `observation.depth_deformation.tactile_right_left` | `observation.images.right_cam_finger0` |
+| `observation.depth_deformation.tactile_right_right` | `observation.images.right_cam_finger1` |
+
+源 RGB 的 `_undist` key 表示图像已经去畸变，本流程不会重复去畸变。`size` 默认 `224`，
+只作用于三路 RGB。触觉保持传感器原生 `96x128`（高 x 宽），不会被该流程缩放；后续模型
+预处理负责调整模型输入尺寸。触觉视频从 FFV1/`gbrp16le` uint16 MKV 按项目固定范围量化为
+`tactile_u8_linear_v1`，再保存为 `libx264rgb`/`gbrp` uint8 MP4。
+
+processed 数据只保留 `cam_top`、`left/right_cam_wrist` 和四个 `left/right_cam_finger0/1`
+视觉 feature；其他源 RGB/video feature、视频引用和已失效的触觉像素统计会被删除。
+
+`TASK` 必须是真实指令，不能是 `Unknown task`。`JOBS` 默认 `12`。夹爪会同时扫描
+`observation.state` 和 `action`，默认将每侧全数据最小值（设备实际能达到的最大张开量）映射为
+`1`，原始值 `0` 映射为闭合 `0`，并裁剪到 `[0,1]`。需要手动覆盖时，可成对设置
+`LEFT_GRIPPER_OPEN/CLOSED`、`RIGHT_GRIPPER_OPEN/CLOSED`。
 
 该流程不执行 RealMan FK，也不使用 UMI 中无效的 joint/finger 占位字段。UMI absolute pose
 没有 robot-base 外参标定时只适合数据分析；跨平台上机训练应优先使用 episode state + relative action。

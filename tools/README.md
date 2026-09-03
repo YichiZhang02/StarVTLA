@@ -153,12 +153,22 @@ python tools/process_umi_data.py \
   --src playground/data/<dataset_id> \
   --dst playground/data/<dataset_id>_processed \
   --task "Put the board eraser into the cup." \
-  --size 256 --horizon 32 --action-gap 6 --jobs 12
+  --size 224 --horizon 32 --action-gap 6 --jobs 12
 ```
 
-它要求 v2.5 的三路 `_undist` 相机和左右 pose/gripper 字段，输出
-`robot_type=umi`、标准相机 key、8 个 EE feature、relative stats 及处理 manifest。源数据和失败时的
-partial 目录都会保留。若不同数据集必须共享夹爪尺度，可显式传入每侧 open/closed 四个参数。
+它要求 v2.5 的三路 `_undist` RGB、四路 `observation.depth_deformation.tactile_*` 触觉和左右
+pose/gripper 字段。`_undist` RGB 已经去畸变，不会再次去畸变。三路 RGB 映射为
+`cam_top`、`left/right_cam_wrist` 并按 `--size` 缩放；默认 `--size 224`。四路触觉映射为
+`left/right_cam_finger0/1`，保持原生 `96x128`（高 x 宽），从 FFV1/`gbrp16le` uint16 MKV
+按固定项目量化转换为 `tactile_u8_linear_v1`、`libx264rgb`/`gbrp` uint8 MP4。
+
+输出只保留上述七个视觉 feature，未使用的额外 RGB/video feature、视频引用和陈旧触觉像素统计
+会被移除。其余输出包括 `robot_type=umi`、8 个 EE feature、relative stats 及处理 manifest。
+源数据和失败时的 partial 目录都会保留。
+
+默认夹爪标定同时扫描 `observation.state` 和 `action`：每侧全数据最小值映射为张开 `1`，原始值
+`0` 映射为闭合 `0`，结果裁剪到 `[0,1]`。需要手动覆盖时，必须为对应侧同时传入
+`--left/right-gripper-open` 和 `--left/right-gripper-closed`。
 
 仅对已经具有正确 key、task、视频同步和 metadata 的数据集原地补 EE 列时，才直接运行：
 
@@ -172,7 +182,7 @@ python tools/convert_umi_to_eepose.py \
 
 该工具按 feature `names` 查找 pose，不依赖固定的 144/111 维布局；支持 v2.5 的
 `left_qx`/`right_qx`、`gripper_left`/`gripper_right` 以及旧 UMI 字段名。它归一化 quaternion，
-并把原始夹爪值裁剪映射到 `[0,1]`，不调用 RealMan FK。
+并按显式 open/closed 参数把原始夹爪值裁剪映射到 `[0,1]`，不调用 RealMan FK。
 
 ## 合并数据集
 
