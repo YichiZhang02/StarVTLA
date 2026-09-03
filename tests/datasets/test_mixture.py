@@ -1,10 +1,94 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from vtla.datasets.feature_schema import mixture_feature_schema_diff
 from vtla.datasets.mixture_registry import load_mixture_definitions, mixture_from_dict
-from vtla.datasets.multi_dataset import aggregate_weighted_stats
+from vtla.datasets.multi_dataset import aggregate_weighted_stats, validate_mixture_metadata
 from vtla.datasets.sampler import MixtureSampler
+
+
+def _visual_feature(**overrides):
+    feature = {
+        "dtype": "video",
+        "shape": [224, 224, 3],
+        "names": ["height", "width", "channels"],
+    }
+    feature.update(overrides)
+    return feature
+
+
+def test_mixture_schema_ignores_camera_calibration_and_storage_metadata():
+    reference = {
+        "observation.images.cam_top": _visual_feature(
+            intrinsics={"224x224": {"fx": 80.0}},
+            imu_to_rgb_camera=[[1, 0], [0, 1]],
+            info={"video.codec": "h264", "video.pix_fmt": "yuv420p"},
+            video_path="videos/reference/{video_key}.mp4",
+            external_video=False,
+        )
+    }
+    candidate = {
+        "observation.images.cam_top": _visual_feature(
+            intrinsics={"224x224": {"fx": 75.0}},
+            imu_to_rgb_camera=[[0, 1], [1, 0]],
+            extrinsics={"camera": "different"},
+            info={"video.codec": "hevc", "video.pix_fmt": "gbrp"},
+            video_path="other/layout/{video_key}.mkv",
+            external_video=True,
+        )
+    }
+
+    assert mixture_feature_schema_diff(reference, candidate) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dtype", "image"),
+        ("shape", [256, 256, 3]),
+        ("names", ["channels", "height", "width"]),
+        ("tactile_encoding", "tactile_u8_linear_v1"),
+        ("storage_dtype", "uint8"),
+    ],
+)
+def test_mixture_schema_rejects_training_contract_differences(field, value):
+    reference = {"observation.images.cam_top": _visual_feature()}
+    candidate = {"observation.images.cam_top": _visual_feature(**{field: value})}
+
+    differences = mixture_feature_schema_diff(reference, candidate)
+
+    assert len(differences) == 1
+    assert f"field {field!r}" in differences[0]
+
+
+def test_mixture_schema_rejects_missing_or_extra_feature_keys():
+    reference = {"camera": _visual_feature()}
+
+    assert mixture_feature_schema_diff(reference, {}) == ["missing feature 'camera'"]
+    assert mixture_feature_schema_diff({}, reference) == ["extra feature 'camera'"]
+
+
+def test_runtime_mixture_validation_uses_training_contract_schema():
+    reference = _visual_feature(intrinsics={"224x224": {"fx": 80.0}})
+    candidate = _visual_feature(intrinsics={"224x224": {"fx": 75.0}})
+    datasets = [
+        SimpleNamespace(
+            repo_id="first",
+            meta=SimpleNamespace(fps=30, robot_type="umi", features={"camera": reference}),
+        ),
+        SimpleNamespace(
+            repo_id="second",
+            meta=SimpleNamespace(fps=30, robot_type="umi", features={"camera": candidate}),
+        ),
+    ]
+
+    validate_mixture_metadata(datasets)
+
+    datasets[1].meta.features["camera"]["shape"] = [256, 256, 3]
+    with pytest.raises(ValueError, match="field 'shape'"):
+        validate_mixture_metadata(datasets)
 
 
 def test_registry_defaults_to_equal_weights_and_roundtrips(tmp_path):

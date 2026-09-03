@@ -12,23 +12,11 @@ import numpy as np
 import pandas as pd
 import torch
 
+from .feature_schema import mixture_feature_schema_diff
 from .lerobot_dataset import LeRobotDataset
 from .mixture_registry import MixtureDefinition
 
 logger = logging.getLogger(__name__)
-
-
-def _feature_diff(reference: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
-    differences = []
-    all_keys = sorted(set(reference) | set(candidate))
-    for key in all_keys:
-        if key not in reference:
-            differences.append(f"extra feature {key!r}")
-        elif key not in candidate:
-            differences.append(f"missing feature {key!r}")
-        elif reference[key] != candidate[key]:
-            differences.append(f"feature {key!r}: expected {reference[key]!r}, got {candidate[key]!r}")
-    return differences
 
 
 def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
@@ -46,7 +34,7 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
             )
         errors.extend(
             f"{dataset.repo_id}: {difference}"
-            for difference in _feature_diff(reference.features, meta.features)
+            for difference in mixture_feature_schema_diff(reference.features, meta.features)
         )
     if errors:
         details = "\n  - ".join(errors)

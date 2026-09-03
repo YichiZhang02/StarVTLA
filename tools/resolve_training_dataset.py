@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
+from vtla.datasets.feature_schema import mixture_feature_schema_diff
 from vtla.datasets.mixture_registry import load_mixture_definitions, resolve_member_root
 
 
@@ -52,8 +53,13 @@ def main() -> None:
     infos_and_features = [load_features(Path(root)) for root in roots]
     reference_info, reference_features = infos_and_features[0]
     for root, (info, features) in zip(roots[1:], infos_and_features[1:], strict=True):
-        if features != reference_features:
-            raise ValueError(f"Mixture member feature schema differs from the first member: {root}")
+        feature_differences = mixture_feature_schema_diff(reference_features, features)
+        if feature_differences:
+            details = "\n  - ".join(feature_differences)
+            raise ValueError(
+                f"Mixture member feature schema differs from the first member: {root}\n"
+                f"  - {details}"
+            )
         if info.get("fps") != reference_info.get("fps"):
             raise ValueError(f"Mixture member FPS differs from the first member: {root}")
         if info.get("robot_type") != reference_info.get("robot_type"):

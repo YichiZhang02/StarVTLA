@@ -4,21 +4,21 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
-dataset_id=${1:-260821_boarderaser_to_cup_trainready_rgb640x480_camlr_egor}  # 数据集名
-policy_type=${2:-starvla_groot_dinoalign}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac
+dataset_id=${1:-cupgen_umi}  # 数据集名
+policy_type=${2:-starvla_groot}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac
 
 # 训练配置
 num_processes=${3:-4}
 batch_size=${4:-16}
-steps=${5:-40_000}
-save_freq=5_000
+steps=${5:-30_000}
+save_freq=10_000
 log_freq=100
 
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
-state_mode=${8:-absolute_joint}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d | absolute_quat | episode_quat
-action_mode=${9:-absolute_joint}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d | absolute_quat | relative_quat
+state_mode=${8:-episode_rot6d}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d | absolute_quat | episode_quat
+action_mode=${9:-relative_rot6d}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d | absolute_quat | relative_quat
 action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
 
 # 数据增强
