@@ -26,6 +26,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.convert_umi_to_eepose import NEW_FEATURES, pose_indices, sorted_data_files  # noqa: E402
+from tools.tactile_uint16_to_uint8 import (  # noqa: E402
+    TACTILE_UINT16_ENCODING,
+    TACTILE_UINT8_ENCODING,
+    convert_tactile_dataset_in_place,
+)
 
 
 CAMERA_KEY_MAP = {
@@ -33,6 +38,14 @@ CAMERA_KEY_MAP = {
     "observation.images.cam_right_undist": "observation.images.right_cam_wrist",
     "observation.images.ego_right_undist": "observation.images.cam_top",
 }
+TACTILE_KEY_MAP = {
+    "observation.depth_deformation.tactile_left_left": "observation.images.left_cam_finger0",
+    "observation.depth_deformation.tactile_left_right": "observation.images.left_cam_finger1",
+    "observation.depth_deformation.tactile_right_left": "observation.images.right_cam_finger0",
+    "observation.depth_deformation.tactile_right_right": "observation.images.right_cam_finger1",
+}
+FEATURE_KEY_MAP = {**CAMERA_KEY_MAP, **TACTILE_KEY_MAP}
+OUTPUT_VIDEO_KEYS = tuple(FEATURE_KEY_MAP.values())
 MISSING_VALUE = 9930.0
 DATASET_INFO_FIELDS = {
     "codebase_version",
@@ -77,10 +90,18 @@ def _load_info(root: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _replace_camera_key(value: str) -> str:
-    for source, target in CAMERA_KEY_MAP.items():
+def _replace_feature_key(value: str) -> str:
+    for source, target in FEATURE_KEY_MAP.items():
         value = value.replace(source, target)
     return value
+
+
+def _visual_feature_keys(info: dict) -> set[str]:
+    return {
+        key
+        for key, feature in info.get("features", {}).items()
+        if feature.get("dtype") in {"video", "tactile"}
+    }
 
 
 def _copy_non_video(src: Path, dst: Path) -> None:
@@ -122,15 +143,18 @@ def _resize_intrinsics(feature: dict, source_h: int, source_w: int, size: int) -
 def rewrite_info(root: Path, source_info: dict, size: int) -> dict:
     info = json.loads(json.dumps(source_info))
     features = info.get("features", {})
-    missing = sorted(set(CAMERA_KEY_MAP) - set(features))
+    missing = sorted(set(FEATURE_KEY_MAP) - set(features))
     if missing:
-        raise ValueError(f"UMI dataset is missing required camera features: {missing}")
+        raise ValueError(f"UMI dataset is missing required visual features: {missing}")
 
     rewritten = {}
+    visual_keys = _visual_feature_keys(source_info)
     for key, feature in features.items():
-        target = CAMERA_KEY_MAP.get(key, key)
+        if key in visual_keys and key not in FEATURE_KEY_MAP:
+            continue
+        target = FEATURE_KEY_MAP.get(key, key)
         if target in rewritten:
-            raise ValueError(f"Camera rename collision at {target}")
+            raise ValueError(f"Feature rename collision at {target}")
         if key in CAMERA_KEY_MAP:
             source_h, source_w = _video_hw(feature)
             _resize_intrinsics(feature, source_h, source_w, size)
@@ -145,6 +169,21 @@ def rewrite_info(root: Path, source_info: dict, size: int) -> dict:
                     "video.pix_fmt": "yuv420p",
                     "video.fps": float(info["fps"]),
                     "video.channels": 3,
+                }
+            )
+        elif key in TACTILE_KEY_MAP:
+            source_h, source_w = _video_hw(feature)
+            feature.update(
+                {
+                    "dtype": "video",
+                    "shape": [source_h, source_w, 3],
+                    "names": ["height", "width", "channels"],
+                    "video_path": (
+                        "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mkv"
+                    ),
+                    "external_video": True,
+                    "tactile_encoding": TACTILE_UINT16_ENCODING,
+                    "storage_dtype": "uint16",
                 }
             )
         rewritten[target] = feature
@@ -162,10 +201,15 @@ def rewrite_info(root: Path, source_info: dict, size: int) -> dict:
     return info
 
 
-def rewrite_global_stats(root: Path) -> None:
+def rewrite_global_stats(root: Path, source_info: dict) -> None:
     path = root / "meta" / "stats.json"
     stats = json.loads(path.read_text(encoding="utf-8"))
-    rewritten = {_replace_camera_key(key): value for key, value in stats.items()}
+    visual_keys = _visual_feature_keys(source_info)
+    rewritten = {
+        _replace_feature_key(key): value
+        for key, value in stats.items()
+        if key not in visual_keys or key in CAMERA_KEY_MAP
+    }
     path.write_text(json.dumps(rewritten, indent=4, ensure_ascii=False), encoding="utf-8")
 
 
@@ -187,21 +231,34 @@ def rewrite_data_task_indices(root: Path) -> dict[int, int]:
     return lengths
 
 
-def rewrite_episode_metadata(root: Path, task: str, fps: int, lengths: dict[int, int]) -> None:
+def rewrite_episode_metadata(
+    root: Path, task: str, fps: int, lengths: dict[int, int], source_info: dict
+) -> None:
     episode_files = sorted((root / "meta" / "episodes").glob("**/*.parquet"))
     if not episode_files:
         raise FileNotFoundError("UMI dataset is missing meta/episodes parquet files")
+    dropped_video_keys = _visual_feature_keys(source_info) - set(FEATURE_KEY_MAP)
+    # Source tactile pixel stats describe normalized uint16 values, not the fixed linear uint8 view.
+    dropped_stat_keys = dropped_video_keys | set(TACTILE_KEY_MAP)
     for path in episode_files:
         table = pq.read_table(path)
-        table = table.rename_columns([_replace_camera_key(name) for name in table.column_names])
+        table = table.rename_columns([_replace_feature_key(name) for name in table.column_names])
+        drop_columns = [
+            name
+            for name in table.column_names
+            if any(name.startswith(f"videos/{key}/") for key in dropped_video_keys)
+            or any(name.startswith(f"stats/{key}/") for key in dropped_stat_keys)
+        ]
+        if drop_columns:
+            table = table.drop(drop_columns)
         episodes = [int(value) for value in table.column("episode_index").to_pylist()]
         tasks = pa.array([[task] for _ in episodes], type=pa.list_(pa.string()))
         table = table.set_column(table.column_names.index("tasks"), "tasks", tasks)
-        for camera in CAMERA_KEY_MAP.values():
-            from_name = f"videos/{camera}/from_timestamp"
-            to_name = f"videos/{camera}/to_timestamp"
+        for video_key in OUTPUT_VIDEO_KEYS:
+            from_name = f"videos/{video_key}/from_timestamp"
+            to_name = f"videos/{video_key}/to_timestamp"
             if from_name not in table.column_names or to_name not in table.column_names:
-                raise ValueError(f"Episode metadata is missing video timestamps for {camera}")
+                raise ValueError(f"Episode metadata is missing video timestamps for {video_key}")
             starts = np.asarray(table.column(from_name).to_pylist(), dtype=np.float64)
             stops = pa.array(
                 [start + lengths[episode] / fps for start, episode in zip(starts, episodes, strict=True)],
@@ -242,10 +299,21 @@ def _probe_frames(path: Path) -> int:
         capture_output=True,
         text=True,
     ).stdout.strip()
+    if output.isdigit():
+        return int(output)
+    output = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     return int(output)
 
 
-def _encode_video(job: tuple[Path, Path, int, int, int, int]) -> tuple[Path, int]:
+def _encode_rgb_video(job: tuple[Path, Path, int, int, int, int]) -> tuple[Path, int]:
     source, target, frames, size, fps, crf = job
     target.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
@@ -263,45 +331,97 @@ def _encode_video(job: tuple[Path, Path, int, int, int, int]) -> tuple[Path, int
     return target, actual
 
 
+def _trim_tactile_video(job: tuple[Path, Path, int]) -> tuple[Path, int]:
+    source, target, frames = job
+    target.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0:v:0",
+            "-frames:v", str(frames), "-c:v", "copy", "-an", str(target),
+        ],
+        check=True,
+    )
+    actual = _probe_frames(target)
+    if actual != frames:
+        raise RuntimeError(f"{target}: trimmed {actual} tactile frames, expected {frames}")
+    return target, actual
+
+
+def _video_path(
+    root: Path, info: dict, key: str, chunk: int, file_index: int, *, suffix: str | None = None
+) -> Path:
+    feature = info["features"][key]
+    template = feature.get("video_path", info.get("video_path"))
+    if not template:
+        raise ValueError(f"No video path template for {key}")
+    path = root / template.format(
+        video_key=key, chunk_index=chunk, file_index=file_index
+    )
+    return path.with_suffix(suffix) if suffix is not None else path
+
+
 def process_videos(
     src: Path, dst: Path, source_info: dict, lengths: dict[int, int], size: int, jobs: int, crf: int
 ) -> None:
     fps = int(source_info["fps"])
-    work = []
+    output_info = _load_info(dst)
+    rgb_work = []
     for old_key, new_key in CAMERA_KEY_MAP.items():
         locations = _episode_video_lengths(src, old_key, lengths)
         for (chunk, file_index), expected in locations.items():
-            source = src / source_info["video_path"].format(
-                video_key=old_key, chunk_index=chunk, file_index=file_index
-            )
-            target = dst / source_info["video_path"].format(
-                video_key=new_key, chunk_index=chunk, file_index=file_index
-            )
+            source = _video_path(src, source_info, old_key, chunk, file_index)
+            target = _video_path(dst, output_info, new_key, chunk, file_index)
             if not source.is_file():
                 raise FileNotFoundError(source)
-            work.append((source, target, expected, size, fps, crf))
+            rgb_work.append((source, target, expected, size, fps, crf))
 
-    print(f"[videos] encoding {len(work)} streams with {jobs} workers")
+    tactile_work = []
+    for old_key, new_key in TACTILE_KEY_MAP.items():
+        locations = _episode_video_lengths(src, old_key, lengths)
+        for (chunk, file_index), expected in locations.items():
+            source = _video_path(src, source_info, old_key, chunk, file_index, suffix=".mkv")
+            target = _video_path(dst, output_info, new_key, chunk, file_index)
+            if not source.is_file():
+                raise FileNotFoundError(source)
+            tactile_work.append((source, target, expected))
+
+    print(
+        f"[videos] encoding {len(rgb_work)} RGB and trimming {len(tactile_work)} tactile "
+        f"streams with {jobs} workers"
+    )
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = [pool.submit(_encode_video, job) for job in work]
+        futures = [pool.submit(_encode_rgb_video, job) for job in rgb_work]
+        futures += [pool.submit(_trim_tactile_video, job) for job in tactile_work]
         completed = 0
         for future in as_completed(futures):
             future.result()
             completed += 1
-            if completed % 25 == 0 or completed == len(work):
-                print(f"         {completed}/{len(work)}")
+            if completed % 25 == 0 or completed == len(futures):
+                print(f"         {completed}/{len(futures)}")
+
+    counts = convert_tactile_dataset_in_place(dst, jobs=jobs)
+    for key in TACTILE_KEY_MAP.values():
+        expected = sum(_episode_video_lengths(dst, key, lengths).values())
+        if counts.get(key) != expected:
+            raise RuntimeError(
+                f"{key}: converted {counts.get(key, 0)} tactile frames, expected {expected}"
+            )
 
 
 def resolve_gripper_calibration(
     root: Path, info: dict, explicit: dict[str, tuple[float | None, float | None]]
 ) -> dict[str, tuple[float, float]]:
-    state_idx = pose_indices(info["features"]["observation.state"]["names"])
+    indices = {
+        column: pose_indices(info["features"][column]["names"])
+        for column in ("observation.state", "action")
+    }
     values = {"left": [], "right": []}
     for path in sorted_data_files(root):
-        table = pq.read_table(path, columns=["observation.state"])
-        vectors = np.stack(table.column("observation.state").to_pylist()).astype(np.float64)
-        for side in values:
-            values[side].append(vectors[:, state_idx[side]["grip"]])
+        table = pq.read_table(path, columns=list(indices))
+        for column, idx in indices.items():
+            vectors = np.stack(table.column(column).to_pylist()).astype(np.float64)
+            for side in values:
+                values[side].append(vectors[:, idx[side]["grip"]])
 
     calibration = {}
     for side, chunks in values.items():
@@ -313,10 +433,15 @@ def resolve_gripper_calibration(
             raise ValueError(f"{side} gripper requires both --{side}-gripper-open and --{side}-gripper-closed")
         if open_value is None:
             # UMI v2.5 encodes a more open gripper as a lower (more negative) angle.
-            open_value, closed_value = float(raw.min()), float(raw.max())
+            open_value, closed_value = float(raw.min()), 0.0
             print(
                 f"[gripper] {side}: auto calibration open={open_value:.9f}, "
                 f"closed={closed_value:.9f}"
+            )
+        if open_value >= closed_value:
+            raise ValueError(
+                f"{side} gripper calibration requires open < closed, got "
+                f"open={open_value}, closed={closed_value}"
             )
         calibration[side] = (float(open_value), float(closed_value))
     return calibration
@@ -352,16 +477,24 @@ def validate_output(root: Path, lengths: dict[int, int]) -> None:
         grips = actions[:, [9, 19]]
         if grips.min() < -1e-6 or grips.max() > 1 + 1e-6:
             raise RuntimeError(f"Normalized gripper values outside [0, 1]: {grips.min()}..{grips.max()}")
-    for key in CAMERA_KEY_MAP.values():
+    for key in OUTPUT_VIDEO_KEYS:
         locations = _episode_video_lengths(root, key, lengths)
         for (chunk, file_index), expected in locations.items():
-            path = root / info["video_path"].format(
-                video_key=key,
-                chunk_index=chunk,
-                file_index=file_index,
-            )
+            path = _video_path(root, info, key, chunk, file_index)
             if _probe_frames(path) != expected:
                 raise RuntimeError(f"Video/data frame mismatch: {path}")
+    unexpected_visual = _visual_feature_keys(info) - set(OUTPUT_VIDEO_KEYS)
+    if unexpected_visual:
+        raise RuntimeError(f"Processed dataset retained unused visual features: {unexpected_visual}")
+    for key in TACTILE_KEY_MAP.values():
+        feature = info["features"][key]
+        contract = (
+            feature.get("dtype"),
+            feature.get("storage_dtype"),
+            feature.get("tactile_encoding"),
+        )
+        if contract != ("video", "uint8", TACTILE_UINT8_ENCODING):
+            raise RuntimeError(f"Processed tactile feature has invalid contract: {key} {contract}")
 
 
 def main() -> int:
@@ -391,8 +524,10 @@ def main() -> int:
     try:
         lengths = rewrite_data_task_indices(partial)
         rewrite_tasks(partial, args.task)
-        rewrite_episode_metadata(partial, args.task, int(source_info["fps"]), lengths)
-        rewrite_global_stats(partial)
+        rewrite_episode_metadata(
+            partial, args.task, int(source_info["fps"]), lengths, source_info
+        )
+        rewrite_global_stats(partial, source_info)
         rewrite_info(partial, source_info, args.size)
         process_videos(args.src, partial, source_info, lengths, args.size, args.jobs, args.crf)
         run_converter(partial, args, calibration)
@@ -400,6 +535,8 @@ def main() -> int:
             "source": str(args.src.resolve()),
             "robot_type": "umi",
             "camera_key_map": CAMERA_KEY_MAP,
+            "tactile_key_map": TACTILE_KEY_MAP,
+            "tactile_encoding": TACTILE_UINT8_ENCODING,
             "image_size": [args.size, args.size],
             "task": args.task,
             "horizon": args.horizon,

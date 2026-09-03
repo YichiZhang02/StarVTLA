@@ -5,10 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 dataset_id=${1:?"Usage: TASK='...' bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]"}
-size=${2:-256}
+size=${2:-224}
 horizon=${3:-32}
 action_gap=${4:-6}
-task=${TASK:-}
+task=${TASK:-Manipulate the object}
 jobs=${JOBS:-12}
 
 if [ -z "${task}" ]; then

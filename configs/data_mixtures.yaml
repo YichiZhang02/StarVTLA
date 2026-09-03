@@ -12,3 +12,11 @@ mixtures:
         weight: 1.0
       - dataset_id: rm_isf_umi_left_20260825_assemble_gearL_processed
         weight: 4.0
+
+  cupgen_umi_training_data:
+    root: playground/data
+    datasets:
+      - dataset_id: 260814_cupoverfitting_trainready_224_processed
+      - dataset_id: 260818_cupoverfitting_long_trainready_224_processed
+      - dataset_id: 260821_cupgen1_trainready_224_processed
+      - dataset_id: 260821_cupgen2_trainready_224_processed
