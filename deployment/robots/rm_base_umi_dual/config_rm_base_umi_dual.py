@@ -47,6 +47,14 @@ class RmBaseUmiDualConfig(RobotConfig):
     kinematics_force_type: ClassVar[str] = "base"
     kinematics_sides: ClassVar[tuple[str, ...]] = ("right", "left")
     teleop_type: ClassVar[str] = "rm_leader_dual"
+    flange_tcp_xyz_m: ClassVar[dict[str, tuple[float, float, float]]] = {
+        "left": (-0.01035, 0.0, 0.06471),
+        "right": (-0.01035, 0.0, 0.06471),
+    }
+    flange_tcp_rpy_deg: ClassVar[dict[str, tuple[float, float, float]]] = {
+        "left": (0.0, 0.0, 180.0),
+        "right": (0.0, 0.0, 180.0),
+    }
 
     # ============ 启用的手臂 ============
     # 可选 ["left"], ["right"], 或 ["left", "right"]

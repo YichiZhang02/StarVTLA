@@ -3,12 +3,12 @@ set -e
 cd "$(dirname "$0")"   # 切到仓库根, 使 playground/... 相对路径生效, 服务器/本地通用
 
 # =================== 可调参数 ===================
-pretrained_id=${1:-20260827_rm_isf_umi_left_20260825_assemble_gearL_processed_starvla_groot_wristonly_true_tactile_encode_state_absolute_rot6d_action_relative_rot6d_gap_6_aug_strong}
-step=${2:-10000}
+pretrained_id=${1:-20260903_cupgen_umi_starvla_groot_wristonly_true_tactile_none_state_none_action_relative_rot6d_gap_6_aug_strong}
+step=${2:-30000}
 
-inference_mode=${3:-async}                # sync=同步推理; async=异步推理
+inference_mode=${3:-sync}                # sync=同步推理; async=异步推理
 
-robot_type=${4:-}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
+robot_type=${4:-rm_base_umi_dual}                                 # UMI checkpoint 必填；普通 checkpoint 会忽略该值
 
 # 动作配置
 n_action_steps=${5:-16}
@@ -22,7 +22,7 @@ home_duration_s=2.0                       # 普通 movej 目标复位耗时（�
 # 任务描述
 single_task=${9:-}                        # 任务描述，留空则自动匹配
 
-max_ee_pos_step=0.1                      # 关节角限速
+max_ee_pos_step=0.01                      # 关节角限速
 # ===============================================
 # step 自动补零到 6 位: 5000 -> 005000 (expr 强制十进制, 兼容已带前导零的输入, POSIX sh 可用)
 step=$(printf "%06d" "$(expr "$step" + 0)")

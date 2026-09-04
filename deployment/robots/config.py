@@ -27,11 +27,20 @@ class RobotConfig(draccus.ChoiceRegistry, abc.ABC):
     kinematics_force_type: ClassVar[str | None] = None
     kinematics_sides: ClassVar[tuple[str, ...]] = ()
     teleop_type: ClassVar[str | None] = None
+    flange_tcp_xyz_m: ClassVar[dict[str, tuple[float, float, float]]] = {}
+    flange_tcp_rpy_deg: ClassVar[dict[str, tuple[float, float, float]]] = {}
+
+    # Runtime EE command contract. Inference overwrites this from policy.ee_frame.
+    ee_frame: str = "flange"
 
     # Directory to store calibration file
     calibration_dir: Path | None = None
 
     def __post_init__(self):
+        if self.ee_frame not in ("tcp", "flange"):
+            raise ValueError(
+                f"Invalid robot ee_frame={self.ee_frame!r}; expected 'tcp' or 'flange'."
+            )
         if hasattr(self, "cameras") and self.cameras:
             for _, config in self.cameras.items():
                 for attr in ["width", "height", "fps"]:
@@ -65,6 +74,18 @@ class RobotConfig(draccus.ChoiceRegistry, abc.ABC):
         force_type = cls.get_kinematics_config_class(robot_type).kinematics_force_type
         assert force_type is not None
         return force_type
+
+    @classmethod
+    def get_flange_tcp_calibration(
+        cls, robot_type: str | None, side: str
+    ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        config_cls = cls.get_kinematics_config_class(robot_type)
+        try:
+            return config_cls.flange_tcp_xyz_m[side], config_cls.flange_tcp_rpy_deg[side]
+        except KeyError as exc:
+            raise ValueError(
+                f"robot_type={robot_type!r} has no flange-to-TCP calibration for side={side!r}"
+            ) from exc
 
     @classmethod
     def validate_kinematics_sides(

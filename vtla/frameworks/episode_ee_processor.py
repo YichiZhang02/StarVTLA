@@ -78,11 +78,21 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
     n_arms: int = 2
     # Selects the physical RealMan B/ISF kinematics used when the dataset was processed.
     robot_type: str | None = None
+    # Frame expected by the checkpoint's EE state/action values.
+    ee_frame: str = "flange"
 
     def __post_init__(self) -> None:
         force_type = RobotConfig.get_kinematics_force_type(self.robot_type)
         self._algo = make_realman_algo(force_type)
         self._jidx: dict = joint_indices(self.state_feature_names)
+        self._flange_tcp_calibration = (
+            {
+                side: RobotConfig.get_flange_tcp_calibration(self.robot_type, side)
+                for side in self._jidx["sides"]
+            }
+            if self.ee_frame == "tcp"
+            else None
+        )
         self._baseline: tuple | None = None   # ((R_p0, R_R0), (L_p0, L_R0))
         self._a0_packed: torch.Tensor | None = None  # (1, ee_dim) world-flange EE at episode start
 
@@ -107,19 +117,40 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
             vec16 = np.asarray(raw, dtype=np.float64).flatten()
 
         if not self.relative_to_baseline:
-            ee_vec = to_absolute_ee(self._algo, vec16, self._jidx, rot_mode=self.rot_mode)
+            ee_vec = to_absolute_ee(
+                self._algo,
+                vec16,
+                self._jidx,
+                rot_mode=self.rot_mode,
+                ee_frame=self.ee_frame,
+                flange_tcp_calibration=self._flange_tcp_calibration,
+            )
             observation[OBS_STATE] = torch.from_numpy(ee_vec)
             return observation
 
         if self._baseline is None:
-            self._baseline = compute_baseline(self._algo, vec16, self._jidx)
+            self._baseline = compute_baseline(
+                self._algo,
+                vec16,
+                self._jidx,
+                ee_frame=self.ee_frame,
+                flange_tcp_calibration=self._flange_tcp_calibration,
+            )
             self._a0_packed = self._pack_baseline(
                 self._baseline,
                 rot_mode=self.rot_mode,
                 n_arms=self.n_arms,
             )
 
-        ee_vec = to_episode_ee(self._algo, vec16, self._jidx, self._baseline, rot_mode=self.rot_mode)
+        ee_vec = to_episode_ee(
+            self._algo,
+            vec16,
+            self._jidx,
+            self._baseline,
+            rot_mode=self.rot_mode,
+            ee_frame=self.ee_frame,
+            flange_tcp_calibration=self._flange_tcp_calibration,
+        )
         observation[OBS_STATE] = torch.from_numpy(ee_vec)
         return observation
 
@@ -173,6 +204,7 @@ class EpisodeEEPreprocessorStep(ObservationProcessorStep):
             "rot_mode": self.rot_mode,
             "n_arms": self.n_arms,
             "robot_type": self.robot_type,
+            "ee_frame": self.ee_frame,
         }
 
 
@@ -185,12 +217,21 @@ class ActionAnchorPreprocessorStep(ObservationProcessorStep):
     representation: str = "joint"
     n_arms: int = 2
     robot_type: str | None = None
+    ee_frame: str = "flange"
 
     def __post_init__(self) -> None:
         needs_fk = self.representation in ("rot6d", "quat")
         self._jidx = joint_indices(self.state_feature_names) if needs_fk else None
         force_type = RobotConfig.get_kinematics_force_type(self.robot_type) if needs_fk else None
         self._algo = make_realman_algo(force_type) if force_type is not None else None
+        self._flange_tcp_calibration = (
+            {
+                side: RobotConfig.get_flange_tcp_calibration(self.robot_type, side)
+                for side in self._jidx["sides"]
+            }
+            if needs_fk and self.ee_frame == "tcp"
+            else None
+        )
 
     def observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         raw = observation.get(OBS_STATE)
@@ -199,8 +240,19 @@ class ActionAnchorPreprocessorStep(ObservationProcessorStep):
         if self.representation == "joint":
             observation[ACTION_ANCHOR] = raw.clone() if isinstance(raw, torch.Tensor) else np.array(raw, copy=True)
             return observation
-        vec = raw.detach().cpu().numpy().astype(np.float64).flatten() if isinstance(raw, torch.Tensor) else np.asarray(raw, dtype=np.float64).flatten()
-        anchor = to_absolute_ee(self._algo, vec, self._jidx, rot_mode=self.representation)
+        vec = (
+            raw.detach().cpu().numpy().astype(np.float64).flatten()
+            if isinstance(raw, torch.Tensor)
+            else np.asarray(raw, dtype=np.float64).flatten()
+        )
+        anchor = to_absolute_ee(
+            self._algo,
+            vec,
+            self._jidx,
+            rot_mode=self.representation,
+            ee_frame=self.ee_frame,
+            flange_tcp_calibration=self._flange_tcp_calibration,
+        )
         observation[ACTION_ANCHOR] = torch.from_numpy(anchor)
         return observation
 
@@ -210,6 +262,7 @@ class ActionAnchorPreprocessorStep(ObservationProcessorStep):
             "representation": self.representation,
             "n_arms": self.n_arms,
             "robot_type": self.robot_type,
+            "ee_frame": self.ee_frame,
         }
 
     def transform_features(

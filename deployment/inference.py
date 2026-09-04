@@ -186,6 +186,16 @@ def _resolve_robot_type(cfg: InferenceConfig) -> None:
     same concrete type. The checkpoint on disk remains ``robot_type='umi'``.
     """
     checkpoint_type = getattr(cfg.policy, "robot_type", None)
+    cfg.policy.original_checkpoint_robot_type = checkpoint_type
+    requested_ee_frame = getattr(cfg.policy, "ee_frame", "auto")
+    if requested_ee_frame == "auto":
+        resolved_ee_frame = "tcp" if checkpoint_type == "umi" else "flange"
+    elif requested_ee_frame in ("tcp", "flange"):
+        resolved_ee_frame = requested_ee_frame
+    else:
+        raise ValueError(
+            f"Unsupported policy ee_frame={requested_ee_frame!r}; expected 'auto', 'tcp', or 'flange'."
+        )
     resolved_type = checkpoint_type
     source = "checkpoint"
     if checkpoint_type == "umi":
@@ -219,11 +229,14 @@ def _resolve_robot_type(cfg: InferenceConfig) -> None:
         )
     if checkpoint_type == "umi":
         cfg.policy.robot_type = resolved_type
+    cfg.policy.ee_frame = resolved_ee_frame
+    cfg.robot.ee_frame = resolved_ee_frame
     logger.info(
-        "[match-policy] kinematics=%s <- %s robot_type=%s",
+        "[match-policy] kinematics=%s <- %s robot_type=%s ee_frame=%s",
         RobotConfig.get_kinematics_force_type(resolved_type).upper(),
         source,
         resolved_type,
+        resolved_ee_frame,
     )
 
 

@@ -30,6 +30,9 @@ raise ``NotImplementedError`` consistently across all policies.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+import draccus
 
 from vtla.engine.configs import FeatureType, PolicyFeature
 from vtla.engine.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
@@ -75,6 +78,17 @@ _ACTION_MODE_ALIASES: dict[str, str] = {
 
 VALID_TACTILE_ENCODERS = (None, "anytouch2", "native")
 VALID_TACTILE_INSERT_LOCATIONS = ("encoder", "decoder")
+VALID_EE_FRAMES = ("auto", "tcp", "flange")
+
+
+def _decode_ee_frame(value: str, _path=()) -> str:
+    if value not in VALID_EE_FRAMES:
+        raise ValueError(f"Expected one of {VALID_EE_FRAMES}, got {value!r}.")
+    return value
+
+
+# The pinned draccus release has no built-in decoder for typing.Literal.
+draccus.decode.register(Literal["auto", "tcp", "flange"], _decode_ee_frame)
 
 # Dataset columns / stats keys added offline by tools/convert_joints_to_eepose.py.
 # rot6d variants (original "_ee" suffix, kept for backward compat).
@@ -178,6 +192,9 @@ class SensorRoutingMixin:
     # rot6d: per arm = pos(3) + rot6d(6) + gripper(1) = 10 dims.
     # quat:  per arm = pos(3) + qx,qy,qz,qw(4) + gripper(1) = 8 dims.
     ee_num_arms: int = 2
+    # Coordinate frame used by EE state/action values. ``auto`` is resolved at
+    # deployment from the checkpoint's original robot_type.
+    ee_frame: Literal["auto", "tcp", "flange"] = "auto"
     # Ordered names of the observation.state joints (populated by make_policy from ds_meta).
     # Required for EpisodeEEPreprocessorStep to locate joint/gripper indices at inference time.
     state_feature_names: list[str] | None = None
@@ -363,6 +380,10 @@ class SensorRoutingMixin:
             raise ValueError(
                 f"Invalid action_mode '{self.action_mode}'. "
                 f"Expected one of {VALID_ACTION_MODES} (aliases: {_ACTION_MODE_ALIASES})."
+            )
+        if self.ee_frame not in VALID_EE_FRAMES:
+            raise ValueError(
+                f"Invalid ee_frame '{self.ee_frame}'. Expected one of {VALID_EE_FRAMES}."
             )
         # Action and model state are intentionally independent. Relative actions use a hidden raw
         # observation anchor, so state_mode='none' and mixed joint/EE representations are valid.

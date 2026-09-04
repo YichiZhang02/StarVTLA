@@ -31,6 +31,9 @@ def test_umi_checkpoint_uses_cli_robot_type_at_runtime(monkeypatch):
 
     assert isinstance(cfg.robot, RmIsfUmiLeftConfig)
     assert cfg.policy.robot_type == "rm_isf_umi_left"
+    assert cfg.policy.original_checkpoint_robot_type == "umi"
+    assert cfg.policy.ee_frame == "tcp"
+    assert cfg.robot.ee_frame == "tcp"
 
 
 def test_concrete_checkpoint_ignores_cli_robot_type(monkeypatch):
@@ -43,6 +46,20 @@ def test_concrete_checkpoint_ignores_cli_robot_type(monkeypatch):
 
     assert isinstance(cfg.robot, RmIsfUmiRightConfig)
     assert cfg.policy.robot_type == "rm_isf_umi_right"
+    assert cfg.policy.original_checkpoint_robot_type == "rm_isf_umi_right"
+    assert cfg.policy.ee_frame == "flange"
+    assert cfg.robot.ee_frame == "flange"
+
+
+def test_explicit_checkpoint_ee_frame_overrides_auto_rule(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["deployment.inference"])
+    cfg = _cfg("rm_isf_umi_left", RmIsfUmiLeftConfig(), ee_num_arms=1)
+    cfg.policy.ee_frame = "tcp"
+
+    _resolve_robot_type(cfg)
+
+    assert cfg.policy.ee_frame == "tcp"
+    assert cfg.robot.ee_frame == "tcp"
 
 
 def test_umi_checkpoint_rejects_incompatible_arm_count(monkeypatch):

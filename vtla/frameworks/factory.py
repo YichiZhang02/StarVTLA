@@ -310,6 +310,12 @@ def make_pre_post_processors(
         state_names = getattr(policy_cfg, "state_feature_names", None) or []
         n_arms = getattr(policy_cfg, "ee_num_arms", 2)
         robot_type = getattr(policy_cfg, "robot_type", None)
+        ee_frame = getattr(policy_cfg, "ee_frame", "flange")
+        if ee_frame == "auto":
+            checkpoint_robot_type = getattr(
+                policy_cfg, "original_checkpoint_robot_type", robot_type
+            )
+            ee_frame = "tcp" if checkpoint_robot_type == "umi" else "flange"
         prefix_steps = []
         if action_reference == "relative":
             from .episode_ee_processor import ActionAnchorPreprocessorStep
@@ -319,6 +325,7 @@ def make_pre_post_processors(
                 representation=action_representation,
                 n_arms=n_arms,
                 robot_type=robot_type,
+                ee_frame=ee_frame,
             ))
 
         if state_mode in (*episode_modes, *absolute_modes):
@@ -332,6 +339,7 @@ def make_pre_post_processors(
                 rot_mode=rot_mode,
                 n_arms=n_arms,
                 robot_type=robot_type,
+                ee_frame=ee_frame,
             )
             prefix_steps.append(ee_step)
         elif state_mode in ("episode_joint", "none"):

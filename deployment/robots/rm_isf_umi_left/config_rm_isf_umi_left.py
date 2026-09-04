@@ -18,6 +18,12 @@ class RmIsfUmiLeftConfig(RobotConfig):
     kinematics_force_type: ClassVar[str] = "isf"
     kinematics_sides: ClassVar[tuple[str, ...]] = ("left",)
     teleop_type: ClassVar[str] = "rm_leader_left"
+    flange_tcp_xyz_m: ClassVar[dict[str, tuple[float, float, float]]] = {
+        "left": (-0.01035, 0.0, 0.06471),
+    }
+    flange_tcp_rpy_deg: ClassVar[dict[str, tuple[float, float, float]]] = {
+        "left": (0.0, 0.0, 180.0),
+    }
 
     use_tactile: bool = True
 

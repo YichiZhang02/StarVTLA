@@ -143,6 +143,52 @@ def mat_to_rot(mat: np.ndarray, rot_mode: str) -> np.ndarray:
         raise ValueError(f"Unknown rot_mode '{rot_mode}'. Expected 'rot6d' or 'quat'.")
 
 
+def flange_to_tcp(
+    flange_pos: np.ndarray,
+    flange_rot: np.ndarray,
+    flange_tcp_xyz_m: tuple[float, float, float] | np.ndarray,
+    flange_tcp_rpy_deg: tuple[float, float, float] | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compose ``T_base_flange @ T_flange_tcp``."""
+    flange_pos = np.asarray(flange_pos, dtype=np.float64)
+    flange_rot = np.asarray(flange_rot, dtype=np.float64)
+    offset_pos = np.asarray(flange_tcp_xyz_m, dtype=np.float64)
+    offset_rot = R.from_euler("xyz", flange_tcp_rpy_deg, degrees=True).as_matrix()
+    return flange_pos + flange_rot @ offset_pos, flange_rot @ offset_rot
+
+
+def tcp_to_flange(
+    tcp_pos: np.ndarray,
+    tcp_rot: np.ndarray,
+    flange_tcp_xyz_m: tuple[float, float, float] | np.ndarray,
+    flange_tcp_rpy_deg: tuple[float, float, float] | np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Invert the flange-to-TCP extrinsic and return ``T_base_flange``."""
+    tcp_pos = np.asarray(tcp_pos, dtype=np.float64)
+    tcp_rot = np.asarray(tcp_rot, dtype=np.float64)
+    offset_pos = np.asarray(flange_tcp_xyz_m, dtype=np.float64)
+    offset_rot = R.from_euler("xyz", flange_tcp_rpy_deg, degrees=True).as_matrix()
+    flange_rot = tcp_rot @ offset_rot.T
+    return tcp_pos - flange_rot @ offset_pos, flange_rot
+
+
+def _to_ee_frame(
+    pos: np.ndarray,
+    mat: np.ndarray,
+    side: str,
+    ee_frame: str,
+    flange_tcp_calibration: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if ee_frame == "flange":
+        return pos, mat
+    if ee_frame != "tcp":
+        raise ValueError(f"Unsupported ee_frame={ee_frame!r}; expected 'tcp' or 'flange'.")
+    if flange_tcp_calibration is None or side not in flange_tcp_calibration:
+        raise ValueError(f"Missing flange-to-TCP calibration for side={side!r}.")
+    xyz, rpy = flange_tcp_calibration[side]
+    return flange_to_tcp(pos, mat, xyz, rpy)
+
+
 def relative_arm_ee(pos, mat, grip, p0, R0, rot_mode: str = "rot6d") -> np.ndarray:
     """Single-arm: absolute EE → pose relative to episode-start frame T0.
 
@@ -155,12 +201,31 @@ def relative_arm_ee(pos, mat, grip, p0, R0, rot_mode: str = "rot6d") -> np.ndarr
     return np.concatenate([p_rel, mat_to_rot(R_rel, rot_mode), [grip]]).astype(np.float64)
 
 
-def fk_both(algo, joint_vector: np.ndarray, jidx: dict):
+def fk_both(
+    algo,
+    joint_vector: np.ndarray,
+    jidx: dict,
+    ee_frame: str = "flange",
+    flange_tcp_calibration: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] | None = None,
+):
     """FK for every arm present in ``jidx`` (one or two arms)."""
-    return tuple((fk(algo, joints), grip) for joints, grip in split_arms(joint_vector, jidx))
+    arms = []
+    for side, (joints, grip) in zip(jidx["sides"], split_arms(joint_vector, jidx), strict=True):
+        pos, mat = fk(algo, joints)
+        pos, mat = _to_ee_frame(pos, mat, side, ee_frame, flange_tcp_calibration)
+        arms.append(((pos, mat), grip))
+    return tuple(arms)
 
 
-def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline, rot_mode: str = "rot6d") -> np.ndarray:
+def to_episode_ee(
+    algo,
+    vec16: np.ndarray,
+    jidx: dict,
+    baseline,
+    rot_mode: str = "rot6d",
+    ee_frame: str = "flange",
+    flange_tcp_calibration=None,
+) -> np.ndarray:
     """Convert 16-dim joint vector to EE pose relative to episode-start frame.
 
     Args:
@@ -173,7 +238,7 @@ def to_episode_ee(algo, vec16: np.ndarray, jidx: dict, baseline, rot_mode: str =
     Returns:
         float32 array of shape (n_arms * per_arm_dim,).
     """
-    arms = fk_both(algo, vec16, jidx)
+    arms = fk_both(algo, vec16, jidx, ee_frame, flange_tcp_calibration)
     return np.concatenate([
         relative_arm_ee(pos, mat, grip, pos0, mat0, rot_mode)
         for ((pos, mat), grip), (pos0, mat0) in zip(arms, baseline, strict=True)
@@ -185,7 +250,14 @@ def absolute_arm_ee(pos, mat, grip, rot_mode: str = "rot6d") -> np.ndarray:
     return np.concatenate([pos, mat_to_rot(mat, rot_mode), [grip]]).astype(np.float64)
 
 
-def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict, rot_mode: str = "rot6d") -> np.ndarray:
+def to_absolute_ee(
+    algo,
+    vec16: np.ndarray,
+    jidx: dict,
+    rot_mode: str = "rot6d",
+    ee_frame: str = "flange",
+    flange_tcp_calibration=None,
+) -> np.ndarray:
     """Convert 16-dim joint vector to base-frame EE pose (Tt, no episode baseline).
 
     Same packing/layout as :func:`to_episode_ee` (RIGHT arm first then LEFT, per arm
@@ -197,14 +269,25 @@ def to_absolute_ee(algo, vec16: np.ndarray, jidx: dict, rot_mode: str = "rot6d")
     """
     return np.concatenate([
         absolute_arm_ee(pos, mat, grip, rot_mode)
-        for (pos, mat), grip in fk_both(algo, vec16, jidx)
+        for (pos, mat), grip in fk_both(algo, vec16, jidx, ee_frame, flange_tcp_calibration)
     ]).astype(np.float32)
 
 
-def compute_baseline(algo, vec16: np.ndarray, jidx: dict) -> tuple:
+def compute_baseline(
+    algo,
+    vec16: np.ndarray,
+    jidx: dict,
+    ee_frame: str = "flange",
+    flange_tcp_calibration=None,
+) -> tuple:
     """Compute the episode-start FK baseline from the first-frame joint state.
 
     Returns:
         ((R_p0, R_R0), (L_p0, L_R0))
     """
-    return tuple(pose for pose, _grip in fk_both(algo, vec16, jidx))
+    return tuple(
+        pose
+        for pose, _grip in fk_both(
+            algo, vec16, jidx, ee_frame, flange_tcp_calibration
+        )
+    )

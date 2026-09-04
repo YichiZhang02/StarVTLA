@@ -41,6 +41,7 @@ from scipy.spatial.transform import Rotation as R
 
 from deployment.hardware.top_cameras import make_top_cameras_from_configs
 from vtla.engine.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from vtla.engine.utils.ee_kinematics import flange_to_tcp, tcp_to_flange
 
 from ..robot import Robot
 from ..utils import ensure_safe_goal_position
@@ -57,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# EE-pose 数学辅助 (numpy) —— 与训练侧 vtla/engine/utils/ee_kinematics.py 同源 (flange 系, 无 tcp 外参)
+# EE-pose packing helpers; TCP/flange transforms live in ee_kinematics.py.
 # ============================================================================
 def _rot6d_to_mat(rot6d: np.ndarray) -> np.ndarray:
     """6D -> 旋转矩阵 (Gram-Schmidt 正交化)。policy 输出未必严格正交, 故需正交化。"""
@@ -289,7 +290,7 @@ class RmIsfUmiLeft(Robot):
         logger.info(f"{self} 连接完成 ({self.config.follower_ip}, {self.config.board_ip})")
 
     def _check_ee_frames(self) -> None:
-        """ee 模式自检: 工具/工作坐标系须≈单位, 否则 movep 位姿系 != 训练 FK 的 flange/base 系。
+        """ee 模式自检: 工具/工作坐标系须≈单位，确保 movep 接收基座系 flange 位姿。
 
         不符仅告警 (不阻断), 由使用者决定清除工具/工作系或退回 joint 动作空间。
         """
@@ -656,11 +657,7 @@ class RmIsfUmiLeft(Robot):
         return p_out, R_out
 
     def _send_action_ee(self, action: dict[str, Any]) -> dict[str, Any]:
-        """收基座系绝对 flange 位姿 (10 维) -> 单步限幅 -> rm_movep_canfd 透传。
-
-        位姿系与训练 FK 同源 (rm_algo_forward_kinematics 的 flange/base 系, 无 tcp 外参);
-        movep 直接吃该 flange 世界位姿。夹爪走绝对归一化。
-        """
+        """Receive an absolute EE target, limit it in that frame, and command flange pose."""
         sent_action: dict[str, Any] = {}
 
         for side in self._ordered_arms:
@@ -683,14 +680,28 @@ class RmIsfUmiLeft(Robot):
                 R_tgt = R.from_quat(np.array([action[k] for k in quat_keys], dtype=np.float64)).as_matrix()
             grip = action.get(f"{side}_gripper", None)
 
-            # 2. 以当前 flange 为基准做单步安全限幅
-            p_cur, R_cur = self._current_flange(side)
-            p_tgt, R_tgt = self._clamp_ee_step(p_cur, R_cur, p_tgt, R_tgt)
+            # 2. 在模型声明的 EE 坐标系内做单步安全限幅。
+            p_cur_flange, R_cur_flange = self._current_flange(side)
+            if self.config.ee_frame == "tcp":
+                xyz = self.config.flange_tcp_xyz_m[side]
+                rpy = self.config.flange_tcp_rpy_deg[side]
+                p_cur, R_cur = flange_to_tcp(p_cur_flange, R_cur_flange, xyz, rpy)
+                p_tgt, R_tgt = self._clamp_ee_step(p_cur, R_cur, p_tgt, R_tgt)
+                p_cmd, R_cmd = tcp_to_flange(p_tgt, R_tgt, xyz, rpy)
+            elif self.config.ee_frame == "flange":
+                p_tgt, R_tgt = self._clamp_ee_step(
+                    p_cur_flange, R_cur_flange, p_tgt, R_tgt
+                )
+                p_cmd, R_cmd = p_tgt, R_tgt
+            else:
+                raise ValueError(
+                    f"Unsupported ee_frame={self.config.ee_frame!r}; expected 'tcp' or 'flange'."
+                )
 
-            # 3. 透传下发 (pose7 = [x,y,z,qw,qx,qy,qz])
+            # 3. RealMan SDK 始终接收 flange 位姿。
             if arm.follower is not None:
-                quat = _mat_to_quat_wxyz(R_tgt)
-                pose7 = [float(p_tgt[0]), float(p_tgt[1]), float(p_tgt[2]), *quat]
+                quat = _mat_to_quat_wxyz(R_cmd)
+                pose7 = [float(p_cmd[0]), float(p_cmd[1]), float(p_cmd[2]), *quat]
                 arm.follower.send_pose(
                     pose7,
                     follow=self.config.canfd_follow,
@@ -702,7 +713,7 @@ class RmIsfUmiLeft(Robot):
             if grip is not None and arm.gripper is not None:
                 arm.gripper.move_norm(float(grip))
 
-            # 回填实际下发的 (限幅后) 绝对位姿 + 夹爪
+            # 回填限幅后的模型 EE 坐标系目标；TCP 模式下 SDK 收到的是其 flange 等价值。
             sent_vals = [*p_tgt, *_mat_to_rot6d(R_tgt), (float(grip) if grip is not None else 0.0)]
             for n, v in zip(self.EE_NAMES, sent_vals):
                 sent_action[f"{side}_{n}"] = float(v)
