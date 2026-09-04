@@ -167,7 +167,7 @@ class MixtureLeRobotDataset(torch.utils.data.Dataset):
             tasks=tasks,
             fps=reference.fps,
             robot_type=reference.robot_type,
-            visual_preprocess=reference_visual_preprocess,
+            visual_preprocess=reference.visual_preprocess,
         )
 
     @property

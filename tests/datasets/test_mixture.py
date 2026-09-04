@@ -5,7 +5,11 @@ import pytest
 
 from vtla.datasets.feature_schema import mixture_feature_schema_diff
 from vtla.datasets.mixture_registry import load_mixture_definitions, mixture_from_dict
-from vtla.datasets.multi_dataset import aggregate_weighted_stats, validate_mixture_metadata
+from vtla.datasets.multi_dataset import (
+    MixtureLeRobotDataset,
+    aggregate_weighted_stats,
+    validate_mixture_metadata,
+)
 from vtla.datasets.sampler import MixtureSampler
 from vtla.datasets.visual_preprocess import make_visual_preprocess
 
@@ -143,6 +147,41 @@ def test_runtime_mixture_requires_robot_and_visual_contract():
     dataset.meta.robot_type = "umi"
     with pytest.raises(ValueError, match="has no visual_preprocess contract"):
         validate_mixture_metadata([dataset])
+
+
+def test_mixture_metadata_carries_visual_preprocess_contract():
+    class Child(SimpleNamespace):
+        def __len__(self):
+            return 10
+
+    preprocess = make_visual_preprocess(size=224, wrist_undistort=True, tactile_encoding=None)
+    children = []
+    for dataset_id in ("first", "second"):
+        child = Child(
+            repo_id=dataset_id,
+            root=f"/tmp/{dataset_id}",
+            num_episodes=1,
+            meta=SimpleNamespace(
+                fps=30,
+                robot_type="umi",
+                features={"camera": _visual_feature()},
+                visual_preprocess=preprocess,
+                stats={},
+                tasks=SimpleNamespace(index=[f"task-{dataset_id}"]),
+            ),
+        )
+        children.append(child)
+    definition = mixture_from_dict(
+        {
+            "dataset_id": "combined",
+            "root": "/tmp",
+            "members": [{"dataset_id": "first"}, {"dataset_id": "second"}],
+        }
+    )
+
+    mixture = MixtureLeRobotDataset(children, definition)
+
+    assert mixture.meta.visual_preprocess == preprocess
 
 
 def test_registry_defaults_to_equal_weights_and_roundtrips(tmp_path):
