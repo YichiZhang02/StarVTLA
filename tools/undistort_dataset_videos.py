@@ -2,23 +2,23 @@
 """Create a fisheye-undistorted copy of a LeRobot (v3.0) dataset (wrist cameras only).
 
 The UMI wrist cameras are recorded as full-frame fisheye (1920x1080, Kalibr equidistant /
-OpenCV fisheye model). For training we want the rectilinear center crop the policies consume
-(896x896) — i.e. the `..._umistyle` -> `..._umistyle_undist` transform. Doing it offline keeps
-decode cheap and the geometry identical across runs.
+OpenCV fisheye model). By default the complete rectified frame is preserved so a later
+dataset-wide resize can stretch it to the policy resolution. ``--crop`` remains available for
+explicit legacy-style square crops.
 
 Pipeline per wrist frame (matches ugripper/zxd_fisheye/undistort_wrist.py):
     1. cv2.fisheye undistort with new camera matrix = K  (undistort in place, no extra zoom)
-    2. center-crop a CROP x CROP square out of the undistorted frame  (no resize)
+    2. optionally center-crop a CROP x CROP square (no resize)
 
 What it does (non-destructive — writes a new dataset copy):
   - copies meta/ and data/ verbatim (parquet, stats, episodes, tasks, etc.)
-  - undistorts + crops only the wrist cameras, preserving the exact frame count / fps /
+  - undistorts and optionally crops only the wrist cameras, preserving the exact frame count / fps /
     timestamps, with a dense keyframe interval (small GOP) so random-access seeks stay cheap
   - COPIES every other camera video verbatim — in particular the tactile finger cams, stored
     lossless 16-bit (ffv1 / gbrp16le, .mkv); re-encoding those would corrupt them
   - patches meta/info.json so each undistorted feature's shape / height / width / codec match
 
-Per-channel image stats in meta/stats.json are kept as-is: an undistort + center crop is a
+Per-channel image stats in meta/stats.json are kept as-is: an undistort and optional center crop is a
 geometric warp that preserves per-channel mean/std to well within training tolerance (the same
 rationale by which downscale_dataset_videos.py keeps stats across a resize).
 
@@ -167,7 +167,7 @@ def _nvdec_functional(sample_src: str, dec_name: str) -> bool:
         return False
 
 
-def _decode_remap_encode(src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+def _decode_remap_encode(src, dst, map1, map2, in_w, in_h, out_w, out_h, fps, gop, crf,
                          codec, scale_flags, src_codec, use_gpu):
     """Run one decode -> remap -> encode pipeline. Returns (frames_written, dec_rc, enc_rc).
 
@@ -191,7 +191,7 @@ def _decode_remap_encode(src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
         frame_bytes = in_w * in_h * 3
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-v", "error",
-         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{crop}x{crop}", "-r", f"{fps}",
+         "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{out_w}x{out_h}", "-r", f"{fps}",
          "-i", "-", "-c:v", codec, "-crf", str(crf), "-g", str(gop),
          "-pix_fmt", "yuv420p", "-an", "-vsync", "0", dst],
         stdin=subprocess.PIPE,
@@ -232,25 +232,28 @@ def _undistort_encode(args: tuple) -> tuple[str, bool, str]:
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     try:
         map1, map2 = _build_maps(K_list, D_list, in_size)
-        # Crop the maps to the output window so remap produces the crop x crop frame directly
-        # (no full-frame warp of pixels we discard). Pixel-identical to remap-then-center-crop.
-        x0, y0 = (in_w - crop) // 2, (in_h - crop) // 2
-        map1 = np.ascontiguousarray(map1[y0:y0 + crop, x0:x0 + crop])
-        map2 = np.ascontiguousarray(map2[y0:y0 + crop, x0:x0 + crop])
+        if crop is None:
+            out_w, out_h = in_w, in_h
+        else:
+            # Crop maps before remap to avoid warping pixels outside the output window.
+            x0, y0 = (in_w - crop) // 2, (in_h - crop) // 2
+            map1 = np.ascontiguousarray(map1[y0:y0 + crop, x0:x0 + crop])
+            map2 = np.ascontiguousarray(map2[y0:y0 + crop, x0:x0 + crop])
+            out_w = out_h = crop
         fps, src_codec, src_w, src_h = _probe_stream(src)
         # NVDEC path only when no resize is needed (maps are computed at the calibration
         # resolution) and this codec was verified NVDEC-decodable on this box.
         use_gpu = (src_codec in gpu_codecs and (src_w, src_h) == (in_w, in_h)
                    and src_codec in _CUVID)
         frames, dec_rc, enc_rc = _decode_remap_encode(
-            src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+            src, dst, map1, map2, in_w, in_h, out_w, out_h, fps, gop, crf,
             codec, scale_flags, src_codec, use_gpu)
         # Defensive: a GPU decode that still yielded nothing means NVDEC choked on this file
         # despite the codec passing the probe. Retry once on CPU before giving up so we never
         # emit a zero-frame stub.
         if frames == 0 and use_gpu:
             frames, dec_rc, enc_rc = _decode_remap_encode(
-                src, dst, map1, map2, in_w, in_h, crop, fps, gop, crf,
+                src, dst, map1, map2, in_w, in_h, out_w, out_h, fps, gop, crf,
                 codec, scale_flags, src_codec, use_gpu=False)
         if enc_rc != 0:
             return src, False, "ffmpeg encode returned non-zero"
@@ -302,7 +305,7 @@ def copy_non_video(src: Path, dst: Path) -> None:
             shutil.copy2(entry, target)
 
 
-def patch_info_json(dst: Path, targets: list[str], crop: int, codec: str,
+def patch_info_json(dst: Path, targets: list[str], crop: int | None, codec: str,
                     calib_map: dict[str, str]) -> int:
     """Update undistorted features' shape/codec in meta/info.json + write an "undistort" marker.
 
@@ -317,15 +320,17 @@ def patch_info_json(dst: Path, targets: list[str], crop: int, codec: str,
         if key not in targets or ft.get("dtype") != "video":
             continue
         ch = ft["shape"][2] if len(ft.get("shape", [])) == 3 else 3
-        ft["shape"] = [crop, crop, ch]
+        calib_w, calib_h = _load_calibration(calib_map[key])[2]
+        out_h, out_w = (calib_h, calib_w) if crop is None else (crop, crop)
+        ft["shape"] = [out_h, out_w, ch]
         vinfo = ft.setdefault("info", {})
-        vinfo["video.height"] = crop
-        vinfo["video.width"] = crop
+        vinfo["video.height"] = out_h
+        vinfo["video.width"] = out_w
         vinfo["video.codec"] = tag
         n += 1
     info["undistort"] = {
         "model": "equidistant",
-        "crop": int(crop),
+        "crop": int(crop) if crop is not None else None,
         "cameras": {cam: Path(calib_map[cam]).name for cam in targets},
     }
     info_path.write_text(json.dumps(info, indent=4))
@@ -345,7 +350,7 @@ def _resolve_calib(values: list[str] | None, cameras: list[str]) -> dict[str, st
     return out
 
 
-def run_test(src: Path, calib_map: dict[str, str], crop: int) -> int:
+def run_test(src: Path, calib_map: dict[str, str], crop: int | None) -> int:
     """One frame per wrist cam -> original / undistorted-with-cropbox / final PNGs + short clip."""
     out_dir = HERE / "undistort_test"
     out_dir.mkdir(exist_ok=True)
@@ -362,15 +367,23 @@ def run_test(src: Path, calib_map: dict[str, str], crop: int) -> int:
             print(f"  [{cam}] cannot read {vids[0]}: {e}, skip")
             continue
         und = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-        x0, y0 = (W - crop) // 2, (H - crop) // 2
         box = und.copy()
-        cv2.rectangle(box, (x0, y0), (x0 + crop, y0 + crop), (0, 0, 255), 4)
         tag = cam.split(".")[-1]
         cv2.imwrite(str(out_dir / f"{tag}_0_original.png"), frame)
+        if crop is None:
+            final = und
+            suffix = f"{W}x{H}"
+        else:
+            x0, y0 = (W - crop) // 2, (H - crop) // 2
+            cv2.rectangle(box, (x0, y0), (x0 + crop, y0 + crop), (0, 0, 255), 4)
+            final = _center_crop(und, crop)
+            suffix = f"{crop}x{crop}"
         cv2.imwrite(str(out_dir / f"{tag}_1_undistorted_cropbox.png"), box)
-        cv2.imwrite(str(out_dir / f"{tag}_2_final_{crop}x{crop}.png"), _center_crop(und, crop))
-        clip = out_dir / f"{tag}_clip_{crop}x{crop}.mp4"
-        _undistort_encode((str(vids[0]), str(clip), K, D, (W, H), crop, 4, 18, "libx264", "lanczos", False))
+        cv2.imwrite(str(out_dir / f"{tag}_2_final_{suffix}.png"), final)
+        clip = out_dir / f"{tag}_clip_{suffix}.mp4"
+        _undistort_encode(
+            (str(vids[0]), str(clip), K, D, (W, H), crop, 4, 18, "libx264", "lanczos", set())
+        )
         print(f"  [{cam}] {vids[0].name} -> {tag}_*.png + clip")
     print(f"\nTest outputs in {out_dir}")
     return 0
@@ -391,7 +404,11 @@ def main() -> int:
             "Unset = use whichever bundled-default wrist cameras exist in the dataset."
         ),
     )
-    ap.add_argument("--crop", type=int, default=896, help="Center-crop square size (default 896).")
+    crop_group = ap.add_mutually_exclusive_group()
+    crop_group.add_argument("--crop", type=int, default=None,
+                            help="Optional center-crop square size (default: no crop).")
+    crop_group.add_argument("--no-crop", dest="crop", action="store_const", const=None,
+                            help="Keep the complete rectified frame.")
     ap.add_argument("--gop", type=int, default=4, help="Keyframe interval; small = fast seeks (default 4).")
     ap.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better/larger (default 18).")
     ap.add_argument("--codec", default="libx264", help="ffmpeg video encoder (default libx264).")
@@ -443,7 +460,8 @@ def main() -> int:
 
     print(f"Source: {src}\nDest:   {dst}")
     print(f"Undistort targets ({len(targets)}): {sorted(targets)}")
-    print(f"  -> center-crop {args.crop}x{args.crop}, codec={args.codec}, gop={args.gop}, crf={args.crf}")
+    geometry = "full rectified frame" if args.crop is None else f"center-crop {args.crop}x{args.crop}"
+    print(f"  -> {geometry}, codec={args.codec}, gop={args.gop}, crf={args.crf}")
     print("Copying meta/ and data/ verbatim (skipping videos/, frames_cache/) ...")
     copy_non_video(src, dst)
     n_feats = patch_info_json(dst, targets, args.crop, args.codec, calib_map)

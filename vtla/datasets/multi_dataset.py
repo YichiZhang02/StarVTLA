@@ -15,6 +15,7 @@ import torch
 from .feature_schema import mixture_feature_schema_diff
 from .lerobot_dataset import LeRobotDataset
 from .mixture_registry import MixtureDefinition
+from .visual_preprocess import validate_visual_preprocess
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,14 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
     if not datasets:
         raise ValueError("A dataset mixture must contain at least one dataset.")
     reference = datasets[0].meta
+    reference_visual_preprocess = getattr(reference, "visual_preprocess", None)
+    if not reference.robot_type:
+        raise ValueError(f"Mixture reference dataset {datasets[0].repo_id!r} has no robot_type")
+    if reference_visual_preprocess is None:
+        raise ValueError(
+            f"Mixture reference dataset {datasets[0].repo_id!r} has no visual_preprocess contract"
+        )
+    validate_visual_preprocess(reference_visual_preprocess)
     errors = []
     for dataset in datasets[1:]:
         meta = dataset.meta
@@ -32,6 +41,16 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
             errors.append(
                 f"{dataset.repo_id}: robot_type expected {reference.robot_type!r}, got {meta.robot_type!r}"
             )
+        visual_preprocess = getattr(meta, "visual_preprocess", None)
+        try:
+            validate_visual_preprocess(visual_preprocess)
+        except ValueError as exc:
+            errors.append(f"{dataset.repo_id}: {exc}")
+        if visual_preprocess != reference_visual_preprocess:
+            errors.append(
+                f"{dataset.repo_id}: visual_preprocess expected "
+                f"{reference_visual_preprocess!r}, got {visual_preprocess!r}"
+            )
         errors.extend(
             f"{dataset.repo_id}: {difference}"
             for difference in mixture_feature_schema_diff(reference.features, meta.features)
@@ -39,7 +58,8 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
     if errors:
         details = "\n  - ".join(errors)
         raise ValueError(
-            "Dataset mixture members must have identical FPS, robot_type, and feature schemas:\n"
+            "Dataset mixture members must have identical FPS, robot_type, visual preprocessing, "
+            "and feature schemas:\n"
             f"  - {details}"
         )
 
@@ -100,6 +120,7 @@ class MixtureMetadata:
     tasks: pd.DataFrame
     fps: int
     robot_type: str | None
+    visual_preprocess: dict | None
 
     @property
     def camera_keys(self) -> list[str]:
@@ -146,6 +167,7 @@ class MixtureLeRobotDataset(torch.utils.data.Dataset):
             tasks=tasks,
             fps=reference.fps,
             robot_type=reference.robot_type,
+            visual_preprocess=reference_visual_preprocess,
         )
 
     @property

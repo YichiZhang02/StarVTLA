@@ -92,6 +92,11 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # Inference uses it to select both the robot adapter and the matching RealMan B/ISF FK.
     robot_type: str | None = None
 
+    # Dataset-owned runtime contract persisted during training. Inference rejects checkpoints
+    # where these remain unset.
+    dataset_fps: int | None = None
+    visual_preprocess: dict | None = None
+
     # 执行 action chunk 时跳过的前 N 个动作: 实际执行 chunk[offset : offset + n_action_steps]。
     # 0 = 现有行为 (从 chunk 头部取)。用于丢掉 chunk 前段还没"跟上"当前观测的动作 (推理专用旋钮,
     # 训练无关)。仅 chunking 类策略消费。老 checkpoint 的 config.json 无此字段时由此默认值补 0,

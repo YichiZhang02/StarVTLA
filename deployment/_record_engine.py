@@ -76,6 +76,7 @@ from deployment.teleoperators import Teleoperator, TeleoperatorConfig, make_tele
 from deployment.teleoperators.rm_leader_dual import RmLeaderDual  # noqa: F401  注册 config 选项
 from deployment.teleoperators.rm_leader_left import RmLeaderLeft  # noqa: F401  注册 config 选项
 from deployment.teleoperators.rm_leader_right import RmLeaderRight  # noqa: F401  注册 config 选项
+from deployment.visual_preprocess import apply_visual_preprocess
 from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
 
 # ---- 策略 / 数据集 / 处理管线 (复用本仓库 vtla) ----
@@ -763,8 +764,11 @@ def record_loop(
         act_processed_policy: RobotAction | None = None
         act_processed_teleop: RobotAction | None = None
         if policy is not None and preprocessor is not None and postprocessor is not None:
+            policy_observation_frame = apply_visual_preprocess(
+                observation_frame, getattr(policy.config, "visual_preprocess", None)
+            )
             action_values = predict_action(
-                observation=observation_frame,
+                observation=policy_observation_frame,
                 policy=policy,
                 device=get_safe_torch_device(policy.config.device),
                 preprocessor=preprocessor,

@@ -13,12 +13,11 @@ REPO_ROOT="$(pwd)"
 
 # =================== 配置 (只有 dataset_id 必填) ===================
 dataset_id=${1:-rm_umi_dual_260711_pen_in_case}
-size=${2:-256}        # 降分辨率目标边长 (默认 256, 给 224 裁剪留余量)
+size=${2:-224}        # 所有视觉/触觉图像统一拉伸到该正方形尺寸
 horizon=${3:-32}      # relative action 统计包含的动作数量，通常等于训练 chunk_size
 action_gap=${4:-6}    # 必须与 train.sh 的 action_gap 一致
 
 # 可选 env 覆盖 (一般不用动)
-crop=${CROP:-896}     # 去畸变后居中裁剪边长 (须与训练/推理一致)
 jobs=${JOBS:-12}      # ffmpeg 并行 worker 数 (12 是这台机器实测甜点区; NVDEC 解码空出的 CPU 给编码用)
 # CAMERAS / CALIB 留空 = 用 undistort 工具内置默认 (腕部相机 + tools/calib/x5_*.json)
 cameras_arg=${CAMERAS:+--cameras ${CAMERAS}}
@@ -76,7 +75,7 @@ else:
 
 echo "==================================================================="
 echo "关节数据预处理: ${dataset_id}"
-echo "  1) undist : ${src} -> ${undist}   (crop ${crop})"
+echo "  1) undist : ${src} -> ${undist}   (保留完整画面, 不 crop)"
 echo "  2) tactile uint16_to_uint8 (有触觉时, 就地): ${undist} -> ${uint8}"
 echo "  3) resize 所有 MP4 (就地): -> *_${size}"
 echo "  4) joint2ee (就地, FK 加 EE 列, gap ${action_gap}, horizon ${horizon})"
@@ -128,8 +127,8 @@ if [ -d "${processed}" ]; then
   fi
 fi
 
-# =================== 1) 去畸变 (原生分辨率 -> 896) ===================
-# 顺序很重要: 先在原生 1920×1080 上去畸变并裁 896, 再降采样。反过来会糊且 FOV 不对。
+# =================== 1) 去畸变 (保留完整分辨率, 不 crop) ===================
+# 顺序很重要: 先在原生分辨率上去畸变，再统一拉伸到训练尺寸。
 if [ -d "${processed}" ]; then
   echo "[1/4] 已有完整产物，跳过去畸变: ${processed}"
 elif [ -d "${final_with_tactile}" ]; then
@@ -145,7 +144,7 @@ else
   python tools/undistort_dataset_videos.py \
     --src "${src}" \
     --dst "${undist}" \
-    --crop "${crop}" \
+    --no-crop \
     --jobs "${jobs}" \
     ${cameras_arg} ${calib_arg} 
 fi

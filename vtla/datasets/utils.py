@@ -134,8 +134,12 @@ class DatasetInfo:
     ee_num_arms: int | None = None
     ee_arm_sides: list[str] = field(default_factory=list)
     undistort: dict | None = None
+    visual_preprocess: dict | None = None
 
     def __post_init__(self) -> None:
+        from .visual_preprocess import validate_visual_preprocess
+
+        validate_visual_preprocess(self.visual_preprocess)
         # Coerce feature shapes from list to tuple — JSON deserialisation
         # returns lists, but the rest of the codebase expects tuples.
         for ft in self.features.values():

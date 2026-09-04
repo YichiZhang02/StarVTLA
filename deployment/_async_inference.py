@@ -37,6 +37,7 @@ from deployment._record_engine import (
 )
 from deployment.hardware.tactile_sensors import TactileMkvWriter
 from deployment.robots import RobotConfig, make_robot_from_config
+from deployment.visual_preprocess import apply_visual_preprocess
 from tools.tactile_uint16_to_uint8 import tactile_uint16_to_uint8
 from vtla.datasets.image_writer import safe_stop_image_writer
 from vtla.datasets.lerobot_dataset import LeRobotDataset
@@ -473,8 +474,11 @@ def _inference_worker(
                     )
                 observation_processed = robot_observation_processor(observation_for_policy)
                 observation_frames.append(
-                    build_dataset_frame(
-                        record_features, observation_processed, prefix=OBS_STR
+                    apply_visual_preprocess(
+                        build_dataset_frame(
+                            record_features, observation_processed, prefix=OBS_STR
+                        ),
+                        getattr(policy.config, "visual_preprocess", None),
                     )
                 )
             last_preprocessed_version = snapshots[-1].version

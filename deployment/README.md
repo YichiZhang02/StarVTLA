@@ -281,8 +281,8 @@ bash inference.sh "${pretrained_id}" 3000 async rm_isf_umi_left 16 6 20 true \
 1. 读取 checkpoint 的 `robot_type`。
 2. 将启动时的 RobotConfig 替换成对应的注册类型。
 3. 选择匹配的 B/ISF 在线 FK/IK。
-4. 根据 action representation 选择 `joint` 或 `ee` 动作空间。
-5. 在 `match_policy=true` 时同步触觉、额外相机、任务文本和腕部去畸变配置。
+4. 始终从 checkpoint 同步 FPS、腕部去畸变和视觉 resize 契约。
+5. 在 `match_policy=true` 时同步触觉、额外相机、任务文本和动作空间。
 
 若 checkpoint 的类型为 `umi`，第 2 至 3 步改为使用显式传入的具体 `--robot.type`；未传、仍传
 `umi` 或单/双臂布局不匹配都会在连接硬件前失败。非 UMI checkpoint 即使收到不同 CLI 类型也
@@ -305,7 +305,7 @@ action_gap + action_start_offset
 
 ## 腕部去畸变
 
-采集保存原始鱼眼图像；离线处理先在原始分辨率去畸变并中心裁剪，再缩放到训练尺寸。推理时 `match_policy=true` 根据训练配置启用相同变换，默认裁剪尺寸为 `896`。
+采集保存原始鱼眼图像；离线处理先在原始分辨率去畸变且不裁剪，再直接拉伸到训练尺寸。推理始终从 checkpoint 读取相同的去畸变、旋转和 resize 契约；缺少该契约的旧 checkpoint 会直接报错。
 
 标定文件位于：
 
@@ -318,7 +318,7 @@ tools/calib/x5_right_intrinsics.json
 
 ```bash
 --robot.undistort_wrist=true
---robot.undistort_crop=896
+--robot.undistort_crop=null
 ```
 
 ## 安全

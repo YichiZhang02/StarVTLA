@@ -26,11 +26,13 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.convert_umi_to_eepose import NEW_FEATURES, pose_indices, sorted_data_files  # noqa: E402
+from tools.downscale_dataset_videos import downscale_videos_in_place  # noqa: E402
 from tools.tactile_uint16_to_uint8 import (  # noqa: E402
     TACTILE_UINT16_ENCODING,
     TACTILE_UINT8_ENCODING,
     convert_tactile_dataset_in_place,
 )
+from vtla.datasets.visual_preprocess import make_visual_preprocess  # noqa: E402
 
 
 CAMERA_KEY_MAP = {
@@ -64,6 +66,7 @@ DATASET_INFO_FIELDS = {
     "ee_num_arms",
     "ee_arm_sides",
     "undistort",
+    "visual_preprocess",
 }
 
 
@@ -72,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--src", type=Path, required=True)
     parser.add_argument("--dst", type=Path, required=True)
     parser.add_argument("--task", required=True, help="Task instruction stored in tasks.parquet")
-    parser.add_argument("--size", type=int, default=256)
+    parser.add_argument("--size", type=int, default=224)
     parser.add_argument("--horizon", type=int, default=32)
     parser.add_argument("--action-gap", type=int, default=6)
     parser.add_argument("--jobs", type=int, default=12)
@@ -193,7 +196,12 @@ def rewrite_info(root: Path, source_info: dict, size: int) -> dict:
     info["ee_arm_sides"] = ["right", "left"]
     info["total_tasks"] = 1
     # Existing inference uses this marker to enable online wrist undistortion.
-    info["undistort"] = {"source_preprocessed": True}
+    info["undistort"] = {"source_preprocessed": True, "crop": None}
+    info["visual_preprocess"] = make_visual_preprocess(
+        size=size,
+        wrist_undistort=True,
+        tactile_encoding=TACTILE_UINT8_ENCODING,
+    )
     info = {key: value for key, value in info.items() if key in DATASET_INFO_FIELDS}
     (root / "meta" / "info.json").write_text(
         json.dumps(info, indent=4, ensure_ascii=False), encoding="utf-8"
@@ -313,18 +321,20 @@ def _probe_frames(path: Path) -> int:
     return int(output)
 
 
-def _encode_rgb_video(job: tuple[Path, Path, int, int, int, int]) -> tuple[Path, int]:
-    source, target, frames, size, fps, crf = job
+def _encode_rgb_video(job: tuple[Path, Path, int, int, int, int, bool]) -> tuple[Path, int]:
+    source, target, frames, size, fps, crf, needs_resize = job
     target.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0:v:0",
-            "-frames:v", str(frames), "-vf", f"scale={size}:{size}:flags=lanczos",
-            "-c:v", "libx264", "-crf", str(crf), "-g", "12", "-pix_fmt", "yuv420p",
-            "-an", "-vsync", "0", str(target),
-        ],
-        check=True,
-    )
+    command = [
+        "ffmpeg", "-y", "-v", "error", "-i", str(source), "-map", "0:v:0",
+        "-frames:v", str(frames),
+    ]
+    if needs_resize:
+        command += ["-vf", f"scale={size}:{size}:flags=lanczos"]
+    command += [
+        "-c:v", "libx264", "-crf", str(crf), "-g", "12", "-pix_fmt", "yuv420p",
+        "-an", "-vsync", "0", str(target),
+    ]
+    subprocess.run(command, check=True)
     actual = _probe_frames(target)
     if actual != frames:
         raise RuntimeError(f"{target}: encoded {actual} frames, expected {frames}")
@@ -367,13 +377,15 @@ def process_videos(
     output_info = _load_info(dst)
     rgb_work = []
     for old_key, new_key in CAMERA_KEY_MAP.items():
+        source_h, source_w = _video_hw(source_info["features"][old_key])
+        needs_resize = (source_h, source_w) != (size, size)
         locations = _episode_video_lengths(src, old_key, lengths)
         for (chunk, file_index), expected in locations.items():
             source = _video_path(src, source_info, old_key, chunk, file_index)
             target = _video_path(dst, output_info, new_key, chunk, file_index)
             if not source.is_file():
                 raise FileNotFoundError(source)
-            rgb_work.append((source, target, expected, size, fps, crf))
+            rgb_work.append((source, target, expected, size, fps, crf, needs_resize))
 
     tactile_work = []
     for old_key, new_key in TACTILE_KEY_MAP.items():
@@ -406,6 +418,7 @@ def process_videos(
             raise RuntimeError(
                 f"{key}: converted {counts.get(key, 0)} tactile frames, expected {expected}"
             )
+    downscale_videos_in_place(dst, size, gop=4, crf=crf, scale_flags="lanczos", jobs=jobs)
 
 
 def resolve_gripper_calibration(
@@ -478,6 +491,11 @@ def validate_output(root: Path, lengths: dict[int, int]) -> None:
         if grips.min() < -1e-6 or grips.max() > 1 + 1e-6:
             raise RuntimeError(f"Normalized gripper values outside [0, 1]: {grips.min()}..{grips.max()}")
     for key in OUTPUT_VIDEO_KEYS:
+        if list(info["features"][key].get("shape", [])[:2]) != [
+            info["visual_preprocess"]["resize"]["height"],
+            info["visual_preprocess"]["resize"]["width"],
+        ]:
+            raise RuntimeError(f"Processed visual feature has wrong size: {key}")
         locations = _episode_video_lengths(root, key, lengths)
         for (chunk, file_index), expected in locations.items():
             path = _video_path(root, info, key, chunk, file_index)

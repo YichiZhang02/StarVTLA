@@ -125,7 +125,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
 
 ```bash
 dataset_id=rm_isf_umi_left_20260820_insert_easy_precise
-bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
+bash scripts/process_joint_data.sh "${dataset_id}" 224 32 6
 ```
 
 最后一个参数是 relative-action 统计使用的 `action_gap`；训练 relative 模型时必须与 `train.sh` 的值一致。absolute action 不使用这组 relative 统计。
@@ -135,9 +135,8 @@ bash scripts/process_joint_data.sh "${dataset_id}" 256 32 6
 bash scripts/process_umi_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
 
-`size` 默认是 `224`，只控制三路 RGB 输出尺寸；四路触觉保持传感器原生的
-`96x128`（高 x 宽），后续模型预处理负责调整模型输入尺寸。源 RGB 使用 `_undist` key，
-已经去畸变，本流程不会再次去畸变。
+`size` 默认是 `224`，三路 RGB 和四路触觉都会直接拉伸到 `224x224`。源 RGB 使用
+`_undist` key，已经去畸变，本流程不会再次去畸变。
 
 处理示例：
 
@@ -285,6 +284,7 @@ bash inference.sh "${pretrained_id}" 5000 async rm_isf_umi_left
 普通 checkpoint 的实际机器人类型始终由 checkpoint 覆盖，不能通过 `match_policy=false` 绕过。
 当 checkpoint 的 `robot_type=umi` 时，必须把具体物理机器人类型作为 `inference.sh` 第 4 个参数
 显式传入；此时以 CLI 为准。两种情况都会启用对应 B/ISF 构型的在线 FK/IK。
+FPS、腕部去畸变及 RGB/触觉 resize 同样始终由 checkpoint 控制；旧 checkpoint 不兼容。
 
 
 ## VTLA模型文档

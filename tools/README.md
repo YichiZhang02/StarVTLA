@@ -6,7 +6,7 @@
 
 | 工具 | 用途 |
 | --- | --- |
-| `undistort_dataset_videos.py` | 腕部鱼眼去畸变和中心裁剪 |
+| `undistort_dataset_videos.py` | 腕部鱼眼去畸变，可选中心裁剪 |
 | `tactile_uint16_to_uint8.py` | 权威 `uint16` 触觉转训练用 `uint8` |
 | `downscale_dataset_videos.py` | 缩放视觉和训练用触觉视频 |
 | `process_umi_data.py` | 完整导入 unified-format UMI v2.5 数据 |
@@ -37,7 +37,7 @@ unified-format UMI v2.5 数据使用 `process_umi_data.py` 一次完成 key、me
 python tools/undistort_dataset_videos.py \
   --src playground/data/<dataset_id> \
   --dst playground/data/<dataset_id>_undist \
-  --crop 896 \
+  --no-crop \
   --jobs 8 \
   --verify
 ```
@@ -159,8 +159,8 @@ python tools/process_umi_data.py \
 它要求 v2.5 的三路 `_undist` RGB、四路 `observation.depth_deformation.tactile_*` 触觉和左右
 pose/gripper 字段。`_undist` RGB 已经去畸变，不会再次去畸变。三路 RGB 映射为
 `cam_top`、`left/right_cam_wrist` 并按 `--size` 缩放；默认 `--size 224`。四路触觉映射为
-`left/right_cam_finger0/1`，保持原生 `96x128`（高 x 宽），从 FFV1/`gbrp16le` uint16 MKV
-按固定项目量化转换为 `tactile_u8_linear_v1`、`libx264rgb`/`gbrp` uint8 MP4。
+`left/right_cam_finger0/1`，从 FFV1/`gbrp16le` uint16 MKV 转为
+`tactile_u8_linear_v1` 后也直接拉伸到 `--size`。
 
 输出只保留上述七个视觉 feature，未使用的额外 RGB/video feature、视频引用和陈旧触觉像素统计
 会被移除。其余输出包括 `robot_type=umi`、8 个 EE feature、relative stats 及处理 manifest。

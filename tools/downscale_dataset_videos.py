@@ -55,6 +55,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from fractions import Fraction
 from pathlib import Path
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from vtla.datasets.visual_preprocess import make_visual_preprocess  # noqa: E402
+
 # ffmpeg encoder name -> the codec tag stored in info.json (matches LeRobot's convention).
 _CODEC_TAG = {
     "libx264": "h264",
@@ -270,7 +276,11 @@ def _resize_video_in_place(args: tuple) -> tuple[str, str, int]:
                     input_container.decode(input_stream), start=1
                 ):
                     rgb = input_frame.to_ndarray(format="rgb24")
-                    resized = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LANCZOS4)
+                    resized = (
+                        rgb
+                        if rgb.shape[:2] == (size, size)
+                        else cv2.resize(rgb, (size, size), interpolation=cv2.INTER_LANCZOS4)
+                    )
                     output_frame = av.VideoFrame.from_ndarray(resized, format="rgb24")
                     output_frame.pts = frame_count - 1
                     output_frame.time_base = time_base
@@ -300,6 +310,19 @@ def _patch_in_place_info(root: Path, info: dict, targets: set[str], size: int) -
         video_info["video.pix_fmt"] = "yuv420p"
         video_info["video.channels"] = 3
         resized_tactile |= feature.get("tactile_encoding") == "tactile_u8_linear_v1"
+    tactile_encodings = {
+        feature.get("tactile_encoding")
+        for feature in info.get("features", {}).values()
+        if feature.get("tactile_encoding")
+    }
+    if len(tactile_encodings) > 1:
+        raise ValueError(f"Dataset has mixed tactile encodings: {sorted(tactile_encodings)}")
+    existing = info.get("visual_preprocess") or {}
+    info["visual_preprocess"] = make_visual_preprocess(
+        size=size,
+        wrist_undistort=bool(existing.get("wrist_undistort") or info.get("undistort")),
+        tactile_encoding=next(iter(tactile_encodings), None),
+    )
     (root / "meta" / "info.json").write_text(
         json.dumps(info, indent=4) + "\n", encoding="utf-8"
     )
@@ -391,6 +414,7 @@ def downscale_videos_in_place(
         targets.add(key)
 
     if not tasks:
+        _patch_in_place_info(root, info, set(), size)
         print(f"All MP4 videos are already {size}x{size}; nothing to resize.")
         return 0
 
@@ -439,7 +463,7 @@ def main() -> int:
     mode.add_argument("--root", type=Path, help="Dataset root to resize in place.")
     mode.add_argument("--src", type=Path, help="Source dataset root (unchanged).")
     ap.add_argument("--dst", type=Path, help="Destination dataset root (copy mode).")
-    ap.add_argument("--size", type=int, default=256, help="Output square resolution (default 256).")
+    ap.add_argument("--size", type=int, default=224, help="Output square resolution (default 224).")
     ap.add_argument("--gop", type=int, default=4, help="Keyframe interval; small = fast seeks (default 4).")
     ap.add_argument("--crf", type=int, default=18, help="x264 quality, lower = better/larger (default 18).")
     ap.add_argument("--codec", default="libx264", help="ffmpeg video encoder for RGB (default libx264).")

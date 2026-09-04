@@ -523,6 +523,14 @@ def make_policy(
         else:
             RobotConfig.validate_kinematics_sides(dataset_robot_type, tuple(detected_sides))
         cfg.robot_type = dataset_robot_type
+        visual_preprocess = getattr(ds_meta, "visual_preprocess", None)
+        if visual_preprocess is None:
+            raise ValueError(
+                "Training dataset is missing visual_preprocess; run the current dataset "
+                "processing pipeline before training."
+            )
+        cfg.dataset_fps = int(ds_meta.fps)
+        cfg.visual_preprocess = visual_preprocess
 
     if for_training:
         state_sources = {

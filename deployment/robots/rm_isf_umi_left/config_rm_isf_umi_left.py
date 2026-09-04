@@ -52,7 +52,7 @@ class RmIsfUmiLeftConfig(RobotConfig):
 
     # 腕部鱼眼去畸变。None 使用内置 x5_left 标定。
     undistort_wrist: str = "auto"
-    undistort_crop: int = 896
+    undistort_crop: int | None = None
     wrist_calib: str | None = None
 
     # 触觉传感器。

@@ -13,6 +13,7 @@ from vtla.frameworks.sensor_routing import (
     OBS_STATE_EPISODE_EE,
     OBS_STATE_EPISODE_QUAT,
 )
+from vtla.datasets.visual_preprocess import make_visual_preprocess
 
 
 class _StubPolicy(torch.nn.Module):
@@ -66,7 +67,15 @@ def _umi_metadata():
         OBS_STATE_ABSOLUTE_QUAT: _feature(16, quat_names),
         ACTION_ABSOLUTE_QUAT: _feature(16, quat_names),
     }
-    return SimpleNamespace(robot_type="umi", features=features, stats={})
+    return SimpleNamespace(
+        robot_type="umi",
+        features=features,
+        stats={},
+        fps=30,
+        visual_preprocess=make_visual_preprocess(
+            size=224, wrist_undistort=True, tactile_encoding=None
+        ),
+    )
 
 
 def _config(state_mode="episode_rot6d", action_mode="relative_rot6d"):
@@ -91,6 +100,8 @@ def test_umi_training_keeps_generic_robot_type_and_detects_arm_count(monkeypatch
 
     assert policy.config.robot_type == "umi"
     assert policy.config.ee_num_arms == 2
+    assert policy.config.dataset_fps == 30
+    assert policy.config.visual_preprocess["wrist_crop"] is None
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,7 @@ from vtla.datasets.feature_schema import mixture_feature_schema_diff
 from vtla.datasets.mixture_registry import load_mixture_definitions, mixture_from_dict
 from vtla.datasets.multi_dataset import aggregate_weighted_stats, validate_mixture_metadata
 from vtla.datasets.sampler import MixtureSampler
+from vtla.datasets.visual_preprocess import make_visual_preprocess
 
 
 def _visual_feature(**overrides):
@@ -73,14 +74,25 @@ def test_mixture_schema_rejects_missing_or_extra_feature_keys():
 def test_runtime_mixture_validation_uses_training_contract_schema():
     reference = _visual_feature(intrinsics={"224x224": {"fx": 80.0}})
     candidate = _visual_feature(intrinsics={"224x224": {"fx": 75.0}})
+    preprocess = make_visual_preprocess(size=224, wrist_undistort=True, tactile_encoding=None)
     datasets = [
         SimpleNamespace(
             repo_id="first",
-            meta=SimpleNamespace(fps=30, robot_type="umi", features={"camera": reference}),
+            meta=SimpleNamespace(
+                fps=30,
+                robot_type="umi",
+                features={"camera": reference},
+                visual_preprocess=preprocess,
+            ),
         ),
         SimpleNamespace(
             repo_id="second",
-            meta=SimpleNamespace(fps=30, robot_type="umi", features={"camera": candidate}),
+            meta=SimpleNamespace(
+                fps=30,
+                robot_type="umi",
+                features={"camera": candidate},
+                visual_preprocess=preprocess,
+            ),
         ),
     ]
 
@@ -89,6 +101,48 @@ def test_runtime_mixture_validation_uses_training_contract_schema():
     datasets[1].meta.features["camera"]["shape"] = [256, 256, 3]
     with pytest.raises(ValueError, match="field 'shape'"):
         validate_mixture_metadata(datasets)
+
+
+def test_runtime_mixture_validation_rejects_visual_preprocess_mismatch():
+    preprocess = make_visual_preprocess(
+        size=224, wrist_undistort=True, tactile_encoding="tactile_u8_linear_v1"
+    )
+    datasets = [
+        SimpleNamespace(
+            repo_id="first",
+            meta=SimpleNamespace(
+                fps=30,
+                robot_type="umi",
+                features={"camera": _visual_feature()},
+                visual_preprocess=preprocess,
+            ),
+        ),
+        SimpleNamespace(
+            repo_id="second",
+            meta=SimpleNamespace(
+                fps=30,
+                robot_type="umi",
+                features={"camera": _visual_feature()},
+                visual_preprocess={**preprocess, "wrist_undistort": False},
+            ),
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="visual_preprocess expected"):
+        validate_mixture_metadata(datasets)
+
+
+def test_runtime_mixture_requires_robot_and_visual_contract():
+    dataset = SimpleNamespace(
+        repo_id="first",
+        meta=SimpleNamespace(fps=30, robot_type=None, features={}, visual_preprocess=None),
+    )
+    with pytest.raises(ValueError, match="has no robot_type"):
+        validate_mixture_metadata([dataset])
+
+    dataset.meta.robot_type = "umi"
+    with pytest.raises(ValueError, match="has no visual_preprocess contract"):
+        validate_mixture_metadata([dataset])
 
 
 def test_registry_defaults_to_equal_weights_and_roundtrips(tmp_path):

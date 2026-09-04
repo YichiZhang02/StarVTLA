@@ -205,7 +205,11 @@ class RmIsfUmiLeft(Robot):
         for side in self.SIDES:
             if self._undistort_on:
                 crop = self.config.undistort_crop
-                ft[f"{side}_cam_wrist"] = (crop, crop, 3)
+                ft[f"{side}_cam_wrist"] = (
+                    (crop, crop, 3)
+                    if crop is not None
+                    else (self.config.fisheye_height, self.config.fisheye_width, 3)
+                )
             else:
                 ft[f"{side}_cam_wrist"] = (self.config.fisheye_height, self.config.fisheye_width, 3)
             if self.config.use_tactile:

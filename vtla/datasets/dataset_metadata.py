@@ -344,6 +344,11 @@ class LeRobotDatasetMetadata:
         return self.info.fps
 
     @property
+    def visual_preprocess(self) -> dict | None:
+        """Visual preprocessing applied to the stored training frames."""
+        return self.info.visual_preprocess
+
+    @property
     def features(self) -> dict[str, dict]:
         """All features contained in the dataset."""
         return self.info.features

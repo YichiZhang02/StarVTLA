@@ -27,7 +27,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 | 参数 | 默认值 | 含义 |
 | --- | ---: | --- |
 | `dataset_id` | 脚本内默认值 | `playground/data/` 下的源数据集 |
-| `size` | `256` | 最终视频边长 |
+| `size` | `224` | 最终视频边长 |
 | `horizon` | `32` | 相对 action 统计包含的动作数量，通常等于训练 `chunk_size` |
 | `action_gap` | `0` | 相对 action 统计的第一个 GT 偏移，必须与训练一致 |
 
@@ -35,7 +35,6 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 
 | 变量 | 默认值 | 含义 |
 | --- | ---: | --- |
-| `CROP` | `896` | 鱼眼去畸变后的中心裁剪边长 |
 | `JOBS` | `12` | ffmpeg 并行 worker 数 |
 | `CAMERAS` | 工具默认 | 覆盖需要去畸变的相机列表 |
 | `CALIB` | 工具默认 | 覆盖标定文件 |
@@ -44,7 +43,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 
 ```text
 源数据集
-  -> 腕部 RGB 在原始分辨率去畸变并裁剪
+  -> 腕部 RGB 在原始分辨率去畸变，不裁剪
   -> raw 触觉固定范围量化为 uint8
   -> 所有训练视频缩放到 size x size
   -> 根据 robot_type 选择 B/ISF FK 并生成 EE 列
@@ -141,7 +140,8 @@ TASK="Put the board eraser into the cup." \
   -> 三路 RGB key 改为 cam_top + left/right_cam_wrist
   -> 四路触觉 key 改为 left/right_cam_finger0/1
   -> RGB 缩放到 size x size，所有视频裁掉超过 episode 长度的尾帧
-  -> 触觉从 uint16 定点编码转换为 uint8 无损 RGB MP4
+  -> 触觉从 uint16 定点编码转换为 uint8 RGB MP4
+  -> RGB 和触觉统一拉伸到 size x size
   -> 删除未使用的额外 RGB/video feature 及其陈旧统计
   -> 写入真实 task 和 robot_type=umi
   -> 按全数据最小夹爪值和原始零点完成夹爪标定
@@ -168,8 +168,7 @@ TASK="Put the board eraser into the cup." \
 | `observation.depth_deformation.tactile_right_right` | `observation.images.right_cam_finger1` |
 
 源 RGB 的 `_undist` key 表示图像已经去畸变，本流程不会重复去畸变。`size` 默认 `224`，
-只作用于三路 RGB。触觉保持传感器原生 `96x128`（高 x 宽），不会被该流程缩放；后续模型
-预处理负责调整模型输入尺寸。触觉视频从 FFV1/`gbrp16le` uint16 MKV 按项目固定范围量化为
+三路 RGB 和四路触觉都统一拉伸到该尺寸。触觉视频从 FFV1/`gbrp16le` uint16 MKV 按项目固定范围量化为
 `tactile_u8_linear_v1`，再保存为 `libx264rgb`/`gbrp` uint8 MP4。
 
 processed 数据只保留 `cam_top`、`left/right_cam_wrist` 和四个 `left/right_cam_finger0/1`

@@ -16,13 +16,13 @@
 
 """推理时腕部鱼眼去畸变, 消除训练-推理 gap。
 
-训练数据集的腕部图是 `鱼眼去畸变 → 居中裁 CROP`(见 tools/undistort_dataset_videos.py);
+训练数据集的腕部图是 `鱼眼去畸变 → 可选居中裁剪`(见 tools/undistort_dataset_videos.py);
 推理时鱼眼相机给的是原生鱼眼帧。本模块对原生帧做**完全相同**的变换, 使 policy 看到的
 几何与训练一致。
 
 变换 (与 tools/undistort_dataset_videos.py 逐像素一致):
     1. cv2.fisheye 去畸变, 新内参 = K (原位去畸变, 不额外缩放)
-    2. 居中裁 CROP x CROP (不再 resize, 最终到 224 由 policy 的 resize_imgs_to 完成)
+    2. 可选居中裁剪 (新数据不裁剪，最终到 224 由推理视觉预处理完成)
 
 标定为 Kalibr/OpenCV equidistant 鱼眼模型, 内置在 calib/x5_{left,right}_intrinsics.json
 (从 tools/calib 复制, 使 deployment 自包含, 不依赖 tools/)。
@@ -57,14 +57,14 @@ def default_calib_path(side: str) -> Path:
 
 
 class WristUndistorter:
-    """加载 equidistant 鱼眼标定, 预计算 remap, 对每帧做 去畸变 + 居中裁剪。
+    """加载 equidistant 鱼眼标定，预计算 remap，并执行去畸变与可选裁剪。
 
     用法:
-        und = WristUndistorter(calib_path, crop=896)
-        rgb_896 = und(rgb_fisheye)   # (H,W,3) -> (896,896,3)
+        und = WristUndistorter(calib_path, crop=None)
+        rgb_rectified = und(rgb_fisheye)  # 保留完整去畸变画面
     """
 
-    def __init__(self, calib_path: str | Path, crop: int = 896):
+    def __init__(self, calib_path: str | Path, crop: int | None = None):
         d = json.loads(Path(calib_path).read_text())
         model = d.get("distortion_model")
         if model != "equidistant":
@@ -75,8 +75,8 @@ class WristUndistorter:
         self.D = np.array(d["distortion_coeffs"], dtype=np.float64).reshape((4, 1))
         w, h = (int(x) for x in d["resolution"])
         self.in_size = (w, h)  # (width, height)
-        self.crop = int(crop)
-        if self.crop > min(w, h):
+        self.crop = int(crop) if crop is not None else None
+        if self.crop is not None and self.crop > min(w, h):
             raise ValueError(
                 f"crop={self.crop} 超过标定分辨率最小边 {min(w, h)} ({calib_path})"
             )
@@ -85,12 +85,15 @@ class WristUndistorter:
             self.K, self.D, np.eye(3), self.K, self.in_size, cv2.CV_16SC2
         )
         self._warned_resize = False
-        logger.info(
-            f"腕部去畸变就绪: 标定 {self.in_size[0]}x{self.in_size[1]} -> 裁剪 {self.crop}x{self.crop} ({calib_path})"
+        output = (
+            f"裁剪 {self.crop}x{self.crop}" if self.crop is not None else "保留完整画面"
         )
+        logger.info(f"腕部去畸变就绪: 标定 {w}x{h} -> {output} ({calib_path})")
 
     @property
     def out_shape(self) -> tuple[int, int, int]:
+        if self.crop is None:
+            return (self.in_size[1], self.in_size[0], 3)
         return (self.crop, self.crop, 3)
 
     def __call__(self, frame: NDArray) -> NDArray:
@@ -107,6 +110,8 @@ class WristUndistorter:
             frame, self.map1, self.map2,
             interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
         )
+        if self.crop is None:
+            return und
         in_w, in_h = self.in_size
         x0 = (in_w - self.crop) // 2
         y0 = (in_h - self.crop) // 2

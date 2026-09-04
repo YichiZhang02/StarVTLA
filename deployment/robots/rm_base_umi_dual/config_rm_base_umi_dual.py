@@ -97,14 +97,14 @@ class RmBaseUmiDualConfig(RobotConfig):
     fisheye_max_datagram: int = 1200
 
     # ============ 腕部鱼眼去畸变 (消除训练-推理 gap) ============
-    # 训练数据若用 tools/undistort_dataset_videos.py 去过畸变(腕部=去畸变+居中裁 896),
+    # 训练数据若用 tools/undistort_dataset_videos.py 去过畸变，
     # 推理时必须对原生鱼眼帧做相同变换, 否则几何不一致。
     #   "auto"  : 由 inference.py --match_policy 按 checkpoint 自动判定后改写为 true/false;
     #             机器人层(采集/遥操作, 无 policy)把 auto 视为关闭(采集存原生鱼眼)。
     #   "true"  : 强制开启;  "false" : 强制关闭
     undistort_wrist: str = "auto"
-    # 居中裁剪边长 (须与训练 crop 一致, tools 默认 896)
-    undistort_crop: int = 896
+    # 可选居中裁剪边长 (须与 checkpoint 契约一致；新数据默认不裁剪)
+    undistort_crop: int | None = None
     # 每臂标定文件 {side: path}; None = 用 deployment 内置 calib/x5_{left,right}_intrinsics.json
     wrist_calib: dict[str, str] | None = None
 

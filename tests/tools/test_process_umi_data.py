@@ -85,6 +85,15 @@ def test_rewrite_info_canonicalizes_camera_axes_keys_and_robot_type(tmp_path):
     assert result["robot_type"] == "umi"
     assert result["ee_num_arms"] == 2
     assert result["ee_arm_sides"] == ["right", "left"]
+    assert result["undistort"] == {"source_preprocessed": True, "crop": None}
+    assert result["visual_preprocess"]["wrist_undistort"] is True
+    assert result["visual_preprocess"]["wrist_crop"] is None
+    assert result["visual_preprocess"]["resize"] == {
+        "height": 256,
+        "width": 256,
+        "mode": "stretch",
+        "interpolation": "lanczos",
+    }
     assert set(OUTPUT_VIDEO_KEYS).issubset(result["features"])
     assert "observation.images.unused_rgb" not in result["features"]
     for key in CAMERA_KEY_MAP.values():
