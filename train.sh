@@ -179,7 +179,7 @@ echo "Color temp range: ${color_temp_range:-<off>}"
 echo "Top cam keys:   ${top_cam}"
 echo "Wrist cam keys: ${wrist_cam}"
 echo "Tactile keys:   ${tactile_keys}"
-if [ "${tactile_mode}" = "encode" ]; then
+if [ "${d}" = "encode" ]; then
   echo "Tactile encoder path: ${tactile_encoder_path} (${tactile_pool_size}x${tactile_pool_size} pooled backbone, trained jointly)"
 fi
 if [ "${tactile_mode}" != "none" ]; then
