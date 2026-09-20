@@ -128,6 +128,9 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
     Returns:
         LeRobotDataset | MixtureLeRobotDataset
     """
+    episode_start_keys = list(getattr(cfg.trainable_config, "episode_start_image_keys", lambda: [])())
+    if episode_start_keys and cfg.dataset.streaming:
+        raise ValueError("Episode-start tactile baselines require the indexed dataset (streaming=false).")
     image_transforms = (
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
@@ -264,6 +267,15 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                 )
         cfg.dataset.resolved_mixture = resolved_mixture
         logging.info("Resolved dataset mixture: %s", dataset)
+
+    if episode_start_keys:
+        children = dataset._datasets if isinstance(dataset, MixtureLeRobotDataset) else [dataset]
+        for child in children:
+            reader = child._ensure_reader()
+            missing = set(episode_start_keys) - set(child.meta.camera_keys)
+            if missing:
+                raise ValueError(f"Episode-baseline tactile keys missing from dataset: {sorted(missing)}")
+            reader.episode_start_image_keys = episode_start_keys
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:

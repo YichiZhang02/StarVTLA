@@ -217,6 +217,11 @@ class DatasetReader:
             )
             for key, delta_idx in self.delta_indices.items()
         }
+        # Policy-owned episode-baseline sampling (e.g. N0-VTLA). Absolute
+        # indices are later remapped for filtered datasets in the usual path.
+        for key in getattr(self, "episode_start_image_keys", ()):
+            query_indices[key] = [ep_start, abs_idx]
+            padding[f"{key}_is_pad"] = torch.zeros(2, dtype=torch.bool)
         return query_indices, padding
 
     @property

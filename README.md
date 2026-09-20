@@ -298,6 +298,7 @@ FPS、腕部去畸变及 RGB/触觉 resize 同样始终由 checkpoint 控制；�
 | StarVLA-GR00T DINOAlign | [vtla/frameworks/starvla_groot_dinoalign/README.md](vtla/frameworks/starvla_groot_dinoalign/README.md) |
 | FastWAM | [vtla/frameworks/fastwam/README.md](vtla/frameworks/fastwam/README.md) |
 | Dream-Tac | [vtla/frameworks/dream_tac/README.md](vtla/frameworks/dream_tac/README.md) |
+| N0-VTLA | [vtla/frameworks/n0_vtla/README.md](vtla/frameworks/n0_vtla/README.md) |
 
 ## Backbone模型文档
 

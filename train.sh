@@ -5,13 +5,13 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
 dataset_id=${1:-cupgen_umi}  # 数据集名
-policy_type=${2:-pi05}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac
+policy_type=${2:-pi05}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac | n0_vtla
 
 # 训练配置
 num_processes=${3:-4}
 batch_size=${4:-8}
 steps=${5:-20_000}
-save_freq=10_000
+save_freq=5_000
 log_freq=100
 
 # 数据配置
@@ -92,9 +92,10 @@ dinov3_checkpoint=${DINOV3_CHECKPOINT:-}
 case "${policy_type}" in
   pi05)          pretrained_path=${pretrained_path:-playground/pretrained_models/pi05_base} ;;
   starvla_groot|starvla_groot_dinoalign) base_vlm=${base_vlm:-playground/pretrained_models/Qwen3.5-0.8B} ;;
+  n0_vtla)       : ;; # Native weights use N0_VTLA_BASE_PATH, StarVTLA checkpoints use PRETRAINED_PATH
   dream_tac)     pretrained_path=playground/pretrained_models/Cosmos-Predict2-2B-Video2World ;;
   act|diffusion|fastwam) : ;;  # 从底座或随机初始化，不加载 VTLA policy checkpoint
-  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac)"; exit 1 ;;
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla)"; exit 1 ;;
 esac
 
 
@@ -117,6 +118,22 @@ case "${policy_type}" in
     extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.load_text_encoder=false"
     extra_args="${extra_args} --policy.visualization_enabled=${visualization_enabled}"
     ;;
+  n0_vtla)
+    if [ "${tactile_mode}" != "as_image" ]; then
+      echo "n0_vtla requires tactile_mode=as_image"
+      exit 1
+    fi
+    extra_args="${extra_args} --dataset.return_uint8=true --policy.dtype=bfloat16 --policy.compile_model=false"
+    if [ -n "${N0_VTLA_BASE_PATH:-}" ]; then
+      extra_args="${extra_args} --policy.base_model_path=${N0_VTLA_BASE_PATH}"
+    elif [ -z "${pretrained_path}" ]; then
+      echo "Set N0_VTLA_BASE_PATH to native model.safetensors directory, or PRETRAINED_PATH to a StarVTLA checkpoint"
+      exit 1
+    fi
+    if [ -n "${PALIGEMMA_TOKENIZER_PATH:-}" ]; then
+      extra_args="${extra_args} --policy.paligemma_tokenizer_path=${PALIGEMMA_TOKENIZER_PATH}"
+    fi
+    ;;
   dream_tac)
     if [ "${tactile_mode}" = "encode" ]; then
       echo "dream_tac supports tactile_mode=none or as_image, not encode"
@@ -129,7 +146,7 @@ case "${policy_type}" in
     : # 这两个没有 VLM/dtype 相关字段
     ;;
   *)
-    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac)"; exit 1
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla)"; exit 1
     ;;
 esac
 
@@ -157,7 +174,7 @@ if [ "${tactile_mode}" = "encode" ]; then
 fi
 
 # 触觉时序窗口（encode 和 as_image 均生效；F=1 时完全向后兼容）
-if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "dream_tac" ]; then
+if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "dream_tac" ] && [ "${policy_type}" != "n0_vtla" ]; then
   extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
   extra_args="${extra_args} --policy.tactile_num_frames=${tactile_num_frames}"
   extra_args="${extra_args} --policy.tactile_frame_offset=${tactile_frame_offset}"

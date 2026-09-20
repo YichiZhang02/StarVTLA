@@ -55,6 +55,7 @@ from .diffusion.configuration_diffusion import DiffusionConfig
 from .fastwam.configuration_fastwam import FastWAMConfig
 from .dream_tac.configuration_dream_tac import DreamTacConfig
 from .pi05.configuration_pi05 import PI05Config
+from .n0_vtla.configuration_n0_vtla import N0VTLAConfig
 from .pretrained import PreTrainedPolicy
 from .sensor_routing import (
     ACTION_ABSOLUTE_EE,
@@ -137,6 +138,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .dream_tac.modeling_dream_tac import DreamTacPolicy
 
         return DreamTacPolicy
+    elif name == "n0_vtla":
+        from .n0_vtla.modeling_n0_vtla import N0VTLAPolicy
+
+        return N0VTLAPolicy
     elif name == "pi05":
         from .pi05.modeling_pi05 import PI05Policy
 
@@ -185,6 +190,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return FastWAMConfig(**kwargs)
     elif policy_type == "dream_tac":
         return DreamTacConfig(**kwargs)
+    elif policy_type == "n0_vtla":
+        return N0VTLAConfig(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
     elif policy_type == "starvla_groot":
@@ -272,6 +279,8 @@ def make_pre_post_processors(
             from .fastwam import processor_fastwam  # noqa: F401
         elif isinstance(policy_cfg, DreamTacConfig):
             from .dream_tac import processor_dream_tac  # noqa: F401
+        elif isinstance(policy_cfg, N0VTLAConfig):
+            from .n0_vtla import processor_n0_vtla  # noqa: F401
         elif isinstance(policy_cfg, PI05Config):
             from .pi05 import processor_pi05  # noqa: F401
         elif isinstance(policy_cfg, StarvlaGrootConfig):
@@ -392,6 +401,10 @@ def make_pre_post_processors(
             dataset_stats=kwargs.get("dataset_stats"),
         )
 
+    elif isinstance(policy_cfg, N0VTLAConfig):
+        from .n0_vtla.processor_n0_vtla import make_n0_vtla_pre_post_processors
+
+        processors = make_n0_vtla_pre_post_processors(policy_cfg, kwargs.get("dataset_stats"))
     elif isinstance(policy_cfg, PI05Config):
         from .pi05.processor_pi05 import make_pi05_pre_post_processors
 
@@ -589,6 +602,10 @@ def make_policy(
         # 20-dim EE column anyway, so this only matters for joint/none modes.
         from vtla.engine.configs.policies import PreTrainedConfig as _BaseCfg  # noqa: PLC0415
         _ckpt_cfg = _BaseCfg.from_pretrained(policy_checkpoint_path)
+        if isinstance(cfg, N0VTLAConfig):
+            if not isinstance(_ckpt_cfg, N0VTLAConfig):
+                raise ValueError("Use base_model_path for native N0-VTLA weights; pretrained_path requires a StarVTLA checkpoint.")
+            cfg.validate_checkpoint_layout(_ckpt_cfg)
         if isinstance(cfg, DreamTacConfig):
             if not isinstance(_ckpt_cfg, DreamTacConfig):
                 raise ValueError(
@@ -604,7 +621,7 @@ def make_policy(
             cfg._starvtla_checkpoint_path = Path(policy_checkpoint_path)
             cfg.pretrained_path = _ckpt_cfg.pretrained_path
         for key, ft in (_ckpt_cfg.input_features or {}).items():
-            if ft.type is not FeatureType.VISUAL:
+            if ft.type is not FeatureType.VISUAL and not isinstance(cfg, N0VTLAConfig):
                 cfg.input_features[key] = ft
 
     # Store action feature names for relative_exclude_joints support

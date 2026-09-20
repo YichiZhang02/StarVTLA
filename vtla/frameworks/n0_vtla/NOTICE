@@ -1,0 +1,2 @@
+Tactile encoder and predictor adapted from N0-VTLA (NeoteAI Team and Fudan TEAI Team), https://github.com/neoteai/N0-VTLA . Original tactile components are CC BY-SA 4.0 (LICENSE). Changes: package-local imports, offline DINOv2 construction and dtype handling.
+The PaliGemma/Gemma implementation is reused from StarVTLA pi05 / pi_gemma, retaining its Apache-2.0 headers. Model weights remain subject to their own upstream terms.

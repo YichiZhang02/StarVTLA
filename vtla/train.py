@@ -351,7 +351,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         # The rebuilt-from-scratch processor would otherwise fall back to the HF hub tokenizer name
         # (the local path carried by the pretrained processor json is discarded here). For pi05, pull
         # the tokenizer straight from the pretrained model dir so the saved checkpoint stays offline-usable.
-        if getattr(active_cfg, "type", None) == "pi05":
+        if getattr(active_cfg, "type", None) in {"pi05", "n0_vtla"}:
             _tokenizer_dir = processor_pretrained_path / "paligemma-3b-pt-224-tokenizer"
             if _tokenizer_dir.is_dir():
                 active_cfg.paligemma_tokenizer_path = str(_tokenizer_dir)
@@ -379,9 +379,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
             "rename_map": cfg.rename_map
         }
-        if getattr(active_cfg, "type", None) == "pi05":
+        if getattr(active_cfg, "type", None) in {"pi05", "n0_vtla"}:
             processor_kwargs["preprocessor_overrides"][
-                "pi05_prepare_state_tokenizer_processor_step"
+                "n0_vtla_prepare_state" if active_cfg.type == "n0_vtla" else "pi05_prepare_state_tokenizer_processor_step"
             ] = {
                 "state_mode": getattr(active_cfg, "state_mode", "absolute_joint"),
                 "max_state_dim": getattr(active_cfg, "max_state_dim", 32),
@@ -451,6 +451,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             drop_n_last_frames=getattr(active_cfg, "drop_n_last_frames", 0),
             seed=cfg.seed or 0,
         )
+    elif active_cfg.type == "n0_vtla":
+        # Baseline sampling uses indexed data; sampled rows must be LOCAL to
+        # the selected episodes, not absolute indices from episode metadata.
+        indices = MixtureSampler._valid_child_indices(dataset, 0, active_cfg.drop_n_last_frames)
+        if not indices:
+            raise ValueError("No N0-VTLA targets remain after applying action_gap.")
+        shuffle = False
+        sampler = torch.utils.data.SubsetRandomSampler(indices)
     elif hasattr(active_cfg, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
