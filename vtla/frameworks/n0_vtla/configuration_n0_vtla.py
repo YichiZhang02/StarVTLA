@@ -103,11 +103,21 @@ class N0VTLAConfig(PI05Config):
         self.output_features = {ACTION: self.action_feature}
 
     def validate_checkpoint_layout(self, saved):
-        fields = ("action_mode", "state_mode", "ee_num_arms", "ee_frame", "max_action_dim", "max_state_dim",
+        fields = ("action_mode", "state_mode", "ee_num_arms", "max_action_dim", "max_state_dim",
                   "paligemma_variant", "action_expert_variant", "predictor_arch", "n_latent",
                   "predictor_n_layers", "predictor_n_heads", "z_gate_zero_init", "g_to_expert",
                   "tactile_pool_grid", "tactile_image_size", "dinov2_config", "chunk_size")
         changed = [name for name in fields if getattr(self, name) != getattr(saved, name)]
+        # Inference resolves "auto" before loading weights. Compare coordinate
+        # semantics, retaining the original UMI type after physical robot binding.
+        def resolved_ee_frame(config):
+            if config.ee_frame != "auto":
+                return config.ee_frame
+            robot_type = getattr(config, "original_checkpoint_robot_type", config.robot_type)
+            return "tcp" if robot_type == "umi" else "flange"
+
+        if resolved_ee_frame(self) != resolved_ee_frame(saved):
+            changed.append("ee_frame")
         if self.image_keys() != saved.image_keys():
             changed.append("sensor order")
         if changed:

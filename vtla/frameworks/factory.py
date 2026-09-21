@@ -262,6 +262,28 @@ def make_pre_post_processors(
         preprocessor_overrides = {
             key: dict(value) for key, value in (kwargs.get("preprocessor_overrides") or {}).items()
         }
+        # N0 inherits PI05's tokenizer. Saved processors can contain an absolute
+        # path from the training machine; rebind only the standard local asset.
+        if isinstance(policy_cfg, PI05Config):
+            tokenizer_overrides = preprocessor_overrides.get("tokenizer_processor", {})
+            configured = policy_cfg.paligemma_tokenizer_path
+            if configured and not {"tokenizer_name", "tokenizer"}.intersection(tokenizer_overrides):
+                tokenizer_path = Path(configured).expanduser()
+                candidates = [tokenizer_path]
+                asset_name = "paligemma-3b-pt-224-tokenizer"
+                if tokenizer_path.is_absolute() and tokenizer_path.name == asset_name:
+                    candidates.extend([
+                        Path(pretrained_path) / asset_name,
+                        Path(__file__).resolve().parents[2] / "playground/pretrained_models/pi05_base" / asset_name,
+                    ])
+                local_tokenizer = next(
+                    (path for path in candidates if (path / "tokenizer_config.json").is_file()), None
+                )
+                if local_tokenizer is not None:
+                    preprocessor_overrides.setdefault("tokenizer_processor", {})["tokenizer_name"] = str(
+                        local_tokenizer.resolve()
+                    )
+                    logging.info("Using local PaliGemma tokenizer: %s", local_tokenizer)
         if isinstance(policy_cfg, FastWAMConfig) and policy_cfg.load_text_encoder:
             fastwam_overrides = preprocessor_overrides.setdefault("fastwam_prepare_batch", {})
             fastwam_overrides["use_text_cache"] = False

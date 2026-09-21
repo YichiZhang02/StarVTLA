@@ -90,6 +90,20 @@ def test_registration_and_serialization(tmp_path):
         config(max_action_dim=2).validate_features()
 
 
+@pytest.mark.parametrize('robot_type, resolved', [('rm_isf_umi_left', 'flange'), ('umi', 'tcp')])
+def test_checkpoint_frame_after_inference_resolution(robot_type, resolved):
+    saved = config(robot_type=robot_type, ee_frame='auto')
+    runtime = replace(saved, robot_type='rm_isf_umi_left', ee_frame=resolved)
+    runtime.original_checkpoint_robot_type = robot_type
+    runtime.validate_checkpoint_layout(saved)
+    # A genuine frame change must still fail, including when the saved value is auto.
+    wrong = replace(runtime, ee_frame='tcp' if resolved == 'flange' else 'flange')
+    with pytest.raises(ValueError, match='ee_frame'):
+        wrong.validate_checkpoint_layout(saved)
+    runtime.ee_frame = 'auto'
+    runtime.validate_checkpoint_layout(replace(saved, ee_frame=resolved))
+
+
 def test_native_dinov2_position_grid():
     from vtla.frameworks.n0_vtla.tactile_encoder import FrozenDINOv2TactileEncoder
 
@@ -275,6 +289,36 @@ def test_action_processor_roundtrip_and_no_state(tmp_path, representation, refer
     torch.testing.assert_close(post(prepared[ACTION]), actions)
     if reference == 'relative':
         torch.testing.assert_close(prepared[ACTION][..., width - 1], actions[..., width - 1])
+
+
+@pytest.mark.parametrize('policy_type', ['pi05', 'n0_vtla'])
+@pytest.mark.parametrize('explicit_override', [False, True])
+def test_relocated_checkpoint_tokenizer(tmp_path, monkeypatch, policy_type, explicit_override):
+    from vtla.frameworks.factory import make_pre_post_processors, PolicyProcessorPipeline
+
+    asset = tmp_path / 'paligemma-3b-pt-224-tokenizer'
+    asset.mkdir()
+    (asset / 'tokenizer_config.json').write_text('{}')
+    cfg = make_policy_config(policy_type, paligemma_tokenizer_path=f'/old/training/machine/{asset.name}')
+    cfg.state_mode = 'absolute_joint'
+    cfg.action_mode = 'absolute_joint'
+    captured = []
+
+    def load_pipeline(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(steps=[])
+
+    monkeypatch.setattr(PolicyProcessorPipeline, 'from_pretrained', load_pipeline)
+    overrides = {'tokenizer_processor': {'max_length': 123}}
+    if explicit_override:
+        overrides['tokenizer_processor']['tokenizer_name'] = 'explicit/tokenizer'
+    make_pre_post_processors(cfg, pretrained_path=tmp_path, preprocessor_overrides=overrides)
+    actual = captured[0]['overrides']['tokenizer_processor']
+    assert actual['tokenizer_name'] == ('explicit/tokenizer' if explicit_override else str(asset))
+    assert actual['max_length'] == 123
+    assert overrides['tokenizer_processor'] == (
+        {'max_length': 123, 'tokenizer_name': 'explicit/tokenizer'} if explicit_override else {'max_length': 123}
+    )
 
 
 def test_processor_saved_step_reload(tmp_path):
