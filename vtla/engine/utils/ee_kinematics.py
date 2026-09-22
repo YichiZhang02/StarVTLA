@@ -14,17 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Realman forward-kinematics helpers shared between the offline conversion tool and the
-real-time EpisodeEEPreprocessorStep.
-
-These functions mirror the logic in tools/convert_joints_to_eepose.py so that the
-same FK math can be reused at inference time without importing from the tools/ directory.
-
-Dual-arm layout (16-dim joint vector → 20-dim EE vector):
-  - right arm: joints[0:7] + gripper[7]   → [xyz(3), rot6d(6), gripper(1)] = 10 dims
-  - left arm:  joints[8:15] + gripper[15] → [xyz(3), rot6d(6), gripper(1)] = 10 dims
-  - (indices are derived from feature names via joint_indices())
-"""
+"""Shared offline/online FK and TCP geometry. FK returns flange poses;
+all packed model EE poses are TCP rot6d, after applying the robot tool calibration.
+Quaternion conversion occurs only at the SDK boundary."""
 
 from __future__ import annotations
 
@@ -124,25 +116,6 @@ def mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
     return np.concatenate([mat[:, 0], mat[:, 1]]).astype(np.float64)
 
 
-def mat_to_rot(mat: np.ndarray, rot_mode: str) -> np.ndarray:
-    """3×3 rotation matrix → rotation representation in ``rot_mode`` format.
-
-    Args:
-        mat: (3, 3) rotation matrix.
-        rot_mode: ``"rot6d"`` (6-dim first-two-columns) or ``"quat"`` (4-dim [x, y, z, w]).
-
-    Returns:
-        1D numpy array of length 6 (rot6d) or 4 (quat).
-    """
-    if rot_mode == "rot6d":
-        return mat_to_rot6d(mat)
-    elif rot_mode == "quat":
-        q = R.from_matrix(mat).as_quat()  # (x, y, z, w)
-        return q.astype(np.float64)
-    else:
-        raise ValueError(f"Unknown rot_mode '{rot_mode}'. Expected 'rot6d' or 'quat'.")
-
-
 def flange_to_tcp(
     flange_pos: np.ndarray,
     flange_rot: np.ndarray,
@@ -172,47 +145,37 @@ def tcp_to_flange(
     return tcp_pos - flange_rot @ offset_pos, flange_rot
 
 
-def _to_ee_frame(
+def _to_tcp(
     pos: np.ndarray,
     mat: np.ndarray,
     side: str,
-    ee_frame: str,
     flange_tcp_calibration: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if ee_frame == "flange":
-        return pos, mat
-    if ee_frame != "tcp":
-        raise ValueError(f"Unsupported ee_frame={ee_frame!r}; expected 'tcp' or 'flange'.")
     if flange_tcp_calibration is None or side not in flange_tcp_calibration:
         raise ValueError(f"Missing flange-to-TCP calibration for side={side!r}.")
     xyz, rpy = flange_tcp_calibration[side]
     return flange_to_tcp(pos, mat, xyz, rpy)
 
 
-def relative_arm_ee(pos, mat, grip, p0, R0, rot_mode: str = "rot6d") -> np.ndarray:
-    """Single-arm: absolute EE → pose relative to episode-start frame T0.
-
-    pos_rel = R0^T (pt - p0),  R_rel = R0^T · Rt,  gripper kept absolute.
-    Returns a vector [pos(3), rot(rot_dim), gripper(1)] where rot_dim is 6 for rot6d or 4 for quat.
-    """
+def relative_arm_ee(pos, mat, grip, p0, R0) -> np.ndarray:
+    """Express a TCP pose in its episode-start frame; retain geometric rot6d."""
     R0t = R0.T
     p_rel = R0t @ (pos - p0)
     R_rel = R0t @ mat
-    return np.concatenate([p_rel, mat_to_rot(R_rel, rot_mode), [grip]]).astype(np.float64)
+    return np.concatenate([p_rel, mat_to_rot6d(R_rel), [grip]]).astype(np.float64)
 
 
 def fk_both(
     algo,
     joint_vector: np.ndarray,
     jidx: dict,
-    ee_frame: str = "flange",
     flange_tcp_calibration: dict[str, tuple[tuple[float, float, float], tuple[float, float, float]]] | None = None,
 ):
     """FK for every arm present in ``jidx`` (one or two arms)."""
     arms = []
     for side, (joints, grip) in zip(jidx["sides"], split_arms(joint_vector, jidx), strict=True):
         pos, mat = fk(algo, joints)
-        pos, mat = _to_ee_frame(pos, mat, side, ee_frame, flange_tcp_calibration)
+        pos, mat = _to_tcp(pos, mat, side, flange_tcp_calibration)
         arms.append(((pos, mat), grip))
     return tuple(arms)
 
@@ -222,54 +185,31 @@ def to_episode_ee(
     vec16: np.ndarray,
     jidx: dict,
     baseline,
-    rot_mode: str = "rot6d",
-    ee_frame: str = "flange",
     flange_tcp_calibration=None,
 ) -> np.ndarray:
-    """Convert 16-dim joint vector to EE pose relative to episode-start frame.
-
-    Args:
-        algo: Realman Algo instance (from make_realman_algo()).
-        vec16: 16-dim joint state (right-arm joints+gripper, then left-arm).
-        jidx: Index dict from joint_indices().
-        baseline: ((R_p0, R_R0), (L_p0, L_R0)) from the episode's first frame.
-        rot_mode: Rotation storage format — ``"rot6d"`` (default, 10 dims/arm) or ``"quat"`` (8 dims/arm).
-
-    Returns:
-        float32 array of shape (n_arms * per_arm_dim,).
-    """
-    arms = fk_both(algo, vec16, jidx, ee_frame, flange_tcp_calibration)
+    """Convert joints to episode-relative TCP poses using the calibrated TCP baseline."""
+    arms = fk_both(algo, vec16, jidx, flange_tcp_calibration)
     return np.concatenate([
-        relative_arm_ee(pos, mat, grip, pos0, mat0, rot_mode)
+        relative_arm_ee(pos, mat, grip, pos0, mat0)
         for ((pos, mat), grip), (pos0, mat0) in zip(arms, baseline, strict=True)
     ]).astype(np.float32)
 
 
-def absolute_arm_ee(pos, mat, grip, rot_mode: str = "rot6d") -> np.ndarray:
+def absolute_arm_ee(pos, mat, grip) -> np.ndarray:
     """Single-arm: absolute EE in the robot base frame (no T0). [pos(3), rot(rot_dim), gripper(1)]."""
-    return np.concatenate([pos, mat_to_rot(mat, rot_mode), [grip]]).astype(np.float64)
+    return np.concatenate([pos, mat_to_rot6d(mat), [grip]]).astype(np.float64)
 
 
 def to_absolute_ee(
     algo,
     vec16: np.ndarray,
     jidx: dict,
-    rot_mode: str = "rot6d",
-    ee_frame: str = "flange",
     flange_tcp_calibration=None,
 ) -> np.ndarray:
-    """Convert 16-dim joint vector to base-frame EE pose (Tt, no episode baseline).
-
-    Same packing/layout as :func:`to_episode_ee` (RIGHT arm first then LEFT, per arm
-    ``[pos(3), rot(rot_dim), gripper(1)]``) but expressed in the robot base frame directly.
-    Used by state_mode='absolute_rot6d' or 'absolute_quat'.
-
-    Returns:
-        float32 array of shape (n_arms * per_arm_dim,).
-    """
+    """Convert joints to base-frame TCP poses using the robot tool calibration."""
     return np.concatenate([
-        absolute_arm_ee(pos, mat, grip, rot_mode)
-        for (pos, mat), grip in fk_both(algo, vec16, jidx, ee_frame, flange_tcp_calibration)
+        absolute_arm_ee(pos, mat, grip)
+        for (pos, mat), grip in fk_both(algo, vec16, jidx, flange_tcp_calibration)
     ]).astype(np.float32)
 
 
@@ -277,7 +217,6 @@ def compute_baseline(
     algo,
     vec16: np.ndarray,
     jidx: dict,
-    ee_frame: str = "flange",
     flange_tcp_calibration=None,
 ) -> tuple:
     """Compute the episode-start FK baseline from the first-frame joint state.
@@ -288,6 +227,6 @@ def compute_baseline(
     return tuple(
         pose
         for pose, _grip in fk_both(
-            algo, vec16, jidx, ee_frame, flange_tcp_calibration
+            algo, vec16, jidx, flange_tcp_calibration
         )
     )

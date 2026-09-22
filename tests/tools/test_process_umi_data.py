@@ -8,7 +8,6 @@ from tools.convert_umi_to_eepose import (
     pose_indices,
     set_gripper_calibration,
     to_absolute_ee_umi,
-    to_absolute_quat_umi,
 )
 from tools.process_umi_data import (
     CAMERA_KEY_MAP,
@@ -43,13 +42,10 @@ def test_unified_pose_names_and_grippers_are_packed_right_then_left():
     )
 
     rot6d = to_absolute_ee_umi(vector, indices)
-    quat = to_absolute_quat_umi(vector, indices)
 
     np.testing.assert_allclose(rot6d[:3], [4, 5, 6])
     np.testing.assert_allclose(rot6d[10:13], [1, 2, 3])
     np.testing.assert_allclose(rot6d[[9, 19]], [0, 1])
-    np.testing.assert_allclose(np.linalg.norm(quat[[3, 4, 5, 6]]), 1)
-    np.testing.assert_allclose(np.linalg.norm(quat[[11, 12, 13, 14]]), 1)
 
 
 def test_rewrite_info_canonicalizes_camera_axes_keys_and_robot_type(tmp_path):

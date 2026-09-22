@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -297,18 +296,16 @@ def column_values(paths: list[Path], column: str) -> np.ndarray:
 def resolve_temporal_config(
     root: Path, horizon_arg: int | None, action_gap_arg: int | None
 ) -> tuple[int, int]:
-    manifest_path = root / "meta" / "umi_processing.json"
-    manifest = load_json(manifest_path) if manifest_path.is_file() else {}
-    horizon = horizon_arg if horizon_arg is not None else manifest.get("horizon")
-    action_gap = action_gap_arg if action_gap_arg is not None else manifest.get("action_gap")
-    if horizon is None or action_gap is None:
-        raise ValueError(
-            "action_relative stats require --horizon and --action-gap when they are not "
-            "recorded in meta/umi_processing.json"
-        )
-    if int(horizon) <= 0 or int(action_gap) < 0:
-        raise ValueError(f"invalid horizon/action_gap: {horizon}/{action_gap}")
-    return int(horizon), int(action_gap)
+    from vtla.datasets.tcp_contract import validate_tcp_contract
+    contract = load_json(root / "meta" / "info.json").get("tcp_contract")
+    validate_tcp_contract(contract)
+    offsets = contract["stats_offsets"]
+    if horizon_arg is not None or action_gap_arg is not None:
+        horizon = horizon_arg if horizon_arg is not None else len(offsets)
+        gap = action_gap_arg if action_gap_arg is not None else offsets[0]
+        validate_tcp_contract(contract, offsets=range(gap, gap + horizon))
+    return len(offsets), offsets[0]
+
 
 
 def relative_stats(
@@ -317,47 +314,13 @@ def relative_stats(
     action_feature: str,
     horizon: int,
     action_gap: int,
-    rot_mode: str,
     keys: tuple[str, ...],
 ) -> dict[str, list]:
-    import torch
-
-    from vtla.engine.utils.ee_transforms import ee_to_relative
-
-    per_episode: dict[int, list[tuple[int, np.ndarray, np.ndarray]]] = defaultdict(list)
-    for path in paths:
-        table = pq.read_table(
-            path, columns=["episode_index", "frame_index", state_feature, action_feature]
-        )
-        episodes = np.asarray(table.column("episode_index").to_pylist(), dtype=np.int64)
-        frames = np.asarray(table.column("frame_index").to_pylist(), dtype=np.int64)
-        states = vector_values(table, state_feature).astype(np.float32)
-        actions = vector_values(table, action_feature).astype(np.float32)
-        for row, episode in enumerate(episodes):
-            per_episode[int(episode)].append((int(frames[row]), states[row], actions[row]))
-
-    relative = []
-    arm_width = 10 if rot_mode == "rot6d" else 8
-    for episode in sorted(per_episode):
-        rows = sorted(per_episode[episode], key=lambda item: item[0])
-        states = torch.from_numpy(np.stack([row[1] for row in rows]))
-        actions = torch.from_numpy(np.stack([row[2] for row in rows]))
-        n_arms = states.shape[1] // arm_width
-        length = states.shape[0]
-        for offset in range(action_gap, action_gap + horizon):
-            if length - offset <= 0:
-                break
-            relative.append(
-                ee_to_relative(
-                    states[: length - offset],
-                    actions[offset:],
-                    n_arms=n_arms,
-                    rot_mode=rot_mode,
-                ).numpy()
-            )
-    if not relative:
-        raise ValueError("no valid state/action pairs available for action_relative stats")
-    return feature_stats(np.concatenate(relative, axis=0), keys)
+    from vtla.datasets.tcp_stats import collect_relative_stats, STATE, ACTION
+    if state_feature != STATE or action_feature != ACTION:
+        raise ValueError("Relative TCP statistics require absolute TCP source columns")
+    stats, _ = collect_relative_stats(paths, list(range(action_gap, action_gap + horizon)))
+    return {key: stats[key] for key in keys}
 
 
 def rebuild_stats(
@@ -378,29 +341,16 @@ def rebuild_stats(
             continue
         rebuilt[column] = feature_stats(values, keys)
 
-    relative_specs = (
-        (
-            "action_relative_ee",
-            "observation.state_episode_ee",
-            "action_episode_ee",
-            "rot6d",
-        ),
-        (
-            "action_relative_quat",
-            "observation.state_episode_quat",
-            "action_episode_quat",
-            "quat",
-        ),
-    )
+    relative_specs = (("action_relative_ee", "observation.state_absolute_ee", "action_absolute_ee"),)
     requested = [spec for spec in relative_specs if spec[0] in old_stats]
     if requested:
         horizon, action_gap = resolve_temporal_config(root, horizon_arg, action_gap_arg)
-        for output, state, action, mode in requested:
+        for output, state, action in requested:
             if state not in parquet_columns or action not in parquet_columns:
                 raise ValueError(f"cannot rebuild {output}: missing {state} or {action}")
             keys = tuple(old_stats[output].keys()) or tuple(BASIC_STAT_KEYS) + tuple(QUANTILE_LEVELS)
             rebuilt[output] = relative_stats(
-                paths, state, action, horizon, action_gap, mode, keys
+                paths, state, action, horizon, action_gap, keys
             )
     return rebuilt
 
@@ -484,6 +434,7 @@ def main() -> None:
     temp_paths: dict[Path, Path] = {}
     stats_temp = stats_path.with_name(f".{stats_path.name}.normalize-grippers.tmp")
     committed = False
+    episode_temps = []
     try:
         if stats_temp.exists():
             raise FileExistsError(f"stale temporary file exists: {stats_temp}")
@@ -518,12 +469,19 @@ def main() -> None:
         new_stats = rebuild_stats(
             root, transformed_paths, old_stats, args.horizon, args.action_gap
         )
+        if "action_relative_ee" in new_stats:
+            from vtla.datasets.tcp_stats import collect_relative_stats, prepare_episode_stats
+            horizon, gap = resolve_temporal_config(root, args.horizon, args.action_gap)
+            _, relative_by_episode = collect_relative_stats(transformed_paths, list(range(gap, gap + horizon)))
+            episode_temps = prepare_episode_stats(root, transformed_paths, relative_by_episode, list(targets))
         stats_temp.write_text(
             json.dumps(new_stats, indent=4, ensure_ascii=False), encoding="utf-8"
         )
 
         for path in paths:
             os.replace(temp_paths[path], path)
+        for temporary, path in episode_temps:
+            os.replace(temporary, path)
         os.replace(stats_temp, stats_path)
         committed = True
     finally:
@@ -531,6 +489,8 @@ def main() -> None:
             for temp in temp_paths.values():
                 temp.unlink(missing_ok=True)
             stats_temp.unlink(missing_ok=True)
+            for temporary, _ in episode_temps:
+                temporary.unlink(missing_ok=True)
 
     print(f"updated {len(paths)} parquet file(s) and {stats_path.relative_to(root)}")
     print("done")

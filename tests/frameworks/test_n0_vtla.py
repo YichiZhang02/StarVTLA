@@ -1,3 +1,4 @@
+from vtla.datasets.tcp_contract import build_tcp_contract
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -90,18 +91,6 @@ def test_registration_and_serialization(tmp_path):
         config(max_action_dim=2).validate_features()
 
 
-@pytest.mark.parametrize('robot_type, resolved', [('rm_isf_umi_left', 'flange'), ('umi', 'tcp')])
-def test_checkpoint_frame_after_inference_resolution(robot_type, resolved):
-    saved = config(robot_type=robot_type, ee_frame='auto')
-    runtime = replace(saved, robot_type='rm_isf_umi_left', ee_frame=resolved)
-    runtime.original_checkpoint_robot_type = robot_type
-    runtime.validate_checkpoint_layout(saved)
-    # A genuine frame change must still fail, including when the saved value is auto.
-    wrong = replace(runtime, ee_frame='tcp' if resolved == 'flange' else 'flange')
-    with pytest.raises(ValueError, match='ee_frame'):
-        wrong.validate_checkpoint_layout(saved)
-    runtime.ee_frame = 'auto'
-    runtime.validate_checkpoint_layout(replace(saved, ee_frame=resolved))
 
 
 def test_native_dinov2_position_grid():
@@ -242,7 +231,7 @@ def test_source_has_no_reference_repo_dependency():
         assert 'sys.path' not in text
 
 
-@pytest.mark.parametrize('representation', ['joint', 'rot6d', 'quat'])
+@pytest.mark.parametrize('representation', ['joint', 'rot6d'])
 @pytest.mark.parametrize('reference', ['absolute', 'relative'])
 @pytest.mark.parametrize('arms', [1, 2])
 def test_action_processor_roundtrip_and_no_state(tmp_path, representation, reference, arms):
@@ -254,7 +243,7 @@ def test_action_processor_roundtrip_and_no_state(tmp_path, representation, refer
     tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({'[UNK]': 0, '[PAD]': 1}, unk_token='[UNK]')),
                                        unk_token='[UNK]', pad_token='[PAD]')
     tokenizer.save_pretrained(tmp_path / 'tokenizer')
-    width = {'joint': 4, 'rot6d': 10, 'quat': 8}[representation]
+    width = {'joint': 4, 'rot6d': 10}[representation]
     dim = width * arms
     c = config(state_mode='none', action_mode=f'{reference}_{representation}', ee_num_arms=arms,
                max_action_dim=32, paligemma_tokenizer_path=str(tmp_path / 'tokenizer'),
@@ -264,14 +253,11 @@ def test_action_processor_roundtrip_and_no_state(tmp_path, representation, refer
     if representation == 'rot6d':
         for a in range(arms):
             state[0, a * width + 3:a * width + 9] = torch.tensor([1, 0, 0, 0, 1, 0.])
-    elif representation == 'quat':
-        for a in range(arms):
-            state[0, a * width + 6] = 1
     state[:, 0] = 0.4
     actions = state[:, None, :].expand(-1, 3, -1).clone()
     actions[..., 0] += 0.1
     actions[..., width - 1] = 0.8
-    source = {'joint': ACTION, 'rot6d': ACTION + '_absolute_ee', 'quat': ACTION + '_absolute_quat'}[representation]
+    source = {'joint': ACTION, 'rot6d': ACTION + '_absolute_ee'}[representation]
     c.output_features = {source: PolicyFeature(FeatureType.ACTION, (dim,))}
     c.validate_features()
     pre, post = make_n0_vtla_pre_post_processors(c)
@@ -281,7 +267,7 @@ def test_action_processor_roundtrip_and_no_state(tmp_path, representation, refer
     raw['task'] = ['pick']
     if representation != 'joint':
         raw[source] = actions
-        raw[OBS_STATE + ('_absolute_ee' if representation == 'rot6d' else '_absolute_quat')] = state
+        raw[OBS_STATE + '_absolute_ee'] = state
     routed = route_ee_batch(raw, c.state_mode, c.action_mode)
     prepared = pre(routed)
     assert OBS_STATE not in prepared
@@ -386,6 +372,7 @@ def test_uint8_and_float_tactile_preprocessing_agree():
 def test_checkpoint_width_validation_routes_eef_before_comparing(tmp_path):
     from vtla.frameworks.sensor_routing import ACTION_ABSOLUTE_EE
     c = config(state_mode='none', action_mode='absolute_rot6d', ee_num_arms=1,
+               tcp_contract=build_tcp_contract('umi', 32, 0),
                max_action_dim=32, output_features={ACTION: PolicyFeature(FeatureType.ACTION, (10,))})
     policy = N0VTLAPolicy(c, core_model=LossCore())
     policy.save_pretrained(tmp_path, push_to_hub=False)

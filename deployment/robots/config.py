@@ -30,17 +30,12 @@ class RobotConfig(draccus.ChoiceRegistry, abc.ABC):
     flange_tcp_xyz_m: ClassVar[dict[str, tuple[float, float, float]]] = {}
     flange_tcp_rpy_deg: ClassVar[dict[str, tuple[float, float, float]]] = {}
 
-    # Runtime EE command contract. Inference overwrites this from policy.ee_frame.
-    ee_frame: str = "flange"
+    # Every model-facing EE command is a base-frame TCP target.
 
     # Directory to store calibration file
     calibration_dir: Path | None = None
 
     def __post_init__(self):
-        if self.ee_frame not in ("tcp", "flange"):
-            raise ValueError(
-                f"Invalid robot ee_frame={self.ee_frame!r}; expected 'tcp' or 'flange'."
-            )
         if hasattr(self, "cameras") and self.cameras:
             for _, config in self.cameras.items():
                 for attr in ["width", "height", "fps"]:

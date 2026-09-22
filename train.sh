@@ -17,8 +17,8 @@ log_freq=100
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
-state_mode=${8:-none}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d | absolute_quat | episode_quat
-action_mode=${9:-relative_rot6d}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d | absolute_quat | relative_quat
+state_mode=${8:-none}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d
+action_mode=${9:-relative_rot6d}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d
 action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
 
 # 数据增强
@@ -77,11 +77,11 @@ tmp_status="${tmp_log}.status"  # POSIX sh 没有 PIPESTATUS，管道左侧通�
 # =================== 完全不需要改动的配置 ===================
 # action和state合法性检查
 case "${state_mode}" in
-  none|absolute_joint|episode_joint|absolute_rot6d|episode_rot6d|absolute_quat|episode_quat) ;;
+  none|absolute_joint|episode_joint|absolute_rot6d|episode_rot6d) ;;
   *) echo "Invalid state_mode: ${state_mode}"; exit 1 ;;
 esac
 case "${action_mode}" in
-  absolute_joint|relative_joint|absolute_rot6d|relative_rot6d|absolute_quat|relative_quat) ;;
+  absolute_joint|relative_joint|absolute_rot6d|relative_rot6d) ;;
   *) echo "Invalid action_mode: ${action_mode}"; exit 1 ;;
 esac
 

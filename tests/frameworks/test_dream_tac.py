@@ -1,3 +1,4 @@
+from vtla.datasets.tcp_contract import build_tcp_contract
 import json
 
 import pytest
@@ -147,6 +148,7 @@ def test_checkpoint_config_round_trip_preserves_layout(tmp_path):
         wrist_camera_keys=["left_wrist", "right_wrist"],
         tactile_keys=["left_0", "left_1", "right_0", "right_1"],
     )
+    config.tcp_contract = build_tcp_contract("umi", config.chunk_size, config.action_gap)
     config.save_pretrained(tmp_path, push_to_hub=False)
     restored = PreTrainedConfig.from_pretrained(tmp_path)
     assert isinstance(restored, DreamTacConfig)
@@ -336,7 +338,6 @@ class _FakeCore(nn.Module):
     [
         ("absolute_joint", "absolute_joint", 16, 16, 2),
         ("absolute_rot6d", "relative_rot6d", 10, 10, 1),
-        ("absolute_quat", "absolute_quat", 16, 16, 2),
     ],
 )
 def test_policy_accepts_dynamic_starvtla_state_action_dimensions(

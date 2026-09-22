@@ -24,6 +24,7 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
     if not datasets:
         raise ValueError("A dataset mixture must contain at least one dataset.")
     reference = datasets[0].meta
+    reference_tcp_contract = getattr(reference, "tcp_contract", None)
     reference_visual_preprocess = getattr(reference, "visual_preprocess", None)
     if not reference.robot_type:
         raise ValueError(f"Mixture reference dataset {datasets[0].repo_id!r} has no robot_type")
@@ -33,10 +34,19 @@ def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
         )
     validate_visual_preprocess(reference_visual_preprocess)
     errors = []
+    if reference_tcp_contract is not None:
+        from .tcp_contract import validate_tcp_contract
+        validate_tcp_contract(reference_tcp_contract, robot_type=reference.robot_type)
+        if "action_relative_ee" not in (reference.stats or {}):
+            errors.append("Mixture reference is missing action_relative_ee statistics")
     for dataset in datasets[1:]:
         meta = dataset.meta
         if meta.fps != reference.fps:
             errors.append(f"{dataset.repo_id}: fps expected {reference.fps}, got {meta.fps}")
+        if getattr(meta, "tcp_contract", None) != reference_tcp_contract:
+            errors.append(f"{dataset.repo_id}: TCP contract differs from mixture reference")
+        if reference_tcp_contract is not None and "action_relative_ee" not in (meta.stats or {}):
+            errors.append(f"{dataset.repo_id}: missing action_relative_ee statistics")
         if meta.robot_type != reference.robot_type:
             errors.append(
                 f"{dataset.repo_id}: robot_type expected {reference.robot_type!r}, got {meta.robot_type!r}"
@@ -121,6 +131,7 @@ class MixtureMetadata:
     fps: int
     robot_type: str | None
     visual_preprocess: dict | None
+    tcp_contract: dict | None = None
 
     @property
     def camera_keys(self) -> list[str]:
@@ -168,6 +179,7 @@ class MixtureLeRobotDataset(torch.utils.data.Dataset):
             fps=reference.fps,
             robot_type=reference.robot_type,
             visual_preprocess=reference.visual_preprocess,
+            tcp_contract=getattr(reference, "tcp_contract", None),
         )
 
     @property

@@ -254,3 +254,22 @@ def test_mixture_sampler_uses_dataset_weights_not_dataset_lengths():
     small_fraction = sum(index < 100 for index in indices) / len(indices)
 
     assert 0.48 < small_fraction < 0.52
+
+
+def test_mixture_rejects_tcp_contract_or_relative_stats_mismatch():
+    from vtla.datasets.tcp_contract import build_tcp_contract
+    contract = build_tcp_contract('umi', 3, 0)
+    preprocess = make_visual_preprocess(size=224, wrist_undistort=True, tactile_encoding=None)
+    def member(name):
+        return SimpleNamespace(repo_id=name, meta=SimpleNamespace(
+            fps=30, robot_type='umi', features={}, visual_preprocess=preprocess,
+            tcp_contract=contract, stats={'action_relative_ee': {}}))
+    first, second = member('first'), member('second')
+    validate_mixture_metadata([first, second])
+    second.meta.tcp_contract = build_tcp_contract('umi', 3, 1)
+    with pytest.raises(ValueError, match='TCP contract'):
+        validate_mixture_metadata([first, second])
+    second.meta.tcp_contract = contract
+    second.meta.stats = {}
+    with pytest.raises(ValueError, match='missing action_relative_ee'):
+        validate_mixture_metadata([first, second])

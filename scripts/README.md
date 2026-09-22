@@ -10,7 +10,7 @@ bash scripts/<script>.sh ...
 
 | 脚本 | 用途 |
 | --- | --- |
-| `process_joint_data.sh` | 关节数据去畸变、触觉转换、缩放和 FK-to-EE |
+| `process_joint_data.sh` | 关节数据去畸变、触觉转换、缩放和 FK-to-TCP |
 | `process_umi_data.sh` | 导入 unified-format UMI v2.5 数据并生成 EE 训练数据 |
 | `process_backbone_data.sh` | 在 processed dataset 内生成触觉 backbone `.npy` cache |
 | `train_backbone.sh` | 统一训练 AnyTouch1、AnyTouch2 或 Sparsh reconstruction backbone |
@@ -29,7 +29,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 | `dataset_id` | 脚本内默认值 | `playground/data/` 下的源数据集 |
 | `size` | `224` | 最终视频边长 |
 | `horizon` | `32` | 相对 action 统计包含的动作数量，通常等于训练 `chunk_size` |
-| `action_gap` | `0` | 相对 action 统计的第一个 GT 偏移，必须与训练一致 |
+| `action_gap` | `6` | 相对 action 统计的第一个 GT 偏移，必须与训练一致 |
 
 环境变量：
 
@@ -46,7 +46,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
   -> 腕部 RGB 在原始分辨率去畸变，不裁剪
   -> raw 触觉固定范围量化为 uint8
   -> 所有训练视频缩放到 size x size
-  -> 根据 robot_type 选择 B/ISF FK 并生成 EE 列
+  -> 根据 robot_type 选择 B/ISF FK，再用工具标定从 flange 转 TCP，生成 rot6d 列
   -> 重命名为 <id>_processed
 ```
 
@@ -81,6 +81,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 
 - `rm_base_umi_dual` 必须包含完整的 right 和 left 两臂，每臂 7 个关节和 1 个夹爪。
 - `rm_isf_umi_left` 必须只包含完整的 left 臂，共 7 个关节和 1 个夹爪。
+- `rm_isf_umi_right` 必须只包含完整的 right 臂，共 7 个关节和 1 个夹爪。
 
 缺失、未知或布局不一致都会停止处理，避免生成错误 EE 数据。
 
@@ -90,6 +91,18 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 bash scripts/process_joint_data.sh \
   rm_isf_umi_left_20260820_insert_easy_precise 256 32 6
 ```
+
+### TCP 数据与训练窗口
+
+末端只保留 TCP rot6d；`relative_rot6d` 是当前 TCP 系位移与减去单位 rot6d 的相对旋转，
+反归一化后旋转全零即保持方向，夹爪保持绝对指令。没有 `ee_frame` 选择参数。
+两个数据处理脚本的 `horizon` 默认 32、`action_gap` 默认 6，与 `train.sh` 的 gap 默认值一致；
+直接调用底层转换器时 gap 默认 0，因此应显式传入匹配训练的值。Dream-Tac 默认 horizon 20，N0-VTLA 默认 50。
+Diffusion 的首偏移为 `1-n_obs_steps+action_gap`，处理完成后按该窗口重建统计。
+
+旧数据迁移、带负偏移的统计重建和旧 EE checkpoint 重训要求见
+[离线工具](../tools/README.md#tcp-数据迁移与统计量重建)；几何定义见
+[TCP 数据与动作约定](../tools/TCP_ACTIONS.md)。
 
 ## 触觉处理标准
 
@@ -145,8 +158,8 @@ TASK="Put the board eraser into the cup." \
   -> 删除未使用的额外 RGB/video feature 及其陈旧统计
   -> 写入真实 task 和 robot_type=umi
   -> 按全数据最小夹爪值和原始零点完成夹爪标定
-  -> 从 UMI pose 生成 absolute/episode rot6d 与 quaternion EE 列
-  -> 生成 relative-action stats 和 meta/umi_processing.json
+  -> 从已有 TCP pose 生成 absolute/episode rot6d 列，不生成 quaternion 模型特征
+  -> 生成 TCP 局部零中心 relative-action stats、tcp_contract 和 meta/umi_processing.json
   -> 完整验证后将临时目录原子改名为 <id>_processed
 ```
 
@@ -179,7 +192,7 @@ processed 数据只保留 `cam_top`、`left/right_cam_wrist` 和四个 `left/rig
 `1`，原始值 `0` 映射为闭合 `0`，并裁剪到 `[0,1]`。需要手动覆盖时，可成对设置
 `LEFT_GRIPPER_OPEN/CLOSED`、`RIGHT_GRIPPER_OPEN/CLOSED`。
 
-该流程不执行 RealMan FK，也不使用 UMI 中无效的 joint/finger 占位字段。UMI absolute pose
+该流程直接使用 UMI TCP pose，不执行 RealMan FK 或 flange-to-TCP 偏移，也不使用 UMI 中无效的 joint/finger 占位字段。UMI absolute pose
 没有 robot-base 外参标定时只适合数据分析；跨平台上机训练应优先使用 episode state + relative action。
 
 ## 触觉 Backbone 训练
@@ -261,7 +274,7 @@ bash scripts/compute_mean_state.sh [dataset_id] [first|all] [state_key]
 bash scripts/merge_datasets.sh
 ```
 
-底层工具会取所有输入数据集 dtype/shape 一致的公共 feature，再合并为单一数据集。数据集聚合还要求相同 `fps` 和完全相同的 `robot_type`；不同物理构型不能合并。
+底层工具会取所有输入数据集 dtype/shape 一致的公共 feature，再合并为单一数据集。数据集聚合还要求相同 `fps` 和完全相同的 `robot_type`；不同物理构型不能合并。TCP 数据还必须具有一致的 `tcp_contract` 和 relative stats 窗口。
 
 需要从命令行指定输入时直接使用：
 
@@ -283,12 +296,12 @@ bash scripts/evaluate_policy_offline.sh \
 
 ```bash
 bash scripts/evaluate_policy_offline.sh \
-  rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256 \
-  20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong \
+  tcp_dataset \
+  your_retrained_tcp_run \
   3000 0-2 1 cuda
 ```
 
 `episodes` 支持 `all`、`0,2,5` 或 `0-3`。输出位于对应 checkpoint 的
 `<pretrained_id>/offline_eval/<step|last>/<dataset_id>/`，其中 `offline_eval` 与 `checkpoints` 同级。目录中包含
-action mode 空间与机器人命令空间的完整 episode 曲线、NPZ
+action mode 空间与机器人命令空间（EE 为基座系绝对 TCP，尚未转换为 SDK flange）的完整 episode 曲线、NPZ
 预测数据及 episode/全局误差指标。

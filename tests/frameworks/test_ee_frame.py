@@ -44,7 +44,6 @@ def test_relative_action_anchor_uses_tcp(monkeypatch):
         representation="rot6d",
         n_arms=1,
         robot_type="rm_isf_umi_left",
-        ee_frame="tcp",
     )
 
     observation = {OBS_STATE: np.array([0.0] * 7 + [0.65], dtype=np.float32)}
@@ -90,7 +89,7 @@ def _bare_robot(robot_cls, config, side: str):
 
 def test_tcp_action_is_converted_to_flange_for_single_arm_sdk():
     config = RmIsfUmiLeftConfig(
-        ee_frame="tcp", max_ee_pos_step_m=None, max_ee_rot_step_deg=None
+        max_ee_pos_step_m=None, max_ee_rot_step_deg=None
     )
     robot, follower = _bare_robot(RmIsfUmiLeft, config, "left")
     tcp_pos = np.array([0.51, -0.08, 0.42])
@@ -109,15 +108,16 @@ def test_tcp_action_is_converted_to_flange_for_single_arm_sdk():
     )
 
 
-def test_flange_mode_preserves_dual_arm_sdk_target():
+def test_tcp_dual_arm_sdk_target():
     config = RmBaseUmiDualConfig(
-        ee_frame="flange", max_ee_pos_step_m=None, max_ee_rot_step_deg=None
+        max_ee_pos_step_m=None, max_ee_rot_step_deg=None
     )
     robot, follower = _bare_robot(RmBaseUmiDual, config, "right")
     flange_pos = np.array([0.45, 0.06, 0.38])
     flange_rot = R.from_euler("xyz", [-8.0, 13.0, 25.0], degrees=True).as_matrix()
 
-    robot._send_action_ee(_action("right", flange_pos, flange_rot))
+    tcp_pos, tcp_rot = flange_to_tcp(flange_pos, flange_rot, XYZ, RPY)
+    robot._send_action_ee(_action("right", tcp_pos, tcp_rot))
 
     np.testing.assert_allclose(follower.pose[:3], flange_pos, atol=1e-7)
     actual_rot = R.from_quat(

@@ -92,6 +92,34 @@ RobotConfig 和 B/ISF FK/IK；非 UMI checkpoint 仍忽略 CLI 类型并以 chec
 - 单臂/双臂 feature 与 `kinematics_sides` 不一致。
 - checkpoint 缺少或包含未知 `robot_type`，或 UMI checkpoint 未显式提供具体 CLI 类型。
 
+## TCP 动作与硬件下发
+
+末端模式仅支持 `absolute_rot6d`、`relative_rot6d`，每臂 `[xyz, rot6d(6), gripper]` 共 10 维。
+关节模式不变。绝对位姿描述基座系中的 TCP，`ee_frame` 参数已删除。
+`robot_type` 同时选择 FK、臂布局、工具标定和硬件适配器。
+
+```text
+实时关节观测 → FK flange → 工具标定 → 基座系 TCP 锚点
+模型 relative rot6d → 反归一化 → 按该锚点还原基座系绝对 TCP
+绝对 TCP 目标 → TCP 空间单步限幅 → 当前 RealMan 适配器转 flange → SDK
+```
+
+`relative_rot6d` 定义为 `dp=Rs.T@(pa-ps)`、
+`dr=rot6d(Rs.T@Ra)-[1,0,0,0,1,0]`。整个 chunk 固定使用推理观测的 TCP 锚点，
+不能在每个执行步改用最新姿态再次解码；`state_mode=none` 仍需获取该锚点。
+反归一化后的旋转全零表示保持方向，夹爪始终是绝对指令。
+驱动收到及返回、日志记录的 EE 目标都保持 TCP 语义，SDK flange 转换仅发生在驱动边界。
+未来接入原生接收 TCP 的机器人，应由其适配器直接下发 TCP。
+
+工具外参定义在具体 RobotConfig 中，物理机器人数据、训练和部署必须使用相同标定；
+EE checkpoint 会保存并校验 `tcp_contract`。旧 EE checkpoint 不能直接复用，需先迁移数据再重训。
+UMI 数据已是 TCP；其 checkpoint 必须显式绑定物理 `robot_type`，再由该机器人配置处理真实观测和下发。
+原始 UMI 或 SDK 消息的 quaternion 仅属于输入输出边界，不是可选模型表示。
+`ee_frame_check` 是保留的硬件坐标校验开关，与已删除的 `ee_frame` 选择参数不同。
+
+迁移和数学定义见 [TCP 数据与动作约定](../tools/TCP_ACTIONS.md)。下文
+`your_retrained_tcp_run` 需替换为按当前契约重新训练得到的运行目录。
+
 ## 厂商 SDK
 
 硬件模块通过 `deployment/hardware/_sdk_paths.py` 加载本地 SDK：
@@ -262,7 +290,7 @@ playground/results/models/<pretrained_id>/checkpoints/<step_6_digits>/pretrained
 `control_fps` 控制机器人 action 下发和推理录像的目标频率，必须为正整数，默认 `30 Hz`。例如下面以 `20 Hz` 下发 16 个 action，并从 chunk 的第 6 个位置开始执行：
 
 ```bash
-pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
+pretrained_id=your_retrained_tcp_run
 bash inference.sh "${pretrained_id}" 3000 async rm_isf_umi_left 16 6 20 true \
   "Grasp the cap and pull it off the pen."
 ```

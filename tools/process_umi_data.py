@@ -65,6 +65,7 @@ DATASET_INFO_FIELDS = {
     "splits",
     "ee_num_arms",
     "ee_arm_sides",
+    "tcp_contract",
     "undistort",
     "visual_preprocess",
 }

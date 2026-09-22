@@ -14,46 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Offline: add EE-pose columns to a UMI-style LeRobot v3.0 dataset (in place).
+"""Generate TCP rot6d absolute/episode pose columns and zero-centered relative action statistics.
 
-Unlike ``convert_joints_to_eepose.py`` (which runs Realman forward kinematics on joint angles),
-a UMI dataset already stores the end-effector POSE directly, so this script skips FK entirely and
-just converts the stored quaternion to the rot6d layout the VLA infra expects, and also stores the
-pose with quaternion rotation directly.
-
-Input vectors may contain additional unified-format fields. Pose and gripper dimensions are resolved
-from ``meta/info.json.features[*].names`` rather than fixed vector offsets. Both the legacy
-``left_Quat_X``/``left_gripper_Position_Rad`` names and the v2.5
-``left_qx``/``gripper_left`` names are supported.
-
-ADDS eight columns to the SAME dataset (the original joint-less columns are left untouched):
-
-    observation.state_episode_ee : 20-dim, EE pose of the STATE relative to each episode's FIRST
-                                   frame (T0^{-1}·Tt), expressed in the first-frame frame. rot6d.
-    action_episode_ee            : 20-dim, EE pose of the ACTION (the real teleop command) relative
-                                   to the SAME T0 as the state (so T0 cancels at train time). rot6d.
-    observation.state_episode_quat : 16-dim, same as state_episode_ee but rotation as quat [x,y,z,w]
-                                     (per arm: xyz(3) + quat(4) + gripper(1) = 8).
-    action_episode_quat            : 16-dim, same as action_episode_ee but quat rotation.
-    observation.state_absolute_ee / action_absolute_ee : world-frame rot6d pose.
-    observation.state_absolute_quat / action_absolute_quat : world-frame quaternion pose.
-
-Output uses per arm ``[xyz(3), rot6d(6), gripper(1)]`` for rot6d (20 = 2 * 10) and
-``[xyz(3), quat_xyzw(4), gripper(1)]`` for quat (16 = 2 * 8), ordered RIGHT arm first then LEFT.
-Gripper is kept absolute. This matches ``convert_joints_to_eepose.py`` byte-for-byte, so the
-existing ``state_mode='episode_ee'`` / ``action_mode='relative_ee'`` path consumes it unchanged.
-
-At train time the action chunk (action_episode_ee values selected by action_gap and chunk_size) is
-relativized against the current state_episode_ee anchor S_t, giving ``S_t^{-1} · A_{t+k}`` (T0
-cancels): the commanded future pose relative to the current observed pose. See
-``vtla/engine/utils/ee_transforms.py``.
-
-Updates ``meta/info.json`` (features), ``meta/stats.json`` (global), and ``meta/episodes/*.parquet``
-(per-episode stats) so the dataset loads with the new features.
-
-Usage:
-    python tools/convert_umi_to_eepose.py --root playground/data/<dataset>
-    python tools/convert_umi_to_eepose.py --src <src> --dst <dst>   # copy first
+Joint input uses FK followed by the robot tool calibration; UMI input is already TCP.
+Raw source vectors are preserved. Quaternion input conversion is only a source/SDK boundary.
+Use --src/--dst to copy first, or tools/migrate_tcp_dataset.py for staged migration.
 """
 
 from __future__ import annotations
@@ -79,22 +44,17 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from vtla.engine.utils.ee_transforms import ee_to_relative  # noqa: E402
+from vtla.engine.utils.ee_transforms import encode_relative_tcp  # noqa: E402
+from vtla.datasets.tcp_contract import build_tcp_contract, clean_legacy_ee_metadata, drop_legacy_ee_columns
 
 PER_ARM_DIM = 10
-PER_ARM_DIM_QUAT = 8
 EE_DIM = 20       # rot6d: 2 arms * 10
-EE_DIM_QUAT = 16  # quat:  2 arms * 8
 STAT_KEYS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
 NEW_FEATURES = (
     "observation.state_episode_ee",
     "action_episode_ee",
     "observation.state_absolute_ee",
     "action_absolute_ee",
-    "observation.state_episode_quat",
-    "action_episode_quat",
-    "observation.state_absolute_quat",
-    "action_absolute_quat",
 )
 
 
@@ -106,16 +66,6 @@ def build_names() -> list[str]:
     for side in ("right", "left"):
         names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
         names += [f"{side}_ee_rot6d_{i}" for i in range(6)]
-        names += [f"{side}_gripper"]
-    return names
-
-
-def build_names_quat() -> list[str]:
-    """16-dim quat output feature names, RIGHT arm first then LEFT."""
-    names: list[str] = []
-    for side in ("right", "left"):
-        names += [f"{side}_ee_x", f"{side}_ee_y", f"{side}_ee_z"]
-        names += [f"{side}_ee_qx", f"{side}_ee_qy", f"{side}_ee_qz", f"{side}_ee_qw"]
         names += [f"{side}_gripper"]
     return names
 
@@ -193,30 +143,12 @@ def mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
     return np.concatenate([mat[:, 0], mat[:, 1]]).astype(np.float64)
 
 
-def mat_to_quat_np(mat: np.ndarray) -> np.ndarray:
-    """3×3 rotation matrix → quaternion [x, y, z, w]."""
-    q = R.from_matrix(mat).as_quat()  # scipy returns (x, y, z, w)
-    return q.astype(np.float64)
-
-
 def relative_arm_ee(pos, mat, grip, p0, R0) -> np.ndarray:
     """Pose relative to first frame (T0^{-1}·Tt): pos=R0^T(pt-p0), rot6d(R0^T·Rt), grip absolute."""
     R0t = R0.T
     p_rel = R0t @ (pos - p0)
     R_rel = R0t @ mat
     return np.concatenate([p_rel, mat_to_rot6d(R_rel), [grip]]).astype(np.float64)
-
-
-def relative_arm_ee_quat(pos, mat, grip, p0, R0) -> np.ndarray:
-    """Like relative_arm_ee but stores rotation as quaternion [x,y,z,w]. Returns 8-dim.
-
-    The relative transform (T0^{-1}·Tt) is computed in rotation-matrix space, then the resulting
-    rotation is stored as a quaternion.
-    """
-    R0t = R0.T
-    p_rel = R0t @ (pos - p0)
-    R_rel = R0t @ mat
-    return np.concatenate([p_rel, mat_to_quat_np(R_rel), [grip]]).astype(np.float64)
 
 
 def to_episode_ee(vec: np.ndarray, idx: dict, baseline) -> np.ndarray:
@@ -229,36 +161,12 @@ def to_episode_ee(vec: np.ndarray, idx: dict, baseline) -> np.ndarray:
     return np.concatenate(out).astype(np.float32)
 
 
-def to_episode_quat_umi(vec: np.ndarray, idx: dict, baseline) -> np.ndarray:
-    """Frame pose vector -> 16-dim relative-first-frame EE with quat rotation (RIGHT then LEFT).
-
-    The dataset stores a quaternion directly, but the relative transform (T0^{-1}·Tt) must still be
-    computed in rotation-matrix space, so the stored quat is converted to a matrix, relativized, and
-    the result stored back as a quaternion.
-    """
-    (Rp0, RR0), (Lp0, LR0) = baseline
-    out = []
-    for side, (p0, R0) in (("right", (Rp0, RR0)), ("left", (Lp0, LR0))):
-        pos, quat, grip = split_arm_pose(vec, idx, side)
-        out.append(relative_arm_ee_quat(pos, quat_to_mat(quat), grip, p0, R0))
-    return np.concatenate(out).astype(np.float32)
-
-
 def to_absolute_ee_umi(vec: np.ndarray, idx: dict) -> np.ndarray:
     """Stored world pose -> canonical base-frame rot6d layout."""
     out = []
     for side in ("right", "left"):
         pos, quat, grip = split_arm_pose(vec, idx, side)
         out.append(np.concatenate([pos, mat_to_rot6d(quat_to_mat(quat)), [grip]]))
-    return np.concatenate(out).astype(np.float32)
-
-
-def to_absolute_quat_umi(vec: np.ndarray, idx: dict) -> np.ndarray:
-    """Stored world pose -> canonical base-frame quaternion layout."""
-    out = []
-    for side in ("right", "left"):
-        pos, quat, grip = split_arm_pose(vec, idx, side)
-        out.append(np.concatenate([pos, mat_to_quat_np(quat_to_mat(quat)), [grip]]))
     return np.concatenate(out).astype(np.float32)
 
 
@@ -466,37 +374,16 @@ def compute_baselines(data_files: list[Path], st_idx: dict) -> dict[int, tuple]:
 def compute_relative_ee_stats(
     per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
 ) -> dict:
-    """Stats of the RELATIVE action ``S_t^{-1}·A_{t+k}`` over all valid (t, k) within episodes.
-
-    This is what action_mode='relative_ee' feeds the model: the current STATE pose S_t is the
-    anchor and ACTION pose A_{t+k} is the target. ``k`` ranges from ``action_gap`` through
-    ``action_gap + horizon - 1``, matching the training target window.
-    """
+    """Statistics of TCP-local zero-centered actions over valid, unpadded target offsets."""
     rels = []
     for d in per_ep.values():
-        S = torch.from_numpy(np.stack(d["s"]).astype(np.float32))  # (L, EE_DIM) state
-        A = torch.from_numpy(np.stack(d["a"]).astype(np.float32))  # (L, EE_DIM) action
+        S = torch.from_numpy(np.stack(d["s_abs"]).astype(np.float32))  # (L, EE_DIM) state
+        A = torch.from_numpy(np.stack(d["a_abs"]).astype(np.float32))  # (L, EE_DIM) action
         L = S.shape[0]
         for k in range(action_gap, action_gap + horizon):
             if L - k <= 0:
                 break
-            rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms).numpy())
-    return feature_stats(np.concatenate(rels))
-
-
-def compute_relative_quat_stats(
-    per_ep: dict, horizon: int, n_arms: int, action_gap: int = 0
-) -> dict:
-    """Stats of the RELATIVE quat action ``S_t^{-1}·A_{t+k}`` (quat format, 16-dim for 2 arms)."""
-    rels = []
-    for d in per_ep.values():
-        S = torch.from_numpy(np.stack(d["s_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT) state
-        A = torch.from_numpy(np.stack(d["a_quat"]).astype(np.float32))  # (L, EE_DIM_QUAT) action
-        L = S.shape[0]
-        for k in range(action_gap, action_gap + horizon):
-            if L - k <= 0:
-                break
-            rels.append(ee_to_relative(S[: L - k], A[k:], n_arms=n_arms, rot_mode="quat").numpy())
+            rels.append(encode_relative_tcp(S[: L - k], A[k:], n_arms=n_arms).numpy())
     return feature_stats(np.concatenate(rels))
 
 
@@ -522,18 +409,14 @@ def _fsl_f32(arr2d: np.ndarray) -> pa.Array:
     return pa.FixedSizeListArray.from_arrays(flat, EE_DIM)
 
 
-def _fsl_f32_quat(arr2d: np.ndarray) -> pa.Array:
-    """(N, EE_DIM_QUAT) float32 -> pyarrow fixed_size_list<float>[EE_DIM_QUAT]."""
-    flat = pa.array(np.ascontiguousarray(arr2d, dtype=np.float32).reshape(-1), type=pa.float32())
-    return pa.FixedSizeListArray.from_arrays(flat, EE_DIM_QUAT)
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", type=Path, help="Dataset dir to modify in place")
     ap.add_argument("--src", type=Path, help="Source dataset (used with --dst to copy first)")
     ap.add_argument("--dst", type=Path, help="Destination dataset (copy of --src, then modify)")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--preserve-ee-grippers", action="store_true",
+                    help="During migration, retain calibrated grippers from existing absolute EE columns.")
     ap.add_argument("--horizon", type=int, default=32,
                     help="Number of action steps used for relative-action statistics.")
     ap.add_argument("--action-gap", type=int, default=0,
@@ -601,55 +484,46 @@ def main():
 
     # accumulate global + per-episode stats
     all_state, all_action, all_state_abs, all_action_abs = [], [], [], []
-    all_state_eq, all_action_eq, all_state_aq, all_action_aq = [], [], [], []
     per_ep: dict[int, dict[str, list]] = {}
 
     print("[2/4] converting data parquet (adding columns)")
     for f in data_files:
-        tab = pq.read_table(f)
+        tab = drop_legacy_ee_columns(pq.read_table(f))
         df = tab.to_pandas()
         ep_col = df["episode_index"].to_numpy()
         state_col = df["observation.state"].to_numpy()
         action_col = df["action"].to_numpy()
         st_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
         ac_ee = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        st_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
-        ac_eq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
         st_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
         ac_abs = np.zeros((len(df), EE_DIM), dtype=np.float32)
-        st_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
-        ac_aq = np.zeros((len(df), EE_DIM_QUAT), dtype=np.float32)
         for i in range(len(df)):
             ep = int(ep_col[i])
             base = baselines[ep]
             # State and ACTION share the state's T0 baseline so that S_t^{-1}·A_{t+k} cancels T0.
             st_ee[i] = to_episode_ee(state_col[i], st_idx, base)
             ac_ee[i] = to_episode_ee(action_col[i], ac_idx, base)
-            # quat variants (same relative transform, rotation stored as quaternion)
-            st_eq[i] = to_episode_quat_umi(state_col[i], st_idx, base)
-            ac_eq[i] = to_episode_quat_umi(action_col[i], ac_idx, base)
             st_abs[i] = to_absolute_ee_umi(state_col[i], st_idx)
             ac_abs[i] = to_absolute_ee_umi(action_col[i], ac_idx)
-            st_aq[i] = to_absolute_quat_umi(state_col[i], st_idx)
-            ac_aq[i] = to_absolute_quat_umi(action_col[i], ac_idx)
-            per_ep.setdefault(ep, {"s": [], "a": [], "s_quat": [], "a_quat": [],
-                                   "s_abs": [], "a_abs": [], "s_abs_quat": [], "a_abs_quat": []})
+            if args.preserve_ee_grippers:
+                for source, outputs in (("observation.state_absolute_ee", (st_ee, st_abs)),
+                                        ("action_absolute_ee", (ac_ee, ac_abs))):
+                    if source in df:
+                        original = np.asarray(df[source].iloc[i])
+                        if original.shape != outputs[0][i].shape:
+                            raise ValueError(f"Cannot preserve grippers: invalid {source} shape {original.shape}")
+                        for output in outputs:
+                            output[i, 9::10] = original[9::10]
+            per_ep.setdefault(ep, {"s": [], "a": [],
+                                   "s_abs": [], "a_abs": []})
             per_ep[ep]["s"].append(st_ee[i])
             per_ep[ep]["a"].append(ac_ee[i])
-            per_ep[ep]["s_quat"].append(st_eq[i])
-            per_ep[ep]["a_quat"].append(ac_eq[i])
             per_ep[ep]["s_abs"].append(st_abs[i])
             per_ep[ep]["a_abs"].append(ac_abs[i])
-            per_ep[ep]["s_abs_quat"].append(st_aq[i])
-            per_ep[ep]["a_abs_quat"].append(ac_aq[i])
         all_state.append(st_ee)
         all_action.append(ac_ee)
-        all_state_eq.append(st_eq)
-        all_action_eq.append(ac_eq)
         all_state_abs.append(st_abs)
         all_action_abs.append(ac_abs)
-        all_state_aq.append(st_aq)
-        all_action_aq.append(ac_aq)
 
         # sanity: state & action must be in the same world frame (their T0 is shared).
         first_rows = np.where(df["frame_index"].to_numpy() == 0)[0]
@@ -671,22 +545,17 @@ def main():
         tab = tab.append_column("action_episode_ee",               _fsl_f32(ac_ee))
         tab = tab.append_column("observation.state_absolute_ee",  _fsl_f32(st_abs))
         tab = tab.append_column("action_absolute_ee",              _fsl_f32(ac_abs))
-        tab = tab.append_column("observation.state_episode_quat",  _fsl_f32_quat(st_eq))
-        tab = tab.append_column("action_episode_quat",             _fsl_f32_quat(ac_eq))
-        tab = tab.append_column("observation.state_absolute_quat", _fsl_f32_quat(st_aq))
-        tab = tab.append_column("action_absolute_quat",            _fsl_f32_quat(ac_aq))
         pq.write_table(tab, f)
         print(f"      {f.relative_to(root)}  ({len(df)} frames)")
 
+    clean_legacy_ee_metadata(root, info)
+    info["tcp_contract"] = build_tcp_contract("umi", args.horizon, args.action_gap)
+
     # ---- meta/info.json ----
     print("[3/4] meta/info.json + meta/stats.json")
-    out_names_quat = build_names_quat()
     template = dict(info["features"]["action"])
     for feat in NEW_FEATURES:
-        if "quat" in feat:
-            info["features"][feat] = {**template, "shape": [EE_DIM_QUAT], "names": list(out_names_quat)}
-        else:
-            info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
+        info["features"][feat] = {**template, "shape": [EE_DIM], "names": list(out_names)}
     info["robot_type"] = "umi"
     info["ee_num_arms"] = n_arms
     info["ee_arm_sides"] = ["right", "left"]
@@ -698,12 +567,6 @@ def main():
     rel_stats = compute_relative_ee_stats(
         per_ep, horizon=args.horizon, n_arms=n_arms, action_gap=args.action_gap
     )
-    rel_quat_stats = compute_relative_quat_stats(
-        per_ep,
-        horizon=args.horizon,
-        n_arms=EE_DIM_QUAT // PER_ARM_DIM_QUAT,
-        action_gap=args.action_gap,
-    )
     stat_sources = (
         ("observation.state_episode_ee",   feature_stats(np.concatenate(all_state))),
         ("action_episode_ee",               feature_stats(np.concatenate(all_action))),
@@ -711,12 +574,6 @@ def main():
         ("action_absolute_ee",              feature_stats(np.concatenate(all_action_abs))),
         # action_relative_ee: the relativized target the model trains on (St^-1·A_{t+k}).
         ("action_relative_ee",              rel_stats),
-        # quat variants
-        ("observation.state_episode_quat",  feature_stats(np.concatenate(all_state_eq))),
-        ("action_episode_quat",             feature_stats(np.concatenate(all_action_eq))),
-        ("observation.state_absolute_quat", feature_stats(np.concatenate(all_state_aq))),
-        ("action_absolute_quat",            feature_stats(np.concatenate(all_action_aq))),
-        ("action_relative_quat",            rel_quat_stats),
     )
     for feat, st in stat_sources:
         stats[feat] = {k: (v.astype(np.int64).tolist() if k == "count" else v.astype(np.float32).tolist())
@@ -732,28 +589,25 @@ def main():
         "action_episode_ee":              feature_stats(np.stack(d["a"])),
         "observation.state_absolute_ee": feature_stats(np.stack(d["s_abs"])),
         "action_absolute_ee":             feature_stats(np.stack(d["a_abs"])),
-        "observation.state_episode_quat": feature_stats(np.stack(d["s_quat"])),
-        "action_episode_quat":            feature_stats(np.stack(d["a_quat"])),
-        "observation.state_absolute_quat": feature_stats(np.stack(d["s_abs_quat"])),
-        "action_absolute_quat":            feature_stats(np.stack(d["a_abs_quat"])),
+        "action_relative_ee": compute_relative_ee_stats({ep: d}, args.horizon, n_arms, args.action_gap)
+        if len(d["s_abs"]) > args.action_gap else None,
     } for ep, d in per_ep.items()}
     ep_files = sorted(glob.glob(str(root / "meta" / "episodes" / "**" / "*.parquet"), recursive=True))
     for ef in ep_files:
-        tab = pq.read_table(ef)
+        tab = drop_legacy_ee_columns(pq.read_table(ef))
         eps = [int(e) for e in tab.column("episode_index").to_pylist()]
-        for feat in NEW_FEATURES:
+        for feat in (*NEW_FEATURES, "action_relative_ee"):
             for stat in STAT_KEYS:
                 col = f"stats/{feat}/{stat}"
                 if col in tab.column_names:
                     tab = tab.drop([col])
-                vals = [ep_stats[ep][feat][stat].tolist() for ep in eps]
+                vals = [ep_stats[ep][feat][stat].tolist() if ep_stats[ep][feat] is not None else None for ep in eps]
                 typ = pa.list_(pa.int64()) if stat == "count" else pa.list_(pa.float64())
                 tab = tab.append_column(col, pa.array(vals, type=typ))
         pq.write_table(tab, ef)
 
-    print(f"\nDone ✅  added rot6d and quat EE columns to {root}")
+    print(f"\nDone ✅  added TCP rot6d columns to {root}")
     print(f"  rot6d features: observation.state_episode_ee, action_episode_ee  ({EE_DIM}-dim)")
-    print(f"  quat  features: observation.state_episode_quat, action_episode_quat  ({EE_DIM_QUAT}-dim)")
     print(f"  layout: {out_names}")
 
 

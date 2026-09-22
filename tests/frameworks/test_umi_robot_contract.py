@@ -7,12 +7,10 @@ from vtla.frameworks.act.configuration_act import ACTConfig
 from vtla.frameworks.factory import make_policy
 from vtla.frameworks.sensor_routing import (
     ACTION_ABSOLUTE_EE,
-    ACTION_ABSOLUTE_QUAT,
     OBS_STATE_ABSOLUTE_EE,
-    OBS_STATE_ABSOLUTE_QUAT,
     OBS_STATE_EPISODE_EE,
-    OBS_STATE_EPISODE_QUAT,
 )
+from vtla.datasets.tcp_contract import build_tcp_contract
 from vtla.datasets.visual_preprocess import make_visual_preprocess
 
 
@@ -43,32 +41,16 @@ def _umi_metadata():
             "gripper",
         )
     ]
-    quat_names = [
-        f"{side}_{name}"
-        for side in ("right", "left")
-        for name in (
-            "ee_x",
-            "ee_y",
-            "ee_z",
-            "ee_qx",
-            "ee_qy",
-            "ee_qz",
-            "ee_qw",
-            "gripper",
-        )
-    ]
     features = {
         "observation.state": _feature(144, [f"field_{index}" for index in range(144)]),
         "action": _feature(111, [f"field_{index}" for index in range(111)]),
         OBS_STATE_EPISODE_EE: _feature(20, rot6d_names),
         OBS_STATE_ABSOLUTE_EE: _feature(20, rot6d_names),
         ACTION_ABSOLUTE_EE: _feature(20, rot6d_names),
-        OBS_STATE_EPISODE_QUAT: _feature(16, quat_names),
-        OBS_STATE_ABSOLUTE_QUAT: _feature(16, quat_names),
-        ACTION_ABSOLUTE_QUAT: _feature(16, quat_names),
     }
     return SimpleNamespace(
         robot_type="umi",
+        tcp_contract=build_tcp_contract("umi", 32, 0),
         features=features,
         stats={},
         fps=30,

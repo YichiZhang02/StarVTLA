@@ -6,6 +6,12 @@
 共享的数据集、`robot_type`、state/action 表示和相机路由约定见
 [VTLA Training](../../README.md)。
 
+末端 state/action 统一使用 TCP rot6d：绝对位姿在基座系，`relative_rot6d` 为当前 TCP 系位移与
+零中心相对旋转，反归一化后旋转全零表示不旋转，夹爪为绝对指令。整个 chunk 共用当前 TCP
+锚点，`state_mode=none` 也需保留该隐藏锚点。关节模式不变，不再提供 `ee_frame` 或 quaternion
+模型模式。旧 EE 数据需迁移、旧 EE checkpoint 需重训；定义和工具见
+[TCP 数据与动作约定](../../../tools/TCP_ACTIONS.md)。
+
 ## 最小环境
 
 当前仓库验证基线为 Python 3.10.19、PyTorch 2.7.1+cu128、torchvision
@@ -72,10 +78,14 @@ ACT 支持 `tactile_mode=as_image` 和 `encode`。`as_image` 把各路触觉帧�
 ## 输入输出约束
 
 - 至少需要一个经过路由的图像 feature，或 `observation.environment_state`。
-- `state_mode=none` 可省略机器人 state；action feature 始终必需。
+- `state_mode=none` 不向模型输入机器人 state；relative action 的 processor 仍需当前观测锚点，action feature 始终必需。
 - `n_obs_steps` 固定为 `1`。
 - `action_start_offset + n_action_steps` 不能超过 `chunk_size`。
 - 启用 `temporal_ensemble_coeff` 时，`n_action_steps` 必须为 `1`。
+
+相对 TCP 示例要求统计窗口 `--horizon 32 --action-gap 6` 与训练配置一致。
+启用 temporal ensembling 时，部署公共控制路径先用每个 chunk 各自的锚点解码为绝对 TCP，
+再融合重叠预测；不能直接混合不同锚点的 relative 编码。关节动作融合行为不变。
 
 ## 推理
 

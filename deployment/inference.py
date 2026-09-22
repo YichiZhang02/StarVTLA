@@ -166,15 +166,9 @@ def _resolve_robot_type(cfg: InferenceConfig) -> None:
     """
     checkpoint_type = getattr(cfg.policy, "robot_type", None)
     cfg.policy.original_checkpoint_robot_type = checkpoint_type
-    requested_ee_frame = getattr(cfg.policy, "ee_frame", "auto")
-    if requested_ee_frame == "auto":
-        resolved_ee_frame = "tcp" if checkpoint_type == "umi" else "flange"
-    elif requested_ee_frame in ("tcp", "flange"):
-        resolved_ee_frame = requested_ee_frame
-    else:
-        raise ValueError(
-            f"Unsupported policy ee_frame={requested_ee_frame!r}; expected 'auto', 'tcp', or 'flange'."
-        )
+    from vtla.datasets.tcp_contract import uses_tcp, validate_tcp_contract
+    if uses_tcp(cfg.policy):
+        validate_tcp_contract(cfg.policy.tcp_contract, robot_type=checkpoint_type)
     resolved_type = checkpoint_type
     source = "checkpoint"
     if checkpoint_type == "umi":
@@ -208,14 +202,11 @@ def _resolve_robot_type(cfg: InferenceConfig) -> None:
         )
     if checkpoint_type == "umi":
         cfg.policy.robot_type = resolved_type
-    cfg.policy.ee_frame = resolved_ee_frame
-    cfg.robot.ee_frame = resolved_ee_frame
     logger.info(
-        "[match-policy] kinematics=%s <- %s robot_type=%s ee_frame=%s",
+        "[match-policy] kinematics=%s <- %s robot_type=%s (TCP contract)",
         RobotConfig.get_kinematics_force_type(resolved_type).upper(),
         source,
         resolved_type,
-        resolved_ee_frame,
     )
 
 
@@ -262,18 +253,16 @@ def _apply_match_policy(cfg: InferenceConfig) -> None:
 def _resolve_action_space(cfg: InferenceConfig) -> None:
     """按 checkpoint 的 action representation 对齐机器人动作空间并做硬校验。
 
-    - *_rot6d / *_quat -> robot.action_space='ee'
+    - *_rot6d         -> robot.action_space='ee'
     - *_joint          -> robot.action_space='joint'
     机器人不支持 action_space 字段时: 若 checkpoint 需要 ee, 直接报错 (该机器人无法执行 EE 动作,
     继续会把位姿当关节弧度下发 -> 撞机)。
     """
     representation = getattr(cfg.policy, "action_representation", None)
     if representation is None:
-        legacy_mode = getattr(cfg.policy, "action_mode", "joint")
-        representation = "rot6d" if legacy_mode in ("rot6d", "relative_ee") else (
-            "quat" if legacy_mode == "quat" else legacy_mode.rsplit("_", 1)[-1]
-        )
-    needs_ee = representation in ("rot6d", "quat")
+        from vtla.engine.utils.action_modes import parse_action_mode
+        _, representation = parse_action_mode(getattr(cfg.policy, "action_mode", "absolute_joint"))
+    needs_ee = representation in ("rot6d",)
     if not hasattr(cfg.robot, "action_space"):
         if needs_ee:
             raise ValueError(

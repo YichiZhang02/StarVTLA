@@ -66,8 +66,8 @@ def make_diffusion_pre_post_processors(
         A tuple containing the configured pre-processor and post-processor pipelines.
     """
 
-    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to the canonical keys
-    # and convert action to/from the relative EE pose. The pose relative step uses the most recent
+    # EE modes (TCP state / action_mode=relative_rot6d): remap stats to the canonical keys
+    # and convert action to/from the TCP-local zero-centered action. The pose relative step uses the most recent
     # frame of the multi-step observation window as the anchor. No-op for joint modes.
     dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
     relative_step, absolute_step = make_ee_relative_steps(config)

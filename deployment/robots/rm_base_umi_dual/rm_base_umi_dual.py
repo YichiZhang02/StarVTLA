@@ -722,9 +722,8 @@ class RmBaseUmiDual(Robot):
         for side in self._ordered_arms:
             arm = self._arms[side]
             rot6d_keys = [f"{side}_ee_rot6d_{i}" for i in range(6)]
-            quat_keys = [f"{side}_ee_q{axis}" for axis in "xyzw"]
             if not all(f"{side}_ee_{axis}" in action for axis in ("x", "y", "z")) or not (
-                all(k in action for k in rot6d_keys) or all(k in action for k in quat_keys)
+                all(k in action for k in rot6d_keys)
             ):
                 logger.warning(f"[{side}] EE 动作缺少位姿字段, 跳过本臂")
                 continue
@@ -733,29 +732,16 @@ class RmBaseUmiDual(Robot):
             p_tgt = np.array([action[f"{side}_ee_x"],
                               action[f"{side}_ee_y"],
                               action[f"{side}_ee_z"]], dtype=np.float64)
-            if all(k in action for k in rot6d_keys):
-                R_tgt = _rot6d_to_mat(np.array([action[k] for k in rot6d_keys], dtype=np.float64))
-            else:
-                R_tgt = R.from_quat(np.array([action[k] for k in quat_keys], dtype=np.float64)).as_matrix()
+            R_tgt = _rot6d_to_mat(np.array([action[k] for k in rot6d_keys], dtype=np.float64))
             grip = action.get(f"{side}_gripper", None)
 
             # 2. 在模型声明的 EE 坐标系内做单步安全限幅。
             p_cur_flange, R_cur_flange = self._current_flange(side)
-            if self.config.ee_frame == "tcp":
-                xyz = self.config.flange_tcp_xyz_m[side]
-                rpy = self.config.flange_tcp_rpy_deg[side]
-                p_cur, R_cur = flange_to_tcp(p_cur_flange, R_cur_flange, xyz, rpy)
-                p_tgt, R_tgt = self._clamp_ee_step(p_cur, R_cur, p_tgt, R_tgt)
-                p_cmd, R_cmd = tcp_to_flange(p_tgt, R_tgt, xyz, rpy)
-            elif self.config.ee_frame == "flange":
-                p_tgt, R_tgt = self._clamp_ee_step(
-                    p_cur_flange, R_cur_flange, p_tgt, R_tgt
-                )
-                p_cmd, R_cmd = p_tgt, R_tgt
-            else:
-                raise ValueError(
-                    f"Unsupported ee_frame={self.config.ee_frame!r}; expected 'tcp' or 'flange'."
-                )
+            xyz = self.config.flange_tcp_xyz_m[side]
+            rpy = self.config.flange_tcp_rpy_deg[side]
+            p_cur, R_cur = flange_to_tcp(p_cur_flange, R_cur_flange, xyz, rpy)
+            p_tgt, R_tgt = self._clamp_ee_step(p_cur, R_cur, p_tgt, R_tgt)
+            p_cmd, R_cmd = tcp_to_flange(p_tgt, R_tgt, xyz, rpy)
 
             # 3. RealMan SDK 始终接收 flange 位姿。
             if arm.follower is not None:

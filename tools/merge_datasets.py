@@ -36,7 +36,7 @@ Usage:
         --out   playground/data/A_B_merged
 
     # then train on the single merged dataset (no training-code change needed):
-    bash train.sh A_B_merged pi05 4 16 20000 false none episode_ee relative_ee
+    bash train.sh A_B_merged pi05 4 16 20000 false none episode_rot6d relative_rot6d
 """
 
 import argparse
@@ -193,7 +193,7 @@ def main():
     print(f"完成 ✅  合并数据集: {out}")
     print(f"  episodes={merged.meta.total_episodes}  frames={merged.meta.total_frames}")
     print(f"  features={sorted(merged.meta.features)}")
-    print(f"  训练示例: bash train.sh {repo_id} pi05 4 16 20000 false none episode_ee relative_ee")
+    print(f"  训练示例: bash train.sh {repo_id} pi05 4 16 20000 false none episode_rot6d relative_rot6d")
     print("=" * 67)
 
 

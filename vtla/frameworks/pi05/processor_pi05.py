@@ -64,7 +64,7 @@ class Pi05PrepareStateTokenizerProcessorStep(ProcessorStep):
 
         valid_modes = {
             "none", "absolute_joint", "episode_joint", "episode_rot6d", "absolute_rot6d",
-            "episode_quat", "absolute_quat", "joint", "episode_ee", "absolute_ee",
+            "joint", "episode_ee", "absolute_ee",
         }
         if self.state_mode not in valid_modes:
             raise ValueError(

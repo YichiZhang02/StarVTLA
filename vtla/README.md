@@ -1,11 +1,13 @@
 # VTLA Training
 
+末端位姿统一为 TCP rot6d；`relative_rot6d` 采用 TCP 局部零中心编码。旧 EE 数据/模型需迁移重训，见 [TCP 数据与动作约定](../tools/TCP_ACTIONS.md)。
+
 `vtla/` 包含 LeRobot 数据集、训练配置、pre/postprocessor 和全部 policy 实现。日常训练入口是仓库根目录的 [train.sh](../train.sh)。
 
 命名数据集 mixture 定义在 [`configs/data_mixtures.yaml`](../configs/data_mixtures.yaml)。mixture ID 与普通 dataset ID 一样直接传给 `train.sh`；数据只从各成员原目录读取，不会生成合并副本。
 
 mixture 成员必须具有相同的 `robot_type`、FPS，以及相同的 feature key、`dtype`、`shape`、
-`names`、`tactile_encoding` 和 `storage_dtype`。各设备自己的相机 `intrinsics`、
+`names`、`tactile_encoding` 和 `storage_dtype`，以及相同 `tcp_contract` 和动作统计窗口。各设备自己的相机 `intrinsics`、
 `imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 可以不同；
 这些标定和存储差异不会改变模型看到的 tensor 契约。
 
@@ -40,8 +42,8 @@ bash train.sh \
 | 5 | `steps` | `40000` | 训练步数 |
 | 6 | `wrist_only` | `true` | 是否只使用 wrist RGB |
 | 7 | `tactile_mode` | `none` | `none`、`as_image`、`encode` |
-| 8 | `state_mode` | `absolute_joint` | 见下文 |
-| 9 | `action_mode` | `absolute_joint` | 见下文 |
+| 8 | `state_mode` | `none` | 见下文 |
+| 9 | `action_mode` | `relative_rot6d` | 见下文 |
 | 10 | `action_gap` | `6` | GT action 起点相对当前观测向未来偏移的帧数 |
 | 11 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
 | 12 | `tactile_encoder_path` | 空 | `train_backbone.sh` 生成的 checkpoint，仅用于首次初始化 `encode` 训练 |
@@ -75,6 +77,7 @@ dataset robot_type -> policy.config.robot_type -> checkpoint config.json
 
 - `rm_base_umi_dual`：B/base 双臂。
 - `rm_isf_umi_left`：ISF 单左臂。
+- `rm_isf_umi_right`：ISF 单右臂。
 
 由 `scripts/process_umi_data.sh` 导入的通用 UMI pose 数据固定使用 `robot_type=umi`。训练只允许
 EE state（或 `none`）和 EE action，并从 canonical EE feature names 校验单/双臂布局；checkpoint
@@ -95,10 +98,8 @@ checkpoint 配置保持 `umi`。
 | `none` | 不输入 proprioception | 无 |
 | `absolute_joint` | 原始 joint state | 绝对关节角 |
 | `episode_joint` | joint state | 相对 episode 首帧 |
-| `absolute_rot6d` | EE pose | robot base，rot6d |
-| `episode_rot6d` | EE pose | 相对 episode 首帧，rot6d |
-| `absolute_quat` | EE pose | robot base，quaternion |
-| `episode_quat` | EE pose | 相对 episode 首帧，quaternion |
+| `absolute_rot6d` | TCP pose | robot base，rot6d |
+| `episode_rot6d` | TCP pose | episode 首帧 TCP 系，几何相对位姿 |
 
 `action_mode`：
 
@@ -106,22 +107,20 @@ checkpoint 配置保持 `umi`。
 | --- | --- | --- |
 | `absolute_joint` | joint | 数据集中的绝对动作 |
 | `relative_joint` | joint | 相对当前观测 |
-| `absolute_rot6d` | EE rot6d | robot base |
-| `relative_rot6d` | EE rot6d | 相对当前观测 EE |
-| `absolute_quat` | EE quaternion | robot base |
-| `relative_quat` | EE quaternion | 相对当前观测 EE |
+| `absolute_rot6d` | TCP rot6d | robot base |
+| `relative_rot6d` | TCP 局部零中心 rot6d 动作 | 固定的当前 TCP 锚点 |
 
 EE 模式要求数据集先经过：
 
 ```bash
-bash scripts/process_joint_data.sh <dataset_id> 256 32
+bash scripts/process_joint_data.sh <dataset_id> 256 32 6
 # 或 unified-format UMI v2.5：
 TASK="..." bash scripts/process_umi_data.sh <dataset_id> 224 32 6
 ```
 
-每臂 rot6d 为 10 维 `[xyz, rot6d(6), gripper]`，quaternion 为 8 维 `[xyz, xyzw, gripper]`。`rm_base_umi_dual` 分别为 20/16 维，`rm_isf_umi_left` 分别为 10/8 维。
+每臂 TCP rot6d 为 10 维 `[xyz, rot6d(6), gripper]`；双臂 20 维，单臂 10 维。
 
-state 和 action 使用 EE 时应采用相同旋转表示。例如：
+state 与 action 独立选择；所有 EE 表示均为 rot6d。例如：
 
 ```bash
 bash train.sh <processed_dataset_id> pi05 1 32 10000 \
@@ -129,6 +128,27 @@ bash train.sh <processed_dataset_id> pi05 1 32 10000 \
 ```
 
 第 10 个参数是 `action_gap`。`chunk_size=32, action_gap=6` 时，GT 时间窗口为 `t+6 ... t+37`。`relative_*` action 仍以当前观测 `S(t)` 为 pose anchor；推理 postprocessor 将其恢复为可执行的绝对目标。EE action 会让部署端自动选择 `robot.action_space=ee`，joint action 则选择 `joint`。
+
+### TCP 编码与统计窗口
+
+记当前绝对 TCP 为 `(ps, Rs)`、目标 TCP 为 `(pa, Ra)`，`c=[1,0,0,0,1,0]`；rot6d 按旋转矩阵前两列拼接：
+
+```text
+编码：dp = Rs.T @ (pa - ps), dr = rot6d(Rs.T @ Ra) - c
+解码：pa = ps + Rs @ dp, Ra = Rs @ rot6d_to_matrix(dr + c)
+```
+
+解码前先反归一化。无旋转对应反归一化后的六维零向量，夹爪始终为绝对值。
+整个 chunk 固定使用当前观测的 TCP 锚点，`state_mode=none` 或 `episode_rot6d` 不改变它。
+`episode_rot6d` state 则使用 `T0^-1 @ Tt`，其单位旋转仍为 `c`，不减去单位 rot6d。
+Joint 数据经共享 FK 和工具标定得到 TCP；UMI pose 已是 TCP。`ee_frame` 参数已删除。
+
+相对 EE 训练要求数据的 `tcp_contract`、工具标定和 relative stats 与配置一致。
+常规模型的偏移为 `action_gap ... action_gap+chunk_size-1`；Diffusion 为
+`1-n_obs_steps+action_gap ... horizon-n_obs_steps+action_gap`。统计只包含 episode 内有效动作对。
+Dream-Tac 默认 chunk 为 20，N0-VTLA 为 50，其余模型请核对实际配置；不要一律用 32。
+变更窗口后用 [重建工具](../tools/README.md#tcp-数据迁移与统计量重建) 更新统计。
+旧 EE checkpoint 不兼容当前编码，必须在迁移后的数据上重训。
 
 ## 相机路由
 
@@ -230,7 +250,7 @@ VISUALIZATION_ENABLED=true \
 
 Dream-Tac 使用仓库内置的 Cosmos Policy core，并接入 StarVTLA 的 LeRobot 数据、动态
 sensor slot、Accelerate 训练、checkpoint、文本 embedding 缓存和 visualization eval。
-它支持 `tactile_mode=none|as_image`，state/action 可选 joint、rot6d 或 quaternion，单双臂
+它支持 `tactile_mode=none|as_image`，state/action 可选 joint 或 TCP rot6d，单双臂
 由数据 feature 和相机、触觉 key 共同确定。
 
 ```bash

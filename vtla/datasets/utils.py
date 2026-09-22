@@ -135,6 +135,7 @@ class DatasetInfo:
     ee_arm_sides: list[str] = field(default_factory=list)
     undistort: dict | None = None
     visual_preprocess: dict | None = None
+    tcp_contract: dict | None = None
 
     def __post_init__(self) -> None:
         from .visual_preprocess import validate_visual_preprocess

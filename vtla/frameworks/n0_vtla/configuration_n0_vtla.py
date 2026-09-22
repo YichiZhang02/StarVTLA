@@ -90,8 +90,8 @@ class N0VTLAConfig(PI05Config):
             raise ValueError("N0-VTLA requires dataset action features.")
         if self.action_feature.shape[0] > self.max_action_dim:
             raise ValueError("Action feature exceeds max_action_dim; explicitly expand the model projections.")
-        if self.action_representation in {"rot6d", "quat"}:
-            width = 10 if self.action_representation == "rot6d" else 8
+        if self.action_representation in {"rot6d"}:
+            width = 10
             if self.action_feature.shape != (width * self.ee_num_arms,):
                 raise ValueError("EEF action width must match action_representation and ee_num_arms.")
         if self.action_mode == "relative_joint" and self.relative_exclude_joints:
@@ -108,16 +108,6 @@ class N0VTLAConfig(PI05Config):
                   "predictor_n_layers", "predictor_n_heads", "z_gate_zero_init", "g_to_expert",
                   "tactile_pool_grid", "tactile_image_size", "dinov2_config", "chunk_size")
         changed = [name for name in fields if getattr(self, name) != getattr(saved, name)]
-        # Inference resolves "auto" before loading weights. Compare coordinate
-        # semantics, retaining the original UMI type after physical robot binding.
-        def resolved_ee_frame(config):
-            if config.ee_frame != "auto":
-                return config.ee_frame
-            robot_type = getattr(config, "original_checkpoint_robot_type", config.robot_type)
-            return "tcp" if robot_type == "umi" else "flange"
-
-        if resolved_ee_frame(self) != resolved_ee_frame(saved):
-            changed.append("ee_frame")
         if self.image_keys() != saved.image_keys():
             changed.append("sensor order")
         if changed:

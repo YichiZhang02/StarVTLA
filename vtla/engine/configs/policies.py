@@ -96,6 +96,7 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
     # where these remain unset.
     dataset_fps: int | None = None
     visual_preprocess: dict | None = None
+    tcp_contract: dict | None = None
 
     # 执行 action chunk 时跳过的前 N 个动作: 实际执行 chunk[offset : offset + n_action_steps]。
     # 0 = 现有行为 (从 chunk 头部取)。用于丢掉 chunk 前段还没"跟上"当前观测的动作 (推理专用旋钮,
@@ -232,6 +233,16 @@ class PreTrainedConfig(draccus.ChoiceRegistry, HubMixin, abc.ABC):  # type: igno
                 raise FileNotFoundError(
                     f"{CONFIG_NAME} not found on the HuggingFace Hub in {model_id}"
                 ) from e
+
+        if config_file is None:
+            raise FileNotFoundError(f"{CONFIG_NAME} not found in {model_id}")
+        with open(config_file) as handle:
+            saved_contract = json.load(handle)
+        if any("rot6d" in str(saved_contract.get(key, "")) or "quat" in str(saved_contract.get(key, ""))
+               or saved_contract.get(key) in {"episode_ee", "absolute_ee", "relative_ee"}
+               for key in ("action_mode", "state_mode")):
+            from vtla.datasets.tcp_contract import validate_tcp_contract
+            validate_tcp_contract(saved_contract.get("tcp_contract"))
 
         # HACK: Parse the original config to get the config subclass, so that we can
         # apply cli overrides.

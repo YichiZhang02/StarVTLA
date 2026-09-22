@@ -124,6 +124,8 @@ def delete_episodes(
         fps=dataset.meta.fps,
         features=dataset.meta.features,
         robot_type=dataset.meta.robot_type,
+        tcp_contract=getattr(dataset.meta, "tcp_contract", None),
+        visual_preprocess=getattr(dataset.meta, "visual_preprocess", None),
         root=output_dir,
         use_videos=len(dataset.meta.video_keys) > 0,
     )
@@ -213,6 +215,8 @@ def split_dataset(
             fps=dataset.meta.fps,
             features=dataset.meta.features,
             robot_type=dataset.meta.robot_type,
+            tcp_contract=getattr(dataset.meta, "tcp_contract", None),
+            visual_preprocess=getattr(dataset.meta, "visual_preprocess", None),
             root=split_output_dir,
             use_videos=len(dataset.meta.video_keys) > 0,
             chunks_size=dataset.meta.chunks_size,
@@ -370,6 +374,8 @@ def modify_features(
         fps=dataset.meta.fps,
         features=new_features,
         robot_type=dataset.meta.robot_type,
+        tcp_contract=getattr(dataset.meta, "tcp_contract", None),
+        visual_preprocess=getattr(dataset.meta, "visual_preprocess", None),
         root=output_dir,
         use_videos=len(remaining_video_keys) > 0,
     )
@@ -870,10 +876,12 @@ def _copy_and_reindex_episodes_metadata(
                 parts = stat_key.split("/")
                 if len(parts) == 2:
                     feature_name, stat_name = parts
+                    value = src_episode_full[key]
+                    # Short episodes can have no valid TCP target pairs.
+                    if value is None:
+                        continue
                     if feature_name not in episode_stats:
                         episode_stats[feature_name] = {}
-
-                    value = src_episode_full[key]
 
                     if feature_name in src_dataset.meta.features:
                         feature_dtype = src_dataset.meta.features[feature_name]["dtype"]
@@ -1097,6 +1105,9 @@ def _copy_episodes_metadata_and_stats(
             for key in dst_meta.features:
                 if key in src_dataset.meta.stats:
                     new_stats[key] = src_dataset.meta.stats[key]
+            if {"observation.state_absolute_ee", "action_absolute_ee"} <= set(dst_meta.features):
+                if "action_relative_ee" in src_dataset.meta.stats:
+                    new_stats["action_relative_ee"] = src_dataset.meta.stats["action_relative_ee"]
             write_stats(new_stats, dst_meta.root)
     else:
         if src_dataset.meta.stats:
@@ -1641,6 +1652,21 @@ def recompute_stats(
             if key not in new_stats:
                 new_stats[key] = value
 
+    if getattr(dataset.meta, "tcp_contract", None) is not None:
+        from .tcp_contract import validate_tcp_contract
+        from .tcp_stats import collect_relative_stats, prepare_episode_stats
+        validate_tcp_contract(dataset.meta.tcp_contract, robot_type=dataset.meta.robot_type)
+        tcp_stats, per_episode = collect_relative_stats(
+            parquet_files, dataset.meta.tcp_contract["stats_offsets"]
+        )
+        new_stats["action_relative_ee"] = tcp_stats
+        prepared = prepare_episode_stats(dataset.root, parquet_files, per_episode)
+        try:
+            for temporary, path in prepared:
+                temporary.replace(path)
+        finally:
+            for temporary, _ in prepared:
+                temporary.unlink(missing_ok=True)
     write_stats(new_stats, dataset.root)
     dataset.meta.stats = new_stats
 
@@ -1727,6 +1753,8 @@ def convert_image_to_video_dataset(
         fps=dataset.meta.fps,
         features=new_features,
         robot_type=dataset.meta.robot_type,
+        tcp_contract=getattr(dataset.meta, "tcp_contract", None),
+        visual_preprocess=getattr(dataset.meta, "visual_preprocess", None),
         root=output_dir,
         use_videos=True,
         chunks_size=dataset.meta.chunks_size,

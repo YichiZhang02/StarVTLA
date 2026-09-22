@@ -1,5 +1,7 @@
 # StarVTLA
 
+末端位姿统一为 TCP rot6d；`relative_rot6d` 采用 TCP 局部零中心编码。旧 EE 数据/模型需迁移重训，见 [TCP 数据与动作约定](tools/TCP_ACTIONS.md)。
+
 StarVTLA 是面向视觉、触觉和机器人动作学习的训练与真机部署仓库。它包含 LeRobot 数据采集与处理、ACT/Diffusion/pi05/StarVLA-GR00T/FastWAM/Dream-Tac 策略训练、触觉 MAE 预训练，以及 RealMan 机械臂的在线推理。
 
 ## 支持的机器人
@@ -116,10 +118,10 @@ bash collect.sh insert_easy "insert the object to the hole" 25 drag
 
 #### 2.1 处理关节数据
 ```bash
-bash scripts/process_joint_data.sh <dataset_id> [size] [horizon]
+bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 ```
 
-脚本保留原始数据，依次执行鱼眼去畸变、触觉 `uint16 -> uint8` 派生转换、视频缩放和 joint-to-EE。FK 类型只能来自数据集的 `robot_type`，没有命令行覆盖参数。
+脚本保留原始数据，依次执行鱼眼去畸变、触觉 `uint16 -> uint8` 派生转换、视频缩放，以及 joint → FK flange → 工具标定 → TCP rot6d。FK 类型只能来自数据集的 `robot_type`，没有命令行覆盖参数。
 
 处理示例：
 
@@ -151,7 +153,20 @@ TASK="Put the board eraser into the cup." \
 `uint16` 定点编码转换为训练使用的 `uint8`，并删除未使用的额外 RGB/video feature 及其陈旧统计。
 夹爪会分别扫描 `observation.state` 和 `action`：每侧数据集最小值映射为张开 `1`，原始值
 `0` 映射为闭合 `0`。数据集和后续 checkpoint 的 `robot_type` 都保持 `umi`。该流程不依赖
-无效 joint 字段；推荐使用 episode EE state 和 relative EE action。
+无效 joint 字段；UMI pose 已经是 TCP，不再施加 flange-to-TCP 偏移。推荐使用 `episode_rot6d` state 和 `relative_rot6d` action。
+
+#### 已处理数据的迁移
+
+旧 EE 数据需从原始 joint/UMI 列重新生成，旧 EE checkpoint 需重训。迁移保留源目录，目标目录必须尚不存在：
+
+```bash
+python tools/migrate_tcp_dataset.py \
+  --src playground/data/old_dataset --dst playground/data/tcp_dataset \
+  --horizon 32 --action-gap 6
+```
+
+可先追加 `--dry-run` 检查迁移条件。已迁移数据只需调整动作统计窗口时，使用
+[统计量重建工具](tools/README.md#tcp-数据迁移与统计量重建)，无需重复处理视频。
 
 #### 2.3 处理 Backbone 数据（可选）
 
@@ -213,6 +228,18 @@ bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
 
 训练会校验数据集的臂布局，并把 `robot_type` 写入每个 checkpoint 的 policy config。
 
+末端 action 只支持 `absolute_rot6d` 和 `relative_rot6d`，关节模式保持不变。
+绝对位姿为基座系 TCP；相对动作在当前 TCP 系下计算，整个 chunk 共用当前观测锚点：
+
+```text
+dp = Rs.T @ (pa - ps)
+dr = rot6d(Rs.T @ Ra) - [1, 0, 0, 0, 1, 0]
+```
+
+夹爪始终为绝对指令。反归一化后的 `dr=0` 表示不旋转；归一化模型输出的零值没有该保证。
+`state_mode=none` 仍需 processor 保存当前 TCP 锚点。`ee_frame` 已移除，FK、工具标定和
+驱动下发转换统一由 `robot_type` 选择。完整定义见 [TCP 数据与动作约定](tools/TCP_ACTIONS.md)。
+
 #### 3.3 数据集 Mixture
 
 在 `configs/data_mixtures.yaml` 中可以把已有数据集注册为一个不占额外数据存储的虚拟数据集：
@@ -236,7 +263,7 @@ bash train.sh <data_all>
 bash train_backbone.sh <data_all>
 ```
 
-每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type` 和 FPS。feature schema 对每个 feature 严格比较 key、`dtype`、`shape`、`names`、`tactile_encoding` 和 `storage_dtype`；相机 `intrinsics`、`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 允许不同。因此不同设备的相机标定和封装参数可以保留，不会阻止 mixture 训练。
+每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type`、FPS 和 `tcp_contract`；TCP relative 统计也必须存在且使用相同动作窗口。feature schema 对每个 feature 严格比较 key、`dtype`、`shape`、`names`、`tactile_encoding` 和 `storage_dtype`；相机 `intrinsics`、`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 允许不同。因此不同设备的相机标定和封装参数可以保留，不会阻止 mixture 训练。
 
 ### 4. 离线推理
 
@@ -245,17 +272,17 @@ bash scripts/evaluate_policy_offline.sh \
   <dataset_id> <pretrained_id> <step|last> [episodes] [stride] [device]
 ```
 
-评估 episode 0 到 2 的示例：
+评估 episode 0 到 2 的示例（`tcp_dataset` 和 `your_retrained_tcp_run` 分别替换为迁移后的数据集和重训运行目录）：
 
 ```bash
-dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256
-pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
+dataset_id=tcp_dataset
+pretrained_id=your_retrained_tcp_run
 bash scripts/evaluate_policy_offline.sh \
   "${dataset_id}" "${pretrained_id}" 3000 0-2 1 cuda
 ```
 
 工具按完整 episode 调用 `predict_action_chunk()` 对比数据集 GT，同时输出 `action_mode` 和
-`robot_command` 空间的曲线及误差指标。结果保存在 `<pretrained_id>/offline_eval/<step>/<dataset_id>/`。
+`robot_command` 空间的曲线及误差指标。EE 的 `robot_command` 是还原后的基座系绝对 TCP，尚未经过驱动端限幅及 TCP-to-flange 转换。结果保存在 `<pretrained_id>/offline_eval/<step>/<dataset_id>/`。
 
 ### 5. 在线推理（真机）
 
@@ -268,7 +295,7 @@ bash inference.sh \
 推理示例：
 
 ```bash
-pretrained_id=20260821_rm_isf_umi_left_20260820_insert_easy_precise_undist_uint8_256_starvla_groot_wristonly_true_tactile_none_state_absolute_rot6d_action_relative_rot6d_aug_strong
+pretrained_id=your_retrained_tcp_run
 bash inference.sh "${pretrained_id}" 5000 async rm_isf_umi_left
 ```
 

@@ -8,12 +8,12 @@ from vtla.engine.optim import AdamWConfig, DiffuserSchedulerConfig
 from vtla.engine.utils.constants import ACTION, OBS_STATE
 from vtla.frameworks.sensor_routing import (
     ACTION_ABSOLUTE_EE,
-    ACTION_ABSOLUTE_QUAT,
+
     OBS_STATE_ABSOLUTE_EE,
-    OBS_STATE_ABSOLUTE_QUAT,
+
     OBS_STATE_EPISODE_EE,
     OBS_STATE_EPISODE_JOINT,
-    OBS_STATE_EPISODE_QUAT,
+
     SensorRoutingMixin,
 )
 
@@ -104,10 +104,10 @@ class DreamTacConfig(SensorRoutingMixin, PreTrainedConfig):
                 "Dream-Tac owns its [previous, current, future] tactile sampling; "
                 "tactile_num_frames and tactile_frame_offset must remain 1."
             )
-        if self.state_representation not in {"none", "joint", "rot6d", "quat"}:
-            raise ValueError("Dream-Tac requires no state or a joint, rot6d, or quat state representation.")
-        if self.action_representation not in {"joint", "rot6d", "quat"}:
-            raise ValueError("Dream-Tac requires a joint, rot6d, or quat action representation.")
+        if self.state_representation not in {"none", "joint", "rot6d"}:
+            raise ValueError("Dream-Tac requires no state or a joint or rot6d state representation.")
+        if self.action_representation not in {"joint", "rot6d"}:
+            raise ValueError("Dream-Tac requires a joint or rot6d action representation.")
         if self.dtype not in {"bfloat16", "float32"}:
             raise ValueError("Dream-Tac dtype must be 'bfloat16' or 'float32'.")
         if any(weight < 0 for weight in self.loss_weights().values()):
@@ -182,8 +182,8 @@ class DreamTacConfig(SensorRoutingMixin, PreTrainedConfig):
             "episode_joint": OBS_STATE_EPISODE_JOINT,
             "episode_rot6d": OBS_STATE_EPISODE_EE,
             "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
-            "episode_quat": OBS_STATE_EPISODE_QUAT,
-            "absolute_quat": OBS_STATE_ABSOLUTE_QUAT,
+
+
         }.get(self.state_mode)
         keys = self.resolved_rgb_keys()
         if state_key is not None:
@@ -195,7 +195,7 @@ class DreamTacConfig(SensorRoutingMixin, PreTrainedConfig):
             return [ACTION]
         if self.action_representation == "rot6d":
             return [ACTION_ABSOLUTE_EE]
-        return [ACTION_ABSOLUTE_QUAT]
+        raise ValueError(f"Unsupported action representation: {self.action_representation}")
 
     @property
     def observation_delta_indices(self) -> list[int]:

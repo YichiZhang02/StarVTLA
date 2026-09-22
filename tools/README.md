@@ -1,5 +1,7 @@
 # Offline Tools
 
+末端位姿统一为 TCP rot6d；`relative_rot6d` 采用 TCP 局部零中心编码。旧 EE 数据/模型需迁移重训，见 [TCP 数据与动作约定](TCP_ACTIONS.md)。
+
 `tools/` 包含可独立调用的数据集和模型准备工具。命令均从仓库根目录运行；日常完整流程优先使用 [scripts/README.md](../scripts/README.md) 中的包装脚本。
 
 ## 工具索引
@@ -10,8 +12,10 @@
 | `tactile_uint16_to_uint8.py` | 权威 `uint16` 触觉转训练用 `uint8` |
 | `downscale_dataset_videos.py` | 缩放视觉和训练用触觉视频 |
 | `process_umi_data.py` | 完整导入 unified-format UMI v2.5 数据 |
-| `convert_joints_to_eepose.py` | 根据严格 `robot_type` 使用 FK 生成 EE 列 |
-| `convert_umi_to_eepose.py` | 从已有 UMI pose 生成统一 EE 列 |
+| `convert_joints_to_eepose.py` | 根据 `robot_type` 经 FK 和工具标定生成 TCP rot6d 列 |
+| `convert_umi_to_eepose.py` | 将已有 UMI TCP pose 转为 rot6d 列 |
+| `migrate_tcp_dataset.py` | 保留源数据，将旧 EE 数据迁移到当前 TCP 契约 |
+| `rebuild_relative_ee_stats.py` | 为已迁移数据重建指定动作窗口的 relative stats |
 | `merge_datasets.py` | 对齐公共 feature 并合并 LeRobot 数据集 |
 | `compute_dataset_mean_state.py` | 统计 state 和 home joint 候选 |
 | `evaluate_policy_offline.py` | 用完整 episode 离线对比模型预测与 GT |
@@ -101,7 +105,7 @@ python tools/downscale_dataset_videos.py \
 ```bash
 python tools/convert_joints_to_eepose.py \
   --root playground/data/<dataset_id> \
-  --horizon 32
+  --horizon 32 --action-gap 6
 ```
 
 副本模式：
@@ -110,22 +114,22 @@ python tools/convert_joints_to_eepose.py \
 python tools/convert_joints_to_eepose.py \
   --src playground/data/<dataset_id> \
   --dst playground/data/<dataset_id>_ee \
-  --horizon 32
+  --horizon 32 --action-gap 6
 ```
 
 FK 类型只从 `meta/info.json.robot_type` 读取。工具没有 `--robot-type` 参数，也不会从目录名、关节数或默认值猜测 B/ISF。它检测 feature 中完整的关节和夹爪并严格校验：
 
-| `robot_type` | 允许的臂 | joint 输入维度 | rot6d EE | quaternion EE |
-| --- | --- | ---: | ---: | ---: |
-| `rm_base_umi_dual` | right + left | 16 | 20 | 16 |
-| `rm_isf_umi_left` | left | 8 | 10 | 8 |
+| `robot_type` | 允许的臂 | joint 输入维度 | TCP rot6d |
+| --- | --- | ---: | ---: |
+| `rm_base_umi_dual` | right + left | 16 | 20 |
+| `rm_isf_umi_left` | left | 8 | 10 |
+| `rm_isf_umi_right` | right | 8 | 10 |
 
 每臂布局：
 
 ```text
 joint:  [joint1..joint7, gripper]                    8
 rot6d:  [xyz, rotation_matrix_col0, col1, gripper] 10
-quat:   [xyz, qx, qy, qz, qw, gripper]              8
 ```
 
 双臂输出顺序为 right 后 left。工具保留原关节列，并增加：
@@ -133,16 +137,17 @@ quat:   [xyz, qx, qy, qz, qw, gripper]              8
 | 列 | 语义 |
 | --- | --- |
 | `observation.state_episode_joint` | 相对 episode 首帧的 joint state |
-| `observation.state_episode_ee` | 相对 episode 首帧的 rot6d EE state |
-| `action_episode_ee` | episode 坐标系 rot6d action |
-| `observation.state_absolute_ee` | robot base 坐标系 rot6d EE state |
-| `action_absolute_ee` | robot base 坐标系 rot6d action |
-| `observation.state_episode_quat` | 相对 episode 首帧的 quaternion EE state |
-| `action_episode_quat` | episode 坐标系 quaternion action |
-| `observation.state_absolute_quat` | robot base 坐标系 quaternion EE state |
-| `action_absolute_quat` | robot base 坐标系 quaternion action |
+| `observation.state_episode_ee` | episode 首帧 TCP 系的几何相对 rot6d state |
+| `action_episode_ee` | episode 首帧 TCP 系的几何相对 rot6d action（辅助列） |
+| `observation.state_absolute_ee` | robot base 坐标系 TCP rot6d state |
+| `action_absolute_ee` | robot base 坐标系 TCP rot6d action |
 
-相对 action 的统计也会写入 `meta/stats.json` 和 episode metadata。`horizon` 必须覆盖训练时可能使用的 action chunk 长度。
+相对 action 的统计也会写入 `meta/stats.json` 和 episode metadata。`horizon` 和 `action_gap` 必须匹配训练实际使用的动作时间偏移。
+
+FK 输出 flange 位姿后，工具通过 `robot_type` 对应的工具标定转换为 TCP，与在线观测共用
+运动学实现。转换器只生成 rot6d 派生列，删除旧 quaternion 派生列及统计，保留原始数据列。
+`action_episode_ee` 是辅助几何位姿；训练 `relative_rot6d` 从 absolute TCP 列按当前观测重新编码，
+不把 episode action 直接作为 relative target。转换器默认 `--horizon 32 --action-gap 0`。
 
 ## UMI-to-EE
 
@@ -163,7 +168,7 @@ pose/gripper 字段。`_undist` RGB 已经去畸变，不会再次去畸变。�
 `tactile_u8_linear_v1` 后也直接拉伸到 `--size`。
 
 输出只保留上述七个视觉 feature，未使用的额外 RGB/video feature、视频引用和陈旧触觉像素统计
-会被移除。其余输出包括 `robot_type=umi`、8 个 EE feature、relative stats 及处理 manifest。
+会被移除。其余输出包括 `robot_type=umi`、4 个 TCP rot6d feature、relative stats、`tcp_contract` 及处理 manifest。
 源数据和失败时的 partial 目录都会保留。
 
 默认夹爪标定同时扫描 `observation.state` 和 `action`：每侧全数据最小值映射为张开 `1`，原始值
@@ -181,8 +186,46 @@ python tools/convert_umi_to_eepose.py \
 ```
 
 该工具按 feature `names` 查找 pose，不依赖固定的 144/111 维布局；支持 v2.5 的
-`left_qx`/`right_qx`、`gripper_left`/`gripper_right` 以及旧 UMI 字段名。它归一化 quaternion，
-并按显式 open/closed 参数把原始夹爪值裁剪映射到 `[0,1]`，不调用 RealMan FK。
+`left_qx`/`right_qx`、`gripper_left`/`gripper_right` 以及旧 UMI 字段名。它在输入边界归一化原始 quaternion 并转为 rot6d，
+并按显式 open/closed 参数把原始夹爪值裁剪映射到 `[0,1]`，不调用 RealMan FK 或 flange-to-TCP 转换，因为 UMI pose 已经是 TCP。模型不支持 quaternion state/action。
+
+## TCP 数据迁移与统计量重建
+
+旧 EE 数据需重新计算 TCP 位姿和 relative stats；仅修改 metadata 无法完成迁移。
+旧 EE checkpoint 必须重训。源数据必须包含原始 `observation.state` 和 `action`：
+
+```bash
+python tools/migrate_tcp_dataset.py \
+  --src playground/data/old_dataset --dst playground/data/tcp_dataset \
+  --horizon 32 --action-gap 6 --dry-run
+
+python tools/migrate_tcp_dataset.py \
+  --src playground/data/old_dataset --dst playground/data/tcp_dataset \
+  --horizon 32 --action-gap 6
+```
+
+迁移复制数据及视频，不修改源目录；目标必须尚不存在且位于源目录之外。全部转换成功后才发布目标，
+失败时保留 `.tcp-migration-partial` 供检查。已有 absolute EE 列中的已标定夹爪会保留；只有原始
+UMI 输入且需要夹爪标定时，先按上节用 open/closed 参数处理。
+
+对已符合 TCP 契约的数据，只改变训练时间窗口时运行：
+
+```bash
+python tools/rebuild_relative_ee_stats.py \
+  --root playground/data/tcp_dataset --horizon 32 --action-gap 6
+
+# Diffusion：n_obs_steps=2、horizon=32、action_gap=6，实际偏移 5..36
+python tools/rebuild_relative_ee_stats.py \
+  --root playground/data/tcp_dataset --horizon 32 --offset-start 5
+```
+
+`--offset-start` 与 `--action-gap` 二选一；前者允许负数，例如 Diffusion gap=0 时首偏移为 -1。
+其他模型使用 `horizon=chunk_size`，从 action_gap 开始；Dream-Tac 默认 20，N0-VTLA 默认 50。
+统计工具更新全局、逐 episode relative stats 和 `meta/info.json.tcp_contract`，不重写位姿或视频。
+统计排除跨 episode 和 padding 动作对。训练会严格校验窗口；重建会替换该数据集原有窗口的统计，
+若需并行使用不同窗口，应分别维护数据副本。
+
+完整公式、归一化和部署转换见 [TCP 数据与动作约定](TCP_ACTIONS.md)。
 
 ## 合并数据集
 
@@ -193,7 +236,7 @@ python tools/merge_datasets.py \
   --repo-id A_B_merged
 ```
 
-工具以 dtype 和 shape 为准取公共 feature，为有额外 feature 的输入创建临时对齐副本，再执行聚合。源数据不修改，已有输出不会被覆盖。聚合要求输入的 `fps` 和 `robot_type` 完全一致，因此不能混合 B/ISF 或单/双臂数据。
+工具以 dtype 和 shape 为准取公共 feature，为有额外 feature 的输入创建临时对齐副本，再执行聚合。源数据不修改，已有输出不会被覆盖。聚合要求输入的 `fps` 和 `robot_type` 完全一致，因此不能混合 B/ISF 或单/双臂数据。TCP 数据还要求一致的 `tcp_contract`（含工具标定和统计窗口）及有效 relative stats。
 
 ## State 统计
 
@@ -235,12 +278,10 @@ python tools/evaluate_policy_offline.py \
 | --- | --- | --- |
 | `absolute_joint` | 绝对关节角 | 绝对关节角，通常相同 |
 | `relative_joint` | 相对当前关节的增量 | 还原后的绝对关节角 |
-| `absolute_rot6d` | 基座系绝对 EE | 基座系绝对 EE，通常相同 |
-| `relative_rot6d` | 当前 EE 坐标系下的相对位姿 | 基座系绝对 EE |
-| `absolute_quat` | quaternion 绝对 EE | 转成 rot6d 的绝对 EE |
-| `relative_quat` | quaternion 相对 EE | 还原绝对位姿后转成 rot6d |
+| `absolute_rot6d` | 基座系绝对 TCP | 基座系绝对 TCP，通常相同 |
+| `relative_rot6d` | 当前 TCP 系位移和零中心相对 rot6d | 基座系绝对 TCP 位姿 |
 
-`robot_command` 是完整 policy postprocessor 的输出，不包含机器人适配器的单步安全限幅、控制器
+`robot_command` 是完整 policy postprocessor 的输出，EE 输出仍为 TCP，不包含机器人适配器的单步安全限幅、TCP-to-flange 转换、控制器
 IK 误差或真实机械臂的跟踪误差。
 
 默认输出到：
@@ -249,7 +290,7 @@ IK 误差或真实机械臂的跟踪误差。
 <pretrained_id>/offline_eval/<step|last>/<dataset_id>/
 ```
 
-checkpoint 与 dataset 必须具有完全相同且非空的 `robot_type`。`--stride` 默认是 `1`，增大后仍会
+checkpoint 与 dataset 必须具有完全相同且非空的 `robot_type`，EE 模式还会校验 `tcp_contract`。`--stride` 默认是 `1`，增大后仍会
 顺序推进 processor 和模型历史状态，但只在每 N 帧运行一次预测。
 
 ## FastWAM 资产

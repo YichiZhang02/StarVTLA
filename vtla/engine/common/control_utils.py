@@ -134,9 +134,16 @@ def predict_action(
 
         # Compute the next action with the policy
         # based on the current observation
-        action = policy.select_action(observation)
-
-        action = postprocessor(action)
+        if (
+            getattr(policy.config, "action_mode", None) == "relative_rot6d"
+            and getattr(policy.config, "temporal_ensemble_coeff", None) is not None
+        ):
+            # Each prediction has a different TCP anchor. Blend decoded absolute
+            # TCP targets, never local residuals from different reference frames.
+            actions = postprocessor(policy.predict_action_chunk(observation))
+            action = policy.temporal_ensembler.update(actions)
+        else:
+            action = postprocessor(policy.select_action(observation))
 
     return action
 

@@ -59,11 +59,8 @@ from .n0_vtla.configuration_n0_vtla import N0VTLAConfig
 from .pretrained import PreTrainedPolicy
 from .sensor_routing import (
     ACTION_ABSOLUTE_EE,
-    ACTION_ABSOLUTE_QUAT,
     OBS_STATE_ABSOLUTE_EE,
-    OBS_STATE_ABSOLUTE_QUAT,
     OBS_STATE_EPISODE_EE,
-    OBS_STATE_EPISODE_QUAT,
 )
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig
 from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
@@ -259,6 +256,9 @@ def make_pre_post_processors(
             policy configuration type.
     """
     if pretrained_path:
+        from vtla.datasets.tcp_contract import uses_tcp, validate_tcp_contract
+        if uses_tcp(policy_cfg):
+            validate_tcp_contract(policy_cfg.tcp_contract)
         preprocessor_overrides = {
             key: dict(value) for key, value in (kwargs.get("preprocessor_overrides") or {}).items()
         }
@@ -336,17 +336,11 @@ def make_pre_post_processors(
         state_mode = getattr(policy_cfg, "state_mode", None)
         action_reference = getattr(policy_cfg, "action_reference", "absolute")
         action_representation = getattr(policy_cfg, "action_representation", "joint")
-        episode_modes = ("episode_rot6d", "episode_quat", "episode_ee")
-        absolute_modes = ("absolute_rot6d", "absolute_quat", "absolute_ee")
+        episode_modes = ("episode_rot6d", "episode_ee")
+        absolute_modes = ("absolute_rot6d", "absolute_ee")
         state_names = getattr(policy_cfg, "state_feature_names", None) or []
         n_arms = getattr(policy_cfg, "ee_num_arms", 2)
         robot_type = getattr(policy_cfg, "robot_type", None)
-        ee_frame = getattr(policy_cfg, "ee_frame", "flange")
-        if ee_frame == "auto":
-            checkpoint_robot_type = getattr(
-                policy_cfg, "original_checkpoint_robot_type", robot_type
-            )
-            ee_frame = "tcp" if checkpoint_robot_type == "umi" else "flange"
         prefix_steps = []
         if action_reference == "relative":
             from .episode_ee_processor import ActionAnchorPreprocessorStep
@@ -356,21 +350,17 @@ def make_pre_post_processors(
                 representation=action_representation,
                 n_arms=n_arms,
                 robot_type=robot_type,
-                ee_frame=ee_frame,
             ))
 
         if state_mode in (*episode_modes, *absolute_modes):
             from .episode_ee_processor import EpisodeEEPreprocessorStep
 
             relative = state_mode in episode_modes
-            rot_mode = "quat" if state_mode in ("episode_quat", "absolute_quat") else "rot6d"
             ee_step = EpisodeEEPreprocessorStep(
                 state_feature_names=state_names,
                 relative_to_baseline=relative,
-                rot_mode=rot_mode,
                 n_arms=n_arms,
                 robot_type=robot_type,
-                ee_frame=ee_frame,
             )
             prefix_steps.append(ee_step)
         elif state_mode in ("episode_joint", "none"):
@@ -383,10 +373,6 @@ def make_pre_post_processors(
 
         if prefix_steps:
             preprocessor.steps = [*prefix_steps, *preprocessor.steps]
-        if action_representation == "quat":
-            from .episode_ee_processor import QuatActionToRot6dStep
-
-            postprocessor.steps = [*postprocessor.steps, QuatActionToRot6dStep(n_arms=n_arms)]
 
         return preprocessor, postprocessor
 
@@ -546,17 +532,23 @@ def make_policy(
             state_mode = getattr(cfg, "state_mode", "absolute_joint")
             action_representation = getattr(cfg, "action_representation", "joint")
             if state_mode not in {
-                "none", "episode_rot6d", "absolute_rot6d", "episode_quat", "absolute_quat"
+                "none", "episode_rot6d", "absolute_rot6d"
             }:
                 raise ValueError(
                     f"robot_type='umi' does not provide joint state; unsupported state_mode={state_mode!r}."
                 )
-            if action_representation not in {"rot6d", "quat"}:
+            if action_representation not in {"rot6d"}:
                 raise ValueError(
-                    "robot_type='umi' only supports EE actions; choose absolute/relative rot6d or quat."
+                    "robot_type='umi' only supports EE actions; choose absolute/relative rot6d."
                 )
         else:
             RobotConfig.validate_kinematics_sides(dataset_robot_type, tuple(detected_sides))
+        from vtla.datasets.tcp_contract import uses_tcp, validate_tcp_contract
+        if uses_tcp(cfg):
+            contract = getattr(ds_meta, "tcp_contract", None)
+            offsets = cfg.action_delta_indices if cfg.action_mode == "relative_rot6d" else None
+            validate_tcp_contract(contract, offsets=offsets, robot_type=dataset_robot_type)
+            cfg.tcp_contract = contract
         cfg.robot_type = dataset_robot_type
         visual_preprocess = getattr(ds_meta, "visual_preprocess", None)
         if visual_preprocess is None:
@@ -572,12 +564,12 @@ def make_policy(
             "episode_joint": OBS_STATE + "_episode_joint",
             "episode_rot6d": OBS_STATE_EPISODE_EE,
             "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
-            "episode_quat": OBS_STATE_EPISODE_QUAT,
-            "absolute_quat": OBS_STATE_ABSOLUTE_QUAT,
+
+
         }
         action_sources = {
             "rot6d": ACTION_ABSOLUTE_EE,
-            "quat": ACTION_ABSOLUTE_QUAT,
+
         }
         required = []
         state_source = state_sources.get(getattr(cfg, "state_mode", "absolute_joint"))
@@ -589,7 +581,7 @@ def make_policy(
             required.append(action_source)
         if getattr(cfg, "action_reference", "absolute") == "relative" and action_source is not None:
             required.append(
-                OBS_STATE_ABSOLUTE_EE if action_representation == "rot6d" else OBS_STATE_ABSOLUTE_QUAT
+                OBS_STATE_ABSOLUTE_EE
             )
         missing = [key for key in required if key not in ds_meta.features]
         if missing:

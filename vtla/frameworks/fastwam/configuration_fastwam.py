@@ -8,14 +8,13 @@ from vtla.engine.utils.constants import ACTION, OBS_STATE
 
 from ..sensor_routing import (
     ACTION_ABSOLUTE_EE,
-    ACTION_ABSOLUTE_QUAT,
-    ACTION_EPISODE_EE,
-    ACTION_EPISODE_QUAT,
+
+
     OBS_STATE_ABSOLUTE_EE,
-    OBS_STATE_ABSOLUTE_QUAT,
+
     OBS_STATE_EPISODE_EE,
     OBS_STATE_EPISODE_JOINT,
-    OBS_STATE_EPISODE_QUAT,
+
     SensorRoutingMixin,
 )
 
@@ -237,8 +236,8 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
             "episode_joint": OBS_STATE_EPISODE_JOINT,
             "episode_rot6d": OBS_STATE_EPISODE_EE,
             "absolute_rot6d": OBS_STATE_ABSOLUTE_EE,
-            "episode_quat": OBS_STATE_EPISODE_QUAT,
-            "absolute_quat": OBS_STATE_ABSOLUTE_QUAT,
+
+
         }.get(self.state_mode)
         keys = self.resolved_rgb_camera_keys()
         if state_key is not None:
@@ -250,7 +249,7 @@ class FastWAMConfig(SensorRoutingMixin, PreTrainedConfig):
             return [ACTION]
         if self.action_representation == "rot6d":
             return [ACTION_ABSOLUTE_EE]
-        return [ACTION_ABSOLUTE_QUAT]
+        raise ValueError(f"Unsupported action representation: {self.action_representation}")
 
     @property
     def observation_delta_indices(self) -> list[int]:

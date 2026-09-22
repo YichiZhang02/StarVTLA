@@ -4,6 +4,22 @@
 `ref_repo`，不导入外部 `n0vtla` 包，也不修改已安装的 Transformers。PaliGemma/Gemma
 复用本项目的 `pi05` / `pi_gemma`，触觉 encoder / predictor 的归属与许可见 NOTICE / LICENSE。
 
+末端 state/action 统一使用 TCP rot6d：绝对位姿在基座系，`relative_rot6d` 为当前 TCP 系位移与
+零中心相对旋转，反归一化后旋转全零表示不旋转，夹爪为绝对指令。整个 chunk 共用当前 TCP
+锚点，`state_mode=none` 也需保留该隐藏锚点。关节模式不变，不再提供 `ee_frame` 或 quaternion
+模型模式。旧 EE 数据需迁移、旧 EE checkpoint 需重训；定义和工具见
+[TCP 数据与动作约定](../../../tools/TCP_ACTIONS.md)。
+
+使用 `relative_rot6d` 时，数据统计必须匹配实际 `chunk_size` 和 `action_gap`。
+本模型默认 chunk 为 50；gap=6 时，已迁移数据的统计重建命令为：
+
+```bash
+python tools/rebuild_relative_ee_stats.py \
+  --root playground/data/<dataset_id> --horizon 50 --action-gap 6
+```
+
+这只重建统计，不迁移旧位姿；旧数据先用 [迁移工具](../../../tools/README.md#tcp-数据迁移与统计量重建)。
+
 ## 模型
 
 RGB 和 PI0.5 风格的任务/状态 prompt → PaliGemma；episode 初始基线与当前触觉的差分
@@ -19,9 +35,8 @@ RGB 和 PI0.5 风格的任务/状态 prompt → PaliGemma；episode 初始基线
 
 - 仅支持 `tactile_mode=as_image`；`none` / `encode` 均报错。触觉不会进入 RGB 视觉塔。
 - 复用 `wrist_only`、相机 keys、`tactile_keys`、`ee_num_arms` 以及现有 state/action modes。
-- 动作：`absolute_joint`、`relative_joint`、`absolute_rot6d`、`relative_rot6d`、
-  `absolute_quat`、`relative_quat`。有效宽度由 dataset feature schema 决定。
-- 状态：`none`、absolute/episode joint、absolute/episode rot6d/quat。无状态模型不生成
+- 动作：`absolute_joint`、`relative_joint`、`absolute_rot6d`、`relative_rot6d`。有效宽度由 dataset feature schema 决定。
+- 状态：`none`、absolute/episode joint、absolute/episode TCP rot6d。无状态模型不生成
   state prompt，但相对动作仍需要隐藏的当前动作锚点，由公共 processor 管理。
 - `chunk_size=50`、`n_action_steps=50`、`action_start_offset=0`。短执行窗口应与后训练匹配。
 - 支持 `action_gap`；训练 sampler 排除 episode 最后 `action_gap` 帧，避免全 padding 的目标块。
@@ -34,8 +49,7 @@ RGB 和 PI0.5 风格的任务/状态 prompt → PaliGemma；episode 初始基线
 
 ## 动作语义与权重
 
-**本适配器使用 StarVTLA 的动作语义。** `relative_rot6d` / `relative_quat` 是 SE(3)
-相对位姿；原版基础模型的位置/rot6d 逐元素增量不是相同表示。导入原生参数后应使用当前
+**本适配器使用 StarVTLA 的动作语义。** `relative_rot6d` 是当前 TCP 系下的位置差和减去单位 rot6d 的相对旋转；原版基础模型的位置/rot6d 逐元素增量不是相同表示。导入原生参数后应使用当前
 数据集的正确统计后训练，不能直接把基础权重当成任意机器人可部署策略。
 相对关节动作需要 dataset 的 action feature names 正确标记 gripper，以便保留绝对夹爪指令。
 

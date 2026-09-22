@@ -92,11 +92,9 @@ def resolve_delta_timestamps(cfg: PreTrainedConfig, ds_meta: LeRobotDatasetMetad
         if key == REWARD and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
         # All EE action columns must be chunked over the same horizon as `action`.
-        # Covers: action_episode_ee, action_absolute_ee (rot6d) and
-        #         action_episode_quat, action_absolute_quat (quat).
+        # TCP rot6d targets share the raw action horizon.
         _ee_action_keys = {
             ACTION + "_episode_ee", ACTION + "_absolute_ee",
-            ACTION + "_episode_quat", ACTION + "_absolute_quat",
         }
         if (
             key in ({ACTION} | _ee_action_keys)

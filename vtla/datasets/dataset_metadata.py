@@ -349,6 +349,10 @@ class LeRobotDatasetMetadata:
         return self.info.visual_preprocess
 
     @property
+    def tcp_contract(self) -> dict | None:
+        return self.info.tcp_contract
+
+    @property
     def features(self) -> dict[str, dict]:
         """All features contained in the dataset."""
         return self.info.features
@@ -652,6 +656,8 @@ class LeRobotDatasetMetadata:
         chunks_size: int | None = None,
         data_files_size_in_mb: int | None = None,
         video_files_size_in_mb: int | None = None,
+        tcp_contract: dict | None = None,
+        visual_preprocess: dict | None = None,
     ) -> "LeRobotDatasetMetadata":
         """Create metadata for a new LeRobot dataset from scratch.
 
@@ -703,6 +709,8 @@ class LeRobotDatasetMetadata:
             data_files_size_in_mb,
             video_files_size_in_mb,
         )
+        obj.info.tcp_contract = tcp_contract
+        obj.info.visual_preprocess = visual_preprocess
         if len(obj.video_keys) > 0 and not use_videos:
             raise ValueError(
                 f"Features contain video keys {obj.video_keys}, but 'use_videos' is set to False. "

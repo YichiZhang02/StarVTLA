@@ -57,8 +57,8 @@ def make_act_pre_post_processors(
         pre-processor pipeline and the post-processor pipeline.
     """
 
-    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to the canonical keys
-    # and convert action to/from the relative EE pose (raw -> relative -> normalize -> model ->
+    # EE modes (TCP state / action_mode=relative_rot6d): remap stats to the canonical keys
+    # and convert action to/from the TCP-local zero-centered action (raw -> relative -> normalize -> model ->
     # unnormalize -> absolute). No-op for joint modes.
     dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
     relative_step, absolute_step = make_ee_relative_steps(config)

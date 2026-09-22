@@ -55,8 +55,8 @@ def make_starvla_groot_pre_post_processors(
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
 ]:
-    # EE modes (state_mode=episode_ee / action_mode=relative_ee): remap stats to canonical keys and
-    # convert action to/from the relative EE pose. No-op for joint modes.
+    # EE modes (TCP state / action_mode=relative_rot6d): remap stats to canonical keys and
+    # convert action to/from the TCP-local zero-centered action. No-op for joint modes.
     dataset_stats = remap_ee_dataset_stats(dataset_stats, config)
     relative_step, absolute_step = make_ee_relative_steps(config)
 

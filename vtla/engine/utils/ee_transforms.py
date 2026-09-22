@@ -14,29 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Batched (torch) end-effector pose transforms for the EE action/state modes.
+"""Geometric TCP pose composition and zero-centered relative action encoding.
 
-Supported rotation representations (``rot_mode`` parameter):
-
-- ``"rot6d"`` (default): per arm ``[pos(3), rot6d(6), gripper(1)]`` = 10 dims.
-  rot6d is the first two columns of the rotation matrix (Zhou et al. 2019).
-- ``"quat"``: per arm ``[pos(3), qx, qy, qz, qw, gripper(1)]`` = 8 dims.
-  Quaternion convention: ``(x, y, z, w)`` (scalar-last / ROS convention).
-
-For a dual-arm robot the full vector is ``n_arms * per_arm_dim`` dims, ordered
-``right`` arm first then ``left`` (matching the offline conversion tools).
-
-All relative/absolute pose math is performed in rotation-matrix space internally,
-so ``ee_to_relative`` / ``ee_to_absolute`` are correct for both formats.
-
-Two conversions (per arm; positions and rotations in the reference's *local* frame,
-gripper kept absolute — mirrors the ``T0^{-1}·Tt`` convention of the offline script):
-
-- relative  (action -> relative-to-reference):  p_rel = R_s^T (p_a - p_s),  R_rel = R_s^T R_a
-- absolute  (relative -> back to reference frame): p_a = p_s + R_s p_rel,  R_a = R_s R_rel
-
-where ``s`` is the reference pose (the current observation EE pose) and ``a`` is the action pose.
-The two are exact inverses.
+Geometric relative poses retain identity rot6d. Only encode_relative_tcp subtracts
+the identity encoding; decode_relative_tcp adds it back before composition.
+All packed poses use [xyz(3), first two rotation columns(6), absolute gripper(1)].
 """
 
 from __future__ import annotations
@@ -45,37 +27,8 @@ import torch
 from torch import Tensor
 
 # ---------------------------------------------------------------------------
-# Per-arm layout constants per rot_mode.
-# ---------------------------------------------------------------------------
-# rot6d: [pos(3), rot6d_0..5(6), gripper(1)] = 10 dims
-PER_ARM_DIM = 10        # kept for backward compatibility
-# quat:  [pos(3), qx, qy, qz, qw(4), gripper(1)] = 8 dims
-PER_ARM_DIM_QUAT = 8
+PER_ARM_DIM = 10
 
-PER_ARM_DIM_BY_ROT_MODE: dict[str, int] = {
-    "rot6d": 10,
-    "quat": 8,
-}
-
-# Legacy slice constants (rot6d-only; kept for import backward compatibility).
-_POS = slice(0, 3)
-_ROT6D = slice(3, 9)
-_GRIP = slice(9, 10)
-
-
-def per_arm_dim(rot_mode: str) -> int:
-    """Return the packed dimension per arm for ``rot_mode``."""
-    try:
-        return PER_ARM_DIM_BY_ROT_MODE[rot_mode]
-    except KeyError:
-        raise ValueError(
-            f"Unknown rot_mode '{rot_mode}'. Expected one of {list(PER_ARM_DIM_BY_ROT_MODE)}."
-        )
-
-
-# ---------------------------------------------------------------------------
-# rot6d <-> matrix (existing, unchanged)
-# ---------------------------------------------------------------------------
 
 def matrix_to_rot6d(matrix: Tensor) -> Tensor:
     """``(..., 3, 3)`` rotation matrix -> ``(..., 6)`` rot6d (first two columns)."""
@@ -96,122 +49,25 @@ def rot6d_to_matrix(rot6d: Tensor) -> Tensor:
 
 
 # ---------------------------------------------------------------------------
-# quat <-> matrix  (scalar-last convention: [x, y, z, w])
-# ---------------------------------------------------------------------------
-
-def quat_to_matrix(quat: Tensor) -> Tensor:
-    """``(..., 4)`` quaternion ``[x, y, z, w]`` -> ``(..., 3, 3)`` rotation matrix.
-
-    Uses the standard formula; does NOT normalise the input — pass unit quaternions.
-    """
-    x, y, z, w = quat.unbind(-1)
-    x2, y2, z2 = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
-
-    mat = torch.stack(
-        [
-            1.0 - 2.0 * (y2 + z2),   2.0 * (xy - wz),          2.0 * (xz + wy),
-            2.0 * (xy + wz),          1.0 - 2.0 * (x2 + z2),    2.0 * (yz - wx),
-            2.0 * (xz - wy),          2.0 * (yz + wx),           1.0 - 2.0 * (x2 + y2),
-        ],
-        dim=-1,
-    ).reshape(*quat.shape[:-1], 3, 3)
-    return mat
-
-
-def matrix_to_quat(matrix: Tensor) -> Tensor:
-    """``(..., 3, 3)`` rotation matrix -> ``(..., 4)`` quaternion ``[x, y, z, w]``.
-
-    Uses Shepperd's method (case-split on the dominant diagonal element for numerical
-    stability). Output quaternions are unit-normalised.
-    """
-    batch_shape = matrix.shape[:-2]
-    m = matrix.reshape(-1, 3, 3)
-    n = m.shape[0]
-
-    q = torch.zeros(n, 4, dtype=m.dtype, device=m.device)  # [x, y, z, w]
-
-    trace = m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2]
-
-    # Case 1: trace > 0  → extract from w.
-    mask1 = trace > 0
-    if mask1.any():
-        s = torch.sqrt(trace[mask1] + 1.0) * 2.0  # 4w
-        q[mask1, 3] = 0.25 * s
-        q[mask1, 0] = (m[mask1, 2, 1] - m[mask1, 1, 2]) / s
-        q[mask1, 1] = (m[mask1, 0, 2] - m[mask1, 2, 0]) / s
-        q[mask1, 2] = (m[mask1, 1, 0] - m[mask1, 0, 1]) / s
-
-    # Case 2: m[0,0] is the largest diagonal element.
-    mask2 = ~mask1 & (m[:, 0, 0] > m[:, 1, 1]) & (m[:, 0, 0] > m[:, 2, 2])
-    if mask2.any():
-        s = torch.sqrt(1.0 + m[mask2, 0, 0] - m[mask2, 1, 1] - m[mask2, 2, 2]) * 2.0  # 4x
-        q[mask2, 3] = (m[mask2, 2, 1] - m[mask2, 1, 2]) / s
-        q[mask2, 0] = 0.25 * s
-        q[mask2, 1] = (m[mask2, 0, 1] + m[mask2, 1, 0]) / s
-        q[mask2, 2] = (m[mask2, 0, 2] + m[mask2, 2, 0]) / s
-
-    # Case 3: m[1,1] is the largest.
-    mask3 = ~mask1 & ~mask2 & (m[:, 1, 1] > m[:, 2, 2])
-    if mask3.any():
-        s = torch.sqrt(1.0 + m[mask3, 1, 1] - m[mask3, 0, 0] - m[mask3, 2, 2]) * 2.0  # 4y
-        q[mask3, 3] = (m[mask3, 0, 2] - m[mask3, 2, 0]) / s
-        q[mask3, 0] = (m[mask3, 0, 1] + m[mask3, 1, 0]) / s
-        q[mask3, 1] = 0.25 * s
-        q[mask3, 2] = (m[mask3, 1, 2] + m[mask3, 2, 1]) / s
-
-    # Case 4: m[2,2] is the largest.
-    mask4 = ~mask1 & ~mask2 & ~mask3
-    if mask4.any():
-        s = torch.sqrt(1.0 + m[mask4, 2, 2] - m[mask4, 0, 0] - m[mask4, 1, 1]) * 2.0  # 4z
-        q[mask4, 3] = (m[mask4, 1, 0] - m[mask4, 0, 1]) / s
-        q[mask4, 0] = (m[mask4, 0, 2] + m[mask4, 2, 0]) / s
-        q[mask4, 1] = (m[mask4, 1, 2] + m[mask4, 2, 1]) / s
-        q[mask4, 2] = 0.25 * s
-
-    # Normalise for robustness (input matrix may not be perfectly orthogonal).
-    q = torch.nn.functional.normalize(q, dim=-1)
-    return q.reshape(*batch_shape, 4)
-
-
-# ---------------------------------------------------------------------------
-# Generic pack / unpack (rot_mode aware)
-# ---------------------------------------------------------------------------
-
-def _unpack(x: Tensor, n_arms: int, rot_mode: str = "rot6d") -> tuple[Tensor, Tensor, Tensor]:
-    """Packed ``(..., n_arms*pad)`` -> (pos ``(..., n_arms, 3)``, R ``(..., n_arms, 3, 3)``, grip ``(..., n_arms, 1)``).
-
-    Rotation is always returned as a rotation **matrix** regardless of ``rot_mode``; pack/unpack
-    are the only places that know about the storage format.
-    """
-    pad = per_arm_dim(rot_mode)
+def _unpack(x: Tensor, n_arms: int) -> tuple[Tensor, Tensor, Tensor]:
+    """Unpack rot6d poses into position, rotation matrix and absolute gripper."""
+    pad = PER_ARM_DIM
     expected = n_arms * pad
     if x.shape[-1] != expected:
         raise ValueError(
-            f"Expected last dim {expected} for {n_arms} arms with rot_mode='{rot_mode}', "
+            f"Expected last dim {expected} for {n_arms} arms, "
             f"got {x.shape[-1]}."
         )
     blocks = x.reshape(*x.shape[:-1], n_arms, pad)
     pos = blocks[..., 0:3]
     grip = blocks[..., pad - 1: pad]
-    if rot_mode == "rot6d":
-        rot = rot6d_to_matrix(blocks[..., 3:9])
-    elif rot_mode == "quat":
-        rot = quat_to_matrix(blocks[..., 3:7])
-    else:
-        raise ValueError(f"Unknown rot_mode '{rot_mode}'.")
+    rot = rot6d_to_matrix(blocks[..., 3:9])
     return pos, rot, grip
 
 
-def _pack(pos: Tensor, rot: Tensor, grip: Tensor, rot_mode: str = "rot6d") -> Tensor:
-    """Inverse of :func:`_unpack`: (pos, rotation_matrix, grip) -> packed ``(..., n_arms*pad)``."""
-    if rot_mode == "rot6d":
-        rot_packed = matrix_to_rot6d(rot)
-    elif rot_mode == "quat":
-        rot_packed = matrix_to_quat(rot)
-    else:
-        raise ValueError(f"Unknown rot_mode '{rot_mode}'.")
+def _pack(pos: Tensor, rot: Tensor, grip: Tensor) -> Tensor:
+    """Pack position, rotation matrix and absolute gripper as rot6d poses."""
+    rot_packed = matrix_to_rot6d(rot)
     blocks = torch.cat([pos, rot_packed, grip], dim=-1)  # (..., n_arms, pad)
     return blocks.reshape(*blocks.shape[:-2], -1)  # (..., n_arms * pad)
 
@@ -231,50 +87,63 @@ def ee_to_relative(
     reference_ee: Tensor,
     action_ee: Tensor,
     n_arms: int = 2,
-    rot_mode: str = "rot6d",
 ) -> Tensor:
-    """Convert absolute(-in-reference-frame) action poses to poses relative to ``reference_ee``.
-
-    Args:
-        reference_ee: ``(B, n_arms*pad)`` reference EE pose (the current observation).
-        action_ee: ``(B, n_arms*pad)`` or ``(B, T, n_arms*pad)`` action EE pose(s).
-        n_arms: Number of arms packed in the vector.
-        rot_mode: Rotation storage format — ``"rot6d"`` (default) or ``"quat"``.
-
-    Returns:
-        Relative EE pose(s), same shape as ``action_ee``. Gripper dims are passed through (absolute).
-    """
+    """Geometric SE(3) relative poses in the reference TCP frame; grippers stay absolute."""
     reference_ee = _align_reference(reference_ee, action_ee)
-    p_s, R_s, _ = _unpack(reference_ee, n_arms, rot_mode)
-    p_a, R_a, grip_a = _unpack(action_ee, n_arms, rot_mode)
+    p_s, R_s, _ = _unpack(reference_ee, n_arms)
+    p_a, R_a, grip_a = _unpack(action_ee, n_arms)
 
     R_s_T = R_s.transpose(-1, -2)
     p_rel = torch.matmul(R_s_T, (p_a - p_s).unsqueeze(-1)).squeeze(-1)
     R_rel = torch.matmul(R_s_T, R_a)
-    return _pack(p_rel, R_rel, grip_a, rot_mode)
+    return _pack(p_rel, R_rel, grip_a)
 
 
 def ee_to_absolute(
     reference_ee: Tensor,
     relative_ee: Tensor,
     n_arms: int = 2,
-    rot_mode: str = "rot6d",
 ) -> Tensor:
-    """Inverse of :func:`ee_to_relative`: convert relative poses back into ``reference_ee``'s frame.
-
-    Args:
-        reference_ee: ``(B, n_arms*pad)`` reference EE pose (the current observation).
-        relative_ee: ``(B, n_arms*pad)`` or ``(B, T, n_arms*pad)`` relative EE pose(s).
-        n_arms: Number of arms packed in the vector.
-        rot_mode: Rotation storage format — ``"rot6d"`` (default) or ``"quat"``.
-
-    Returns:
-        Absolute(-in-reference-frame) EE pose(s), same shape as ``relative_ee``.
-    """
+    """Compose geometric relative poses with reference TCP poses."""
     reference_ee = _align_reference(reference_ee, relative_ee)
-    p_s, R_s, _ = _unpack(reference_ee, n_arms, rot_mode)
-    p_rel, R_rel, grip = _unpack(relative_ee, n_arms, rot_mode)
+    p_s, R_s, _ = _unpack(reference_ee, n_arms)
+    p_rel, R_rel, grip = _unpack(relative_ee, n_arms)
 
     p_a = p_s + torch.matmul(R_s, p_rel.unsqueeze(-1)).squeeze(-1)
     R_a = torch.matmul(R_s, R_rel)
-    return _pack(p_a, R_a, grip, rot_mode)
+    return _pack(p_a, R_a, grip)
+
+
+def encode_relative_tcp(reference: Tensor, action: Tensor, n_arms: int = 2) -> Tensor:
+    """TCP-local SE(3) action, with identity rot6d subtracted (gripper absolute)."""
+    reference = _align_reference(reference, action)
+    p_s, R_s, _ = _unpack(reference, n_arms)
+    p_a, R_a, grip = _unpack(action, n_arms)
+    inverse = R_s.transpose(-1, -2)
+    position = torch.matmul(inverse, (p_a - p_s).unsqueeze(-1)).squeeze(-1)
+    # Rs.T @ (Ra - Rs) == Rs.T @ Ra - I for rotations. This form gives
+    # exactly zero for identical stored orientations, avoiding roundoff in Rs.T @ Rs.
+    rotation_delta = matrix_to_rot6d(torch.matmul(inverse, R_a - R_s))
+    return torch.cat((position, rotation_delta, grip), -1).flatten(-2)
+
+
+def decode_relative_tcp(reference: Tensor, action: Tensor, n_arms: int = 2) -> Tensor:
+    """Restore identity BEFORE interpreting rotation residuals as a rotation.
+
+    Reject nonfinite commands. Finite degenerate predicted rotations hold the
+    anchor orientation; translations and absolute grippers remain independent.
+    """
+    if action.shape[-1] != 10 * n_arms:
+        raise ValueError(f"Expected {10 * n_arms} action dimensions, got {action.shape[-1]}")
+    if not torch.isfinite(action).all() or not torch.isfinite(reference).all():
+        raise ValueError("Nonfinite TCP action or anchor")
+    blocks = action.reshape(*action.shape[:-1], n_arms, 10)
+    identity = blocks.new_tensor([1, 0, 0, 0, 1, 0])
+    rotation = blocks[..., 3:9] + identity
+    a1, a2 = rotation[..., :3], rotation[..., 3:]
+    b1 = torch.nn.functional.normalize(a1, dim=-1)
+    orthogonal = a2 - (b1 * a2).sum(-1, keepdim=True) * b1
+    valid = (a1.norm(dim=-1) > 1e-6) & (orthogonal.norm(dim=-1) > 1e-6)
+    rotation = torch.where(valid[..., None], rotation, identity)
+    relative = torch.cat((blocks[..., :3], rotation, blocks[..., 9:]), -1).flatten(-2)
+    return ee_to_absolute(reference, relative, n_arms=n_arms)

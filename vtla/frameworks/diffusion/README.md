@@ -7,6 +7,12 @@ action horizon。
 共享的数据集、`robot_type`、state/action 表示和相机路由约定见
 [VTLA Training](../../README.md)。
 
+末端 state/action 统一使用 TCP rot6d：绝对位姿在基座系，`relative_rot6d` 为当前 TCP 系位移与
+零中心相对旋转，反归一化后旋转全零表示不旋转，夹爪为绝对指令。整个 chunk 共用当前 TCP
+锚点，`state_mode=none` 也需保留该隐藏锚点。关节模式不变，不再提供 `ee_frame` 或 quaternion
+模型模式。旧 EE 数据需迁移、旧 EE checkpoint 需重训；定义和工具见
+[TCP 数据与动作约定](../../../tools/TCP_ACTIONS.md)。
+
 ## 最小环境
 
 当前仓库验证基线为 Python 3.10.19、PyTorch 2.7.1+cu128、torchvision
@@ -78,6 +84,17 @@ Diffusion 的共享 `n_obs_steps` 时间轴。
 - `horizon` 必须能被 `2 ** len(down_dims)` 整除；默认 `32` 与三层 U-Net 匹配。
 - 可执行窗口上界为 `horizon - n_obs_steps + 1`。
 - `action_gap` 同时作用于 horizon 的监督时间对齐；离线评估会从 checkpoint 恢复它。
+
+相对 TCP 统计必须覆盖完整 horizon，起点为 `1-n_obs_steps+action_gap`。
+上述默认 `n_obs_steps=2, horizon=32, action_gap=6` 的 EE 示例需在已迁移数据上先运行：
+
+```bash
+python tools/rebuild_relative_ee_stats.py \
+  --root playground/data/<processed_dataset_id> --horizon 32 --offset-start 5
+```
+
+若 gap=0，应改为 `--offset-start -1`。整个预测窗口以最新观测 TCP 为固定锚点。
+部署执行窗口会跳过 horizon 的历史位置；不要把原始 horizon 第 0 项当成首个执行目标。
 
 ## 推理
 

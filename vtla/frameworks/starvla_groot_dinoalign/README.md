@@ -4,6 +4,22 @@
 
 共享的数据集、`robot_type`、state/action 和触觉契约见 [VTLA Training](../../README.md)。
 
+末端 state/action 统一使用 TCP rot6d：绝对位姿在基座系，`relative_rot6d` 为当前 TCP 系位移与
+零中心相对旋转，反归一化后旋转全零表示不旋转，夹爪为绝对指令。整个 chunk 共用当前 TCP
+锚点，`state_mode=none` 也需保留该隐藏锚点。关节模式不变，不再提供 `ee_frame` 或 quaternion
+模型模式。旧 EE 数据需迁移、旧 EE checkpoint 需重训；定义和工具见
+[TCP 数据与动作约定](../../../tools/TCP_ACTIONS.md)。
+
+使用 `relative_rot6d` 时，数据统计必须匹配实际 `chunk_size` 和 `action_gap`。
+本模型默认 chunk 为 32；gap=6 时，已迁移数据的统计重建命令为：
+
+```bash
+python tools/rebuild_relative_ee_stats.py \
+  --root playground/data/<dataset_id> --horizon 32 --action-gap 6
+```
+
+这只重建统计，不迁移旧位姿；旧数据先用 [迁移工具](../../../tools/README.md#tcp-数据迁移与统计量重建)。
+
 ## 最小环境
 
 当前仓库验证基线为 Python 3.10.19、PyTorch 2.7.1+cu128、torchvision
@@ -189,4 +205,4 @@ W&B 记录：
 bash inference.sh <run_id> <step>
 ```
 
-推理不加载 DINOv3，不执行训练期光照增强，也不计算 alignment loss。部署前向使用训练后的 Qwen3.5 和 GR00T action head；alignment projector 保存在 checkpoint 中但不参与推理计算。机器人类型仍严格来自 checkpoint。
+推理不加载 DINOv3，不执行训练期光照增强，也不计算 alignment loss。部署前向使用训练后的 Qwen3.5 和 GR00T action head；alignment projector 保存在 checkpoint 中但不参与推理计算。物理机器人类型来自 checkpoint；`robot_type=umi` 的 checkpoint 则必须在推理时显式指定实际机器人类型。

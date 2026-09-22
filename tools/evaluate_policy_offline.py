@@ -44,7 +44,6 @@ from vtla.engine.processor.converters import policy_action_to_transition, transi
 from vtla.engine.processor.normalize_processor import UnnormalizerProcessorStep
 from vtla.engine.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from vtla.frameworks.factory import make_policy, make_pre_post_processors
-from vtla.frameworks.sensor_routing import ACTION_ABSOLUTE_EE, ACTION_ABSOLUTE_QUAT
 from vtla.frameworks.utils import populate_queues
 
 LOGGER = logging.getLogger(__name__)
@@ -52,7 +51,6 @@ LOGGER = logging.getLogger(__name__)
 ACTION_SOURCE_BY_REPRESENTATION = {
     "joint": ACTION,
     "rot6d": ACTION_ABSOLUTE_EE,
-    "quat": ACTION_ABSOLUTE_QUAT,
 }
 
 
@@ -356,6 +354,13 @@ def evaluate(args: argparse.Namespace) -> Path:
     policy_cfg.device = args.device
     policy_cfg.pretrained_path = checkpoint
     action_source = action_source_for_config(policy_cfg, metadata.features)
+    from vtla.datasets.tcp_contract import uses_tcp, validate_tcp_contract
+    if uses_tcp(policy_cfg):
+        validate_tcp_contract(metadata.tcp_contract, robot_type=metadata.robot_type,
+                              offsets=policy_cfg.action_delta_indices if policy_cfg.action_mode == "relative_rot6d" else None)
+        if metadata.tcp_contract != policy_cfg.tcp_contract:
+            raise ValueError("Dataset and checkpoint TCP contracts differ; use the training data contract.")
+
     all_delta_timestamps = resolve_delta_timestamps(policy_cfg, metadata) or {}
     if action_source not in all_delta_timestamps:
         raise ValueError(f"Checkpoint did not define an action horizon for {action_source!r}.")

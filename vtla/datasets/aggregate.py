@@ -274,12 +274,25 @@ def aggregate_datasets(
         ]
     )
     fps, robot_type, features = validate_all_metadata(all_metadata)
+    visual_preprocess = getattr(all_metadata[0], "visual_preprocess", None)
+    if any(getattr(meta, "visual_preprocess", None) != visual_preprocess for meta in all_metadata):
+        raise ValueError("Cannot merge datasets with different visual preprocessing contracts")
+    tcp_contract = getattr(all_metadata[0], "tcp_contract", None)
+    if any(getattr(meta, "tcp_contract", None) != tcp_contract for meta in all_metadata):
+        raise ValueError("Cannot merge datasets with different TCP contracts; migrate them first.")
+    if tcp_contract is not None:
+        from .tcp_contract import validate_tcp_contract
+        validate_tcp_contract(tcp_contract, robot_type=robot_type)
+        if any("action_relative_ee" not in (meta.stats or {}) for meta in all_metadata):
+            raise ValueError("Cannot merge TCP datasets missing relative action statistics")
     video_keys = [key for key in features if features[key]["dtype"] == "video"]
 
     dst_meta = LeRobotDatasetMetadata.create(
         repo_id=aggr_repo_id,
         fps=fps,
         robot_type=robot_type,
+        tcp_contract=tcp_contract,
+        visual_preprocess=visual_preprocess,
         features=features,
         root=aggr_root,
         use_videos=len(video_keys) > 0,
