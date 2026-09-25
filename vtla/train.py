@@ -213,6 +213,7 @@ def _configure_tacmind0_fsdp(accelerator, policy) -> None:
     plugin.auto_wrap_policy = auto_wrap_policy
     plugin.transformer_cls_names_to_wrap = None
     plugin.min_num_params = 0
+    setattr(policy.model, "_starvtla_fsdp_output_guard", True)
     logging.info("TacMind0 FSDP-1 will wrap %d native submodules.", len(wrap_modules))
 
 

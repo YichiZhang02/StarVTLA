@@ -130,6 +130,7 @@ def test_tacmind0_fsdp_uses_native_wrap_targets():
     assert plugin.auto_wrap_policy(policy.model.other, True, 1)
     assert plugin.transformer_cls_names_to_wrap is None
     assert plugin.min_num_params == 0
+    assert policy.model._starvtla_fsdp_output_guard is True
 
 
 def test_tacmind0_rejects_ddp_and_single_process_training():
@@ -146,3 +147,24 @@ def test_tacmind0_rejects_ddp_and_single_process_training():
         _validate_tacmind0_fsdp(ddp)
     with pytest.raises(RuntimeError, match="at least two"):
         _validate_tacmind0_fsdp(single)
+
+
+def test_tactile_encoder_loads_native_scalar_finger_gate_for_fsdp(monkeypatch, tmp_path):
+    from tacmind0.tactile.encoder import FrozenTactileEncoder
+
+    class _SequenceEncoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.finger_gate = nn.Parameter(torch.tensor([0.1]))
+
+    monkeypatch.setattr(
+        "tacmind0.tactile.encoder.build_encoder", lambda _config: _SequenceEncoder()
+    )
+    checkpoint = tmp_path / "native_encoder.pt"
+    torch.save({"jepa.encoder.finger_gate": torch.tensor(0.75)}, checkpoint)
+
+    encoder = FrozenTactileEncoder({}, trainable=True)
+    encoder.load_world_model(checkpoint)
+
+    assert encoder.encoder.finger_gate.shape == (1,)
+    assert encoder.encoder.finger_gate.item() == pytest.approx(0.75)

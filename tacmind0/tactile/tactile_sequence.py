@@ -300,7 +300,7 @@ class TactileSequenceEncoder(nn.Module):
         self.register_buffer("slot_ids", slot_ids, persistent=False)
         self.register_buffer("causal_mask", causal_mask, persistent=False)
         self.finger_emb = nn.Embedding(FINGERS, hidden)
-        self.finger_gate = nn.Parameter(torch.tensor(0.1))
+        self.finger_gate = nn.Parameter(torch.tensor([0.1]))
         nn.init.zeros_(self.finger_emb.weight)
 
         layers = getattr(getattr(embedding_owner, "encoder", None), "layer", None)

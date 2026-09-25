@@ -99,6 +99,11 @@ class FrozenTactileEncoder(nn.Module):
         }
         if not selected:
             raise ValueError("Checkpoint has no jepa.encoder parameters")
+        # Native Tac-LeWM stores this as a scalar. FSDP-1 cannot shard scalar
+        # parameters, so the StarVTLA model keeps the same value as a 1D tensor.
+        finger_gate = selected.get("finger_gate")
+        if finger_gate is not None and finger_gate.ndim == 0:
+            selected["finger_gate"] = finger_gate.reshape(1)
         self.encoder.load_state_dict(selected, strict=True)
         self.set_trainable(self.trainable)
         return {

@@ -986,7 +986,10 @@ class DMTac05ForConditionalGeneration(DMPreTrainedModel):
         )
         fm_loss = per_sample_fm.mean()
         loss = fm_loss
-        if self.precision_policy == FP32_MIXED_PRECISION_POLICY:
+        if (
+            self.precision_policy == FP32_MIXED_PRECISION_POLICY
+            or getattr(self, "_starvtla_fsdp_output_guard", False)
+        ):
             # FSDP observes wrapped-module backward through returned tensors, while
             # the action expert also consumes KV tensors written into the cache.
             loss = loss + prefix_hidden_states.sum(dtype=torch.float32) * 0.0
