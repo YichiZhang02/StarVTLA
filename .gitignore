@@ -44,8 +44,7 @@ deployment/sdk/
 # Local reference repositories.
 /ref_repo/
 /simulations/UniVTAC/
-/playground/simulations/TacBench/
-/playground/simulations/UniVTAC/
+/playground/simulations/*
 
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/

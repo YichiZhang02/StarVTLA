@@ -307,6 +307,73 @@ def test_relocated_checkpoint_tokenizer(tmp_path, monkeypatch, policy_type, expl
     )
 
 
+def test_relative_tokenizer_path_resolves_from_repo(tmp_path, monkeypatch):
+    from vtla.frameworks.factory import make_pre_post_processors, PolicyProcessorPipeline
+
+    repo_root = Path(__file__).resolve().parents[2]
+    tokenizer = repo_root / 'playground/pretrained_models/pi05_base/paligemma-3b-pt-224-tokenizer'
+    assert (tokenizer / 'tokenizer_config.json').is_file()
+    cfg = make_policy_config(
+        'n0_vtla',
+        paligemma_tokenizer_path='playground/pretrained_models/pi05_base/paligemma-3b-pt-224-tokenizer',
+    )
+    cfg.state_mode = 'absolute_joint'
+    cfg.action_mode = 'absolute_joint'
+    captured = []
+
+    def load_pipeline(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(steps=[])
+
+    monkeypatch.setattr(PolicyProcessorPipeline, 'from_pretrained', load_pipeline)
+    monkeypatch.chdir(tmp_path)
+    make_pre_post_processors(cfg, pretrained_path=tmp_path)
+    assert captured[0]['overrides']['tokenizer_processor']['tokenizer_name'] == str(tokenizer)
+
+
+def test_n0_checkpoint_bundles_tokenizer_and_prefers_it(tmp_path, monkeypatch):
+    from vtla.engine.common.train_utils import save_checkpoint
+    from vtla.engine.processor import TokenizerProcessorStep
+    from vtla.frameworks.factory import make_pre_post_processors, PolicyProcessorPipeline
+
+    class FakeTokenizer:
+        def save_pretrained(self, path):
+            path.mkdir(parents=True)
+            (path / 'tokenizer_config.json').write_text('{}')
+
+    class FakeSaver:
+        def save_pretrained(self, path):
+            path.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_step = TokenizerProcessorStep(tokenizer=FakeTokenizer())
+    preprocessor = FakeSaver()
+    preprocessor.steps = [tokenizer_step]
+    policy = FakeSaver()
+    policy.config = SimpleNamespace(type='n0_vtla')
+    cfg = FakeSaver()
+    cfg.peft = None
+    save_checkpoint(tmp_path / 'checkpoint', 1, cfg, policy, None,
+                    preprocessor=preprocessor, save_training_state_dir=False)
+
+    pretrained_dir = tmp_path / 'checkpoint/pretrained_model'
+    bundled = pretrained_dir / 'paligemma-3b-pt-224-tokenizer'
+    assert (bundled / 'tokenizer_config.json').is_file()
+
+    captured = []
+
+    def load_pipeline(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(steps=[])
+
+    monkeypatch.setattr(PolicyProcessorPipeline, 'from_pretrained', load_pipeline)
+    policy_cfg = make_policy_config('n0_vtla', paligemma_tokenizer_path='/missing/tokenizer')
+    policy_cfg.state_mode = 'absolute_joint'
+    policy_cfg.action_mode = 'absolute_joint'
+    monkeypatch.chdir(tmp_path)
+    make_pre_post_processors(policy_cfg, pretrained_path=pretrained_dir)
+    assert captured[0]['overrides']['tokenizer_processor']['tokenizer_name'] == str(bundled)
+
+
 def test_processor_saved_step_reload(tmp_path):
     from vtla.engine.processor import PolicyProcessorPipeline, batch_to_transition, transition_to_batch
     from vtla.frameworks.n0_vtla.processor_n0_vtla import N0VTLAPrepareStateStep

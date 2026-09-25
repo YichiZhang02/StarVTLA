@@ -65,17 +65,22 @@ RGB 和 PI0.5 风格的任务/状态 prompt → PaliGemma；episode 初始基线
 改变 `max_action_dim` 导致原版投影不匹配时，可显式设置 `reinitialize_action_projections=true`；
 这会重新初始化动作输入/输出层，其他参数仍严格匹配。调整动作语义即使没有形状变化也需要后训练。
 
-Tokenizer 使用 `paligemma_tokenizer_path`；未指定时使用标准 PaliGemma tokenizer 名称。
-离线运行应指向本地 tokenizer（例如现有 pi05_base 的 tokenizer 子目录）。模型恢复不依赖
-原生源码或原生权重路径，但部署时仍须提供 processor 配置中记录的 tokenizer 资产。
+Tokenizer 使用 `paligemma_tokenizer_path`；通过 `train.sh` 训练时默认使用本地
+`playground/pretrained_models/pi05_base/paligemma-3b-pt-224-tokenizer`，可用
+`PALIGEMMA_TOKENIZER_PATH` 覆盖。直接调用 Python 训练入口时需显式指定该路径。
+新训练 checkpoint 会同时保存 processor 配置和 tokenizer 文件；推理优先读取 checkpoint 内的
+`paligemma-3b-pt-224-tokenizer`，不再依赖训练时的 `pi05_base` 目录。
+旧 checkpoint 若未包含 tokenizer 文件，仍按配置中的路径查找。模型恢复不依赖
+原生源码或原生权重路径。
 
 ## 训练
 
 ```bash
-N0_VTLA_BASE_PATH=/path/to/n0-vtla-base \
-PALIGEMMA_TOKENIZER_PATH=playground/pretrained_models/pi05_base/paligemma-3b-pt-224-tokenizer \
-  bash train.sh <dataset_id> n0_vtla 4 1 20000 true as_image absolute_joint relative_rot6d
+bash train.sh <dataset_id> n0_vtla 4 1 20000 true as_image absolute_joint relative_rot6d
 ```
+
+默认从 `playground/pretrained_models/n0-vtla-base` 加载原生权重。
+可用 `N0_VTLA_BASE_PATH` 覆盖该路径；设置 `PRETRAINED_PATH` 时改为加载已保存的 StarVTLA checkpoint。
 
 相机、触觉 keys 和单/双臂设置按现有 StarVTLA 数据约定配置。更细的模型参数通过
 `python -m vtla.train --policy.type=n0_vtla ...` 设置，例如 `--policy.predictor_arch=joint_kv`。

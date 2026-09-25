@@ -56,6 +56,7 @@ from .fastwam.configuration_fastwam import FastWAMConfig
 from .dream_tac.configuration_dream_tac import DreamTacConfig
 from .pi05.configuration_pi05 import PI05Config
 from .n0_vtla.configuration_n0_vtla import N0VTLAConfig
+from .tacmind0.configuration_tacmind0 import TacMind0Config
 from .pretrained import PreTrainedPolicy
 from .sensor_routing import (
     ACTION_ABSOLUTE_EE,
@@ -139,6 +140,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .n0_vtla.modeling_n0_vtla import N0VTLAPolicy
 
         return N0VTLAPolicy
+    elif name == "tacmind0":
+        from .tacmind0.modeling_tacmind0 import TacMind0Policy
+
+        return TacMind0Policy
     elif name == "pi05":
         from .pi05.modeling_pi05 import PI05Policy
 
@@ -189,6 +194,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return DreamTacConfig(**kwargs)
     elif policy_type == "n0_vtla":
         return N0VTLAConfig(**kwargs)
+    elif policy_type == "tacmind0":
+        return TacMind0Config(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
     elif policy_type == "starvla_groot":
@@ -262,20 +269,26 @@ def make_pre_post_processors(
         preprocessor_overrides = {
             key: dict(value) for key, value in (kwargs.get("preprocessor_overrides") or {}).items()
         }
-        # N0 inherits PI05's tokenizer. Saved processors can contain an absolute
-        # path from the training machine; rebind only the standard local asset.
-        if isinstance(policy_cfg, PI05Config):
+        # N0 checkpoints bundle their tokenizer. Older checkpoints may still
+        # point at a path on the training machine, so retain local fallbacks.
+        if isinstance(policy_cfg, PI05Config) and not isinstance(policy_cfg, TacMind0Config):
             tokenizer_overrides = preprocessor_overrides.get("tokenizer_processor", {})
             configured = policy_cfg.paligemma_tokenizer_path
-            if configured and not {"tokenizer_name", "tokenizer"}.intersection(tokenizer_overrides):
-                tokenizer_path = Path(configured).expanduser()
-                candidates = [tokenizer_path]
-                asset_name = "paligemma-3b-pt-224-tokenizer"
-                if tokenizer_path.is_absolute() and tokenizer_path.name == asset_name:
-                    candidates.extend([
-                        Path(pretrained_path) / asset_name,
-                        Path(__file__).resolve().parents[2] / "playground/pretrained_models/pi05_base" / asset_name,
-                    ])
+            asset_name = "paligemma-3b-pt-224-tokenizer"
+            if not {"tokenizer_name", "tokenizer"}.intersection(tokenizer_overrides):
+                candidates = []
+                if isinstance(policy_cfg, N0VTLAConfig):
+                    candidates.append(Path(pretrained_path) / asset_name)
+                if configured:
+                    tokenizer_path = Path(configured).expanduser()
+                    candidates.append(tokenizer_path)
+                    if not tokenizer_path.is_absolute():
+                        candidates.append(Path(__file__).resolve().parents[2] / tokenizer_path)
+                    if tokenizer_path.is_absolute() and tokenizer_path.name == asset_name:
+                        candidates.extend([
+                            Path(pretrained_path) / asset_name,
+                            Path(__file__).resolve().parents[2] / "playground/pretrained_models/pi05_base" / asset_name,
+                        ])
                 local_tokenizer = next(
                     (path for path in candidates if (path / "tokenizer_config.json").is_file()), None
                 )
@@ -303,6 +316,8 @@ def make_pre_post_processors(
             from .dream_tac import processor_dream_tac  # noqa: F401
         elif isinstance(policy_cfg, N0VTLAConfig):
             from .n0_vtla import processor_n0_vtla  # noqa: F401
+        elif isinstance(policy_cfg, TacMind0Config):
+            from .tacmind0 import processor_tacmind0  # noqa: F401
         elif isinstance(policy_cfg, PI05Config):
             from .pi05 import processor_pi05  # noqa: F401
         elif isinstance(policy_cfg, StarvlaGrootConfig):
@@ -413,6 +428,10 @@ def make_pre_post_processors(
         from .n0_vtla.processor_n0_vtla import make_n0_vtla_pre_post_processors
 
         processors = make_n0_vtla_pre_post_processors(policy_cfg, kwargs.get("dataset_stats"))
+    elif isinstance(policy_cfg, TacMind0Config):
+        from .tacmind0.processor_tacmind0 import make_tacmind0_pre_post_processors
+
+        processors = make_tacmind0_pre_post_processors(policy_cfg, kwargs.get("dataset_stats"))
     elif isinstance(policy_cfg, PI05Config):
         from .pi05.processor_pi05 import make_pi05_pre_post_processors
 
@@ -619,6 +638,10 @@ def make_policy(
         if isinstance(cfg, N0VTLAConfig):
             if not isinstance(_ckpt_cfg, N0VTLAConfig):
                 raise ValueError("Use base_model_path for native N0-VTLA weights; pretrained_path requires a StarVTLA checkpoint.")
+            cfg.validate_checkpoint_layout(_ckpt_cfg)
+        if isinstance(cfg, TacMind0Config):
+            if not isinstance(_ckpt_cfg, TacMind0Config):
+                raise ValueError("TacMind0 pretrained_path requires a StarVTLA tacmind0 checkpoint.")
             cfg.validate_checkpoint_layout(_ckpt_cfg)
         if isinstance(cfg, DreamTacConfig):
             if not isinstance(_ckpt_cfg, DreamTacConfig):

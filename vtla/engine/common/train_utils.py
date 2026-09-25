@@ -114,6 +114,15 @@ def save_checkpoint(
         policy.config.save_pretrained(pretrained_dir)
     if preprocessor is not None:
         preprocessor.save_pretrained(pretrained_dir)
+        if policy.config.type == "n0_vtla":
+            from vtla.engine.processor import TokenizerProcessorStep
+
+            tokenizer_steps = [step for step in preprocessor.steps if isinstance(step, TokenizerProcessorStep)]
+            if len(tokenizer_steps) != 1:
+                raise ValueError("N0-VTLA checkpoint requires exactly one tokenizer processor step.")
+            tokenizer_steps[0].input_tokenizer.save_pretrained(
+                pretrained_dir / "paligemma-3b-pt-224-tokenizer"
+            )
     if postprocessor is not None:
         postprocessor.save_pretrained(pretrained_dir)
     if save_training_state_dir:

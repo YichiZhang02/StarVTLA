@@ -20,6 +20,7 @@ from .episode_ee_processor import EpisodeEEPreprocessorStep as EpisodeEEPreproce
 from .factory import get_policy_class, make_policy, make_policy_config, make_pre_post_processors
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .n0_vtla.configuration_n0_vtla import N0VTLAConfig as N0VTLAConfig
+from .tacmind0.configuration_tacmind0 import TacMind0Config as TacMind0Config
 from .pretrained import PreTrainedPolicy as PreTrainedPolicy
 from .starvla_groot.configuration_starvla_groot import StarvlaGrootConfig as StarvlaGrootConfig
 from .starvla_groot_dinoalign.configuration_starvla_groot_dinoalign import (
@@ -38,6 +39,7 @@ __all__ = [
     "DreamTacConfig",
     "PI05Config",
     "N0VTLAConfig",
+    "TacMind0Config",
     "StarvlaGrootConfig",
     "StarvlaGrootDinoAlignConfig",
     # Base class

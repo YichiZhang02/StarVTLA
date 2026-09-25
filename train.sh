@@ -5,7 +5,7 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
 dataset_mixture=${1:?"Usage: bash train.sh <registered_name|source/group/dataset_id> [policy_type ...]"}  # registered_name|source/group/dataset_id
-policy_type=${2:-pi05}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac | n0_vtla
+policy_type=${2:-pi05}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac | n0_vtla | tacmind0
 
 # 训练配置
 num_processes=${3:-4}
@@ -13,10 +13,14 @@ batch_size=${4:-8}
 steps=${5:-20_000}
 save_freq=5_000
 log_freq=100
+save_checkpoint=${SAVE_CHECKPOINT:-true}
 
 # 数据配置
 wrist_only=${6:-true}  # true | false
 tactile_mode=${7:-none}  # none | as_image | encode
+if [ "${policy_type}" = "tacmind0" ]; then
+  tactile_mode=as_image
+fi
 state_mode=${8:-none}  # none | absolute_joint | episode_joint | absolute_rot6d | episode_rot6d
 action_mode=${9:-relative_rot6d}  # absolute_joint | relative_joint | absolute_rot6d | relative_rot6d
 action_gap=${10:-6}  # GT action 起点相对当前观测向未来偏移的帧数
@@ -31,6 +35,10 @@ tactile_insert_location=${TACTILE_INSERT_LOCATION:-encoder}  # 触觉插入位�
 tactile_pool_size=${TACTILE_POOL_SIZE:-3}  # 3 表示下游 AdaptiveAvgPool2d(3x3)
 tactile_num_frames=${TACTILE_NUM_FRAMES:-4}  # 每步输入的触觉帧数（含当前帧）
 tactile_frame_offset=${TACTILE_FRAME_OFFSET:-2}  # 相邻两个触觉帧的采样间隔（帧数）
+if [ "${policy_type}" = "tacmind0" ]; then
+  tactile_num_frames=8
+  tactile_frame_offset=5
+fi
 
 # cpu / gpu training
 policy_device=${POLICY_DEVICE:-cuda}
@@ -46,7 +54,7 @@ run_name="$(date +%Y%m%d)_${dataset_mixture//\//_}_${policy_type}_${policy_suffi
 
 # 路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)
 dataset_root=playground/data
-output_root=playground/results/models
+output_root=${OUTPUT_ROOT:-playground/results/models}
 mixture_config=playground/data/data_mixtures.yaml
 
 # 普通数据集和 mixture 共用同一个 dataset_id 解析入口。
@@ -95,10 +103,11 @@ dinov3_checkpoint=${DINOV3_CHECKPOINT:-}
 case "${policy_type}" in
   pi05)          pretrained_path=${pretrained_path:-playground/pretrained_models/pi05_base} ;;
   starvla_groot|starvla_groot_dinoalign) base_vlm=${base_vlm:-playground/pretrained_models/Qwen3.5-0.8B} ;;
-  n0_vtla)       : ;; # Native weights use N0_VTLA_BASE_PATH, StarVTLA checkpoints use PRETRAINED_PATH
+  n0_vtla)       : ;; # Native weights use N0_VTLA_BASE_PATH (default below), StarVTLA checkpoints use PRETRAINED_PATH
+  tacmind0)      : ;; # Native weights use TACMIND0_BASE_PATH; PRETRAINED_PATH is a StarVTLA checkpoint
   dream_tac)     pretrained_path=playground/pretrained_models/Cosmos-Predict2-2B-Video2World ;;
   act|diffusion|fastwam) : ;;  # 从底座或随机初始化，不加载 VTLA policy checkpoint
-  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla)"; exit 1 ;;
+  *)             echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla|tacmind0)"; exit 1 ;;
 esac
 
 
@@ -130,11 +139,21 @@ case "${policy_type}" in
     if [ -n "${N0_VTLA_BASE_PATH:-}" ]; then
       extra_args="${extra_args} --policy.base_model_path=${N0_VTLA_BASE_PATH}"
     elif [ -z "${pretrained_path}" ]; then
-      echo "Set N0_VTLA_BASE_PATH to native model.safetensors directory, or PRETRAINED_PATH to a StarVTLA checkpoint"
-      exit 1
+      extra_args="${extra_args} --policy.base_model_path=playground/pretrained_models/n0-vtla-base"
     fi
-    if [ -n "${PALIGEMMA_TOKENIZER_PATH:-}" ]; then
-      extra_args="${extra_args} --policy.paligemma_tokenizer_path=${PALIGEMMA_TOKENIZER_PATH}"
+    paligemma_tokenizer_path=${PALIGEMMA_TOKENIZER_PATH:-playground/pretrained_models/pi05_base/paligemma-3b-pt-224-tokenizer}
+    extra_args="${extra_args} --policy.paligemma_tokenizer_path=${paligemma_tokenizer_path}"
+    ;;
+  tacmind0)
+    extra_args="${extra_args} --policy.dtype=bfloat16 --policy.tactile_num_frames=8 --policy.tactile_frame_offset=5"
+    if [ -n "${TACMIND0_BASE_PATH:-}" ]; then
+      extra_args="${extra_args} --policy.base_model_path=${TACMIND0_BASE_PATH}"
+    fi
+    if [ -n "${TACMIND0_TACTILE_WEIGHTS_PATH:-}" ]; then
+      extra_args="${extra_args} --policy.tactile_weights_path=${TACMIND0_TACTILE_WEIGHTS_PATH}"
+    fi
+    if [ -n "${TACMIND0_BACKBONE_CONFIG_PATH:-}" ]; then
+      extra_args="${extra_args} --policy.tactile_backbone_config_path=${TACMIND0_BACKBONE_CONFIG_PATH}"
     fi
     ;;
   dream_tac)
@@ -149,7 +168,7 @@ case "${policy_type}" in
     : # 这两个没有 VLM/dtype 相关字段
     ;;
   *)
-    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla)"; exit 1
+    echo "Unknown policy_type: ${policy_type} (expected act|diffusion|pi05|starvla_groot|starvla_groot_dinoalign|fastwam|dream_tac|n0_vtla|tacmind0)"; exit 1
     ;;
 esac
 
@@ -177,7 +196,7 @@ if [ "${tactile_mode}" = "encode" ]; then
 fi
 
 # 触觉时序窗口（encode 和 as_image 均生效；F=1 时完全向后兼容）
-if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "dream_tac" ] && [ "${policy_type}" != "n0_vtla" ]; then
+if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "dream_tac" ] && [ "${policy_type}" != "n0_vtla" ] && [ "${policy_type}" != "tacmind0" ]; then
   extra_args="${extra_args} --policy.tactile_insert_location=${tactile_insert_location}"
   extra_args="${extra_args} --policy.tactile_num_frames=${tactile_num_frames}"
   extra_args="${extra_args} --policy.tactile_frame_offset=${tactile_frame_offset}"
@@ -202,8 +221,10 @@ echo "Tactile keys:   ${tactile_keys}"
 if [ "${d}" = "encode" ]; then
   echo "Tactile encoder path: ${tactile_encoder_path} (${tactile_pool_size}x${tactile_pool_size} pooled backbone, trained jointly)"
 fi
-if [ "${tactile_mode}" != "none" ]; then
+if [ "${tactile_mode}" != "none" ] && [ "${policy_type}" != "tacmind0" ]; then
   echo "Tactile context: insert=${tactile_insert_location} | num_frames=${tactile_num_frames} | frame_offset=${tactile_frame_offset}"
+elif [ "${policy_type}" = "tacmind0" ]; then
+  echo "Tactile context: Tac-LeWM | num_frames=8 | frame_offset=5 | trainable=true"
 fi
 echo "Output dir: $output_dir"
 echo "Extra args: ${extra_args}"
@@ -239,8 +260,25 @@ case " ${WM_List} " in
     ;;
 esac
 
-PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
-    --num_processes=$num_processes \
+accelerate_args=(--num_processes="${num_processes}")
+if [ "${policy_type}" = "tacmind0" ]; then
+  if ! [[ "${num_processes}" =~ ^[0-9]+$ ]] || (( num_processes < 2 )); then
+    echo "TacMind0 full fine-tuning requires num_processes >= 2 (FSDP-1)." >&2
+    exit 1
+  fi
+  accelerate_args+=(
+    --mixed_precision=bf16
+    --use_fsdp
+    --fsdp_version=1
+    --fsdp_sharding_strategy=SHARD_GRAD_OP
+    --fsdp_backward_prefetch=BACKWARD_PRE
+    --fsdp_state_dict_type=FULL_STATE_DICT
+    --fsdp_use_orig_params=true
+    --fsdp_sync_module_states=true
+  )
+fi
+
+PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch "${accelerate_args[@]}" \
     -m vtla.train \
     --dataset.repo_id=$dataset_id \
     --dataset.dataset_source=$dataset_source \
@@ -265,6 +303,7 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --job_name=${run_name} \
     --steps=${steps} \
     --save_freq=${save_freq} \
+    --save_checkpoint=${save_checkpoint} \
     --batch_size=${batch_size} \
     --log_freq=${log_freq} \
     --tolerance_s=0.04 \

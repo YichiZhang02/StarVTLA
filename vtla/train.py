@@ -174,6 +174,48 @@ def update_policy(
     return train_metrics, output_dict
 
 
+def _validate_tacmind0_fsdp(accelerator) -> None:
+    process_count = int(getattr(accelerator, "num_processes", 1))
+    if process_count < 2:
+        raise RuntimeError(
+            "TacMind0 full fine-tuning requires at least two GPU processes with FSDP-1."
+        )
+    plugin = getattr(getattr(accelerator, "state", None), "fsdp_plugin", None)
+    if plugin is None or int(getattr(plugin, "fsdp_version", 1) or 1) != 1:
+        raise RuntimeError(
+            "TacMind0 full fine-tuning requires Accelerate FSDP-1; use train.sh with "
+            "num_processes >= 2."
+        )
+    if getattr(accelerator, "mixed_precision", "no") != "bf16":
+        raise RuntimeError(
+            "TacMind0 training requires BF16 mixed precision; pass "
+            "--mixed_precision=bf16 to accelerate launch."
+        )
+
+
+def _configure_tacmind0_fsdp(accelerator, policy) -> None:
+    _validate_tacmind0_fsdp(accelerator)
+    plugin = accelerator.state.fsdp_plugin
+    get_wrap_modules = getattr(policy.model, "fsdp_wrap_modules", None)
+    if not callable(get_wrap_modules):
+        raise TypeError("TacMind0 model does not expose its native FSDP wrap modules.")
+    wrap_modules = get_wrap_modules()
+    if not wrap_modules:
+        raise ValueError("TacMind0 native FSDP wrap module list is empty.")
+    for module in wrap_modules:
+        setattr(module, "_tacmind0_fsdp_wrap", True)
+
+    def auto_wrap_policy(module, recurse, nonwrapped_numel):
+        if recurse:
+            return True
+        return bool(getattr(module, "_tacmind0_fsdp_wrap", False))
+
+    plugin.auto_wrap_policy = auto_wrap_policy
+    plugin.transformer_cls_names_to_wrap = None
+    plugin.min_num_params = 0
+    logging.info("TacMind0 FSDP-1 will wrap %d native submodules.", len(wrap_modules))
+
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     """
@@ -210,6 +252,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             kwargs_handlers=[ddp_kwargs],
             cpu=force_cpu,
         )
+
+    if cfg.trainable_config.type == "tacmind0":
+        _validate_tacmind0_fsdp(accelerator)
 
     init_logging(accelerator=accelerator)
 
@@ -288,6 +333,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         rename_map=cfg.rename_map,
         for_training=True,
     )
+    if active_cfg.type == "tacmind0":
+        _configure_tacmind0_fsdp(accelerator, policy)
 
     if is_main_process:
         logging.info(f"记录 robot_type 到 checkpoint: {policy.config.robot_type!r}")
@@ -341,7 +388,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         getattr(active_cfg, "action_reference", "absolute") == "relative"
         or getattr(active_cfg, "state_mode", "absolute_joint") in _ee_state_modes
         or getattr(active_cfg, "action_mode", "absolute_joint") in _ee_action_modes
-        or (getattr(active_cfg, "type", None) in {"fastwam", "dream_tac"} and not cfg.resume)
+        or (getattr(active_cfg, "type", None) in {"fastwam", "dream_tac", "tacmind0"} and not cfg.resume)
     )
     if _needs_rebuilt_processor and processor_pretrained_path is not None:
         logging.warning(

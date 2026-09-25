@@ -229,6 +229,11 @@ bash train.sh \
 
 `dataset_mixture` 是 `$1`，`policy_type` 是 `$2`，后续参数依上面的顺序排列。
 
+TacMind0 使用 `policy_type=tacmind0`，训练入口会强制 `tactile_mode=as_image`，
+并按原模型的两路触觉、8 帧、间隔 5 帧输入专用 Tac-LeWM encoder；训练时该 encoder
+参与优化。数据集需有两路触觉 key，完整权重与用法见
+[TacMind0 说明](vtla/frameworks/tacmind0/README.md)。
+
 关节动作示例：
 
 ```bash

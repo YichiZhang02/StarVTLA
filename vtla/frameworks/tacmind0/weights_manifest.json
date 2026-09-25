@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "source_repo": "/mnt/data/TacDream",
+  "source_commit": "ff70764",
+  "starvtla_base_commit": "7b21142",
+  "files": [
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/chat_template.jinja",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/chat_template.jinja",
+      "bytes": 1532,
+      "sha256": "7de1c58e208eda46e9c7f86397df37ec49883aeece39fb961e0a6b24088dd3c4"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/config.json",
+      "bytes": 6823,
+      "sha256": "4610f2a4a585d6f85a8d5a90c26e2cb79a164ddc7531f49ffeda7b65afcb5549"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/model.safetensors",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/model.safetensors",
+      "bytes": 23316655136,
+      "sha256": "4457e00e7949a2eb09ea14f5379b166143c60a9b75e668b42502c73efea6c85c"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/norm_stats.json",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/norm_stats.json",
+      "bytes": 4369,
+      "sha256": "e907bab0ee6a0671701761d11be4699e425327584f6578dcb1d53fe50d660728"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/processor_config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/processor_config.json",
+      "bytes": 556,
+      "sha256": "12e52e762ed05f946c8ca37247230c3fcc668ff72f193872790452e1f26a3ecc"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/tokenizer.json",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/tokenizer.json",
+      "bytes": 33384567,
+      "sha256": "daab2354f8a74e70d70b4d1f804939b68a8c9624dd06cb7858e52dd8970e9726"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/base_policy/tokenizer_config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/base_policy/tokenizer_config.json",
+      "bytes": 824,
+      "sha256": "f0307759bb68eae3b88cc95f4372e789378be3478eada65c51298866fe513427"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_v6_epoch1/backbone_config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/taclewm/backbone_config.json",
+      "bytes": 1001,
+      "sha256": "ae98d74b7fc56b1138ce06940184aa886370b9b1686f9239d30eeb6ef1a2cb37"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_v6_epoch1/vision_backbone_config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/taclewm/vision_backbone_config.json",
+      "bytes": 744,
+      "sha256": "3c9cc418f4622fd6d5587fd142b6f3cba0ba6a69f67ced907d8b7f26118451ec"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_v6_epoch1/weights_epoch_1.pt",
+      "source_path": "/mnt/data/TacDream/artifacts/taclewm/weights_epoch_1.pt",
+      "bytes": 543594013,
+      "sha256": "85065ebad91912bf7dfd02fdcf16ead2ae76800d812c69c8b8415d257e9cc5e9"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_v6_epoch1/world_model_config.json",
+      "source_path": "/mnt/data/TacDream/artifacts/taclewm/world_model_config.json",
+      "bytes": 3321,
+      "sha256": "607f9417f1fa893b9bc55b8e0ed969ed876b438ef8faab691bd9d1843c0e9511"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/backbone_config.json",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/backbone_config.json",
+      "bytes": 1001,
+      "sha256": "ae98d74b7fc56b1138ce06940184aa886370b9b1686f9239d30eeb6ef1a2cb37"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/encoder.pt",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/encoder.pt",
+      "bytes": 88311355,
+      "sha256": "ebb94b4a3bba1ed786e03cc36aef87ae223c8f6fb66570a976df4f673440816e"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/encoder_provenance.json",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/encoder_provenance.json",
+      "bytes": 386,
+      "sha256": "693b55ea0a1dbe86ee007a0b18cca8f68f1c98668c05174672bdc3cce2a5bee4"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/finetuning.json",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/finetuning.json",
+      "bytes": 2945197,
+      "sha256": "ce0d93270f72e0bb116c080a2cd1e4566474358718637d2629e088ca0eb0787d"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/trainer.pt",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/trainer.pt",
+      "bytes": 176668015,
+      "sha256": "6546951d1ca6ca3b6d165c7123886b86a967a18f34990f0a5e6feba2342c2777"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/vision_backbone_config.json",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/vision_backbone_config.json",
+      "bytes": 744,
+      "sha256": "3c9cc418f4622fd6d5587fd142b6f3cba0ba6a69f67ced907d8b7f26118451ec"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/world_model.pt",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/world_model.pt",
+      "bytes": 543594001,
+      "sha256": "8321f419a88839245c253f758d2953774f09a38b692ac13d170f16479cac7c4e"
+    },
+    {
+      "path": "playground/pretrained_models/tacmind0/tac_lewm_finetuned/checkpoint-10000/world_model_config.json",
+      "source_path": "/mnt/data/TacDream/user_checkpoints/gelsight_lewm_ft_encoderonly_bnfixed_history3_markerfixed_20260925/checkpoint-10000/world_model_config.json",
+      "bytes": 3321,
+      "sha256": "68fc88b04d46a9bbfa787bdbcb26f1911a4e63c946b63c0b7f6029c4edbcc3b7"
+    }
+  ]
+}

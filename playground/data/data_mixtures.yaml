@@ -3,6 +3,15 @@ version: 1
 # Member weight defaults to 1. VLA samples proportional to each member's
 # effective frame count times its weight. Backbone keeps its own sampler.
 mixtures:
+  rm_isf_umi_left_20260925:
+    datasets:
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_assemble_gearL_processed}
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_assemble_gearS_processed}
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_choose_heavy_bottle_processed}
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_choose_light_bottle_processed}
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_insert_plug_processed}
+      - {source: Daimon, group: realman_single, dataset_id: rm_isf_umi_left_20260925_insert_usb_processed}
+
   backbone_training_data:
     datasets:
       - source: Daimon
