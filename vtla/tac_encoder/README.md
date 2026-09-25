@@ -37,11 +37,14 @@ MAE 内部实现位于 `frameworks/anytouch1/mae/`，AnyTouch2 的视频 patch �
 从仓库根目录运行：
 
 ```bash
-bash scripts/process_backbone_data.sh <dataset_id> [--num_workers 4] [--overwrite]
+bash scripts/process_backbone_data.sh <registered_name|source/group/dataset_id> [--num_workers 4] [--overwrite]
 bash scripts/train_backbone.sh \
-  <dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
+  <registered_name|source/group/dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
   [lr] [image_size] [num_frames] [frame_stride] [resume]
 ```
+
+配置中的组合可写为 `bash scripts/train_backbone.sh <name> <model_id>`；
+预处理使用 `bash scripts/process_backbone_data.sh <name>`。
 
 训练输出位于 `playground/results/backbones/`。详细参数、预训练权重路径和 cache 契约见
 [scripts/README.md](../../scripts/README.md#触觉-backbone-训练)。

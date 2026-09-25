@@ -30,12 +30,26 @@ inference.sh  真机推理入口
 所有仓库脚本都以仓库根目录为运行基准。运行资产默认位于：
 
 ```text
-playground/data/<dataset_id>
+playground/data/<source>/<division>/<dataset_id>
 playground/pretrained_models/<model>
 playground/results/models/<pretrained_id>
 playground/results/backbones/<run_id>
 playground/eval/<eval_id>
 ```
+
+训练数据按来源、划分和数据集 ID 放在三级目录。可选择单个数据集、一个划分或一个来源：
+
+```bash
+bash train.sh Daimon/realman_single/<dataset_id> ...
+bash train.sh Daimon/realman_single/all ...
+bash train.sh Daimon/all/all ...
+bash scripts/train_backbone.sh Daimon/realman_single/<dataset_id> ...
+```
+
+训练用的叶子目录必须含 `meta/info.json`。`all` 会按目录名排序展开成员，
+默认 `weight=1`；需要筛选成员、指定权重或 episodes 时，使用 `playground/data/data_mixtures.yaml`。
+参与同一次训练的成员仍须满足现有的 feature schema、FPS、robot_type 等一致性检查。
+解析出的成员列表写入训练配置，恢复训练时不会重新扫描目录。
 
 ## 环境
 
@@ -103,16 +117,18 @@ python -m deployment.tools.hardware_check \
 先在 [collect.sh](collect.sh) 中设置唯一的 `robot_type`，再运行：
 
 ```bash
-bash collect.sh <name> <task_text> <num_episodes> [teleop|drag]
+bash collect.sh <source/group> <name> [task_text] [num_episodes] [teleop|drag]
 ```
 
 采集示例：
 
 ```bash
-bash collect.sh insert_easy "insert the object to the hole" 25 drag
+bash collect.sh Daimon/realman_single insert_easy \
+  "insert the object to the hole" 25 drag
 ```
 
 `deployment.collect` 从 RobotConfig 注册表校验类型，并自动选择该机器人声明的遥操作器。采集结果的 `meta/info.json` 会记录完全相同的 `robot_type`。
+第一个参数指定 `source/group`，第二个参数 `name` 会生成 `<robot_type>_<YYYYMMDD>_<name>` 作为 `dataset_id`，最终目录为 `playground/data/<source>/<group>/<dataset_id>/`。缺失的父目录会自动创建。采集目标必须是具体数据集，不能是注册组合名或 `all`。
 
 ### 2. 数据处理
 
@@ -161,7 +177,8 @@ TASK="Put the board eraser into the cup." \
 
 ```bash
 python tools/migrate_tcp_dataset.py \
-  --src playground/data/old_dataset --dst playground/data/tcp_dataset \
+  --src playground/data/Daimon/realman_single/old_dataset \
+  --dst playground/data/Daimon/realman_single/tcp_dataset \
   --horizon 32 --action-gap 6
 ```
 
@@ -173,7 +190,7 @@ python tools/migrate_tcp_dataset.py \
 只有需要训练触觉 backbone 时才执行该步骤。输入应是完成上述处理、触觉图像已转换为 `uint8` 的数据集：
 
 ```bash
-bash scripts/process_backbone_data.sh <dataset_id> \
+bash scripts/process_backbone_data.sh <registered_name|source/group/dataset_id> \
   --image_size 224 --num_frames 4 --frame_stride 2
 ```
 
@@ -187,14 +204,16 @@ bash scripts/process_backbone_data.sh <dataset_id> \
 
 ```bash
 bash scripts/train_backbone.sh \
-  <dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
+  <registered_name|source/group/dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
   [lr] [image_size] [tactile_num_frames] [tactile_frame_offset] [resume]
 ```
+
+第一个位置参数是注册组合名或完整三级数据路径。
 
 训练示例：
 
 ```bash
-bash scripts/train_backbone.sh <dataset_id> wan22_vae 4 4 5 1e-5 224 4 2
+bash scripts/train_backbone.sh Daimon/realman_single/<dataset_id> wan22_vae 4 4 5 1e-5 224 4 2
 ```
 
 各模型目标和权重要求见 [Backbone 模型文档](#backbone模型文档)。
@@ -203,24 +222,26 @@ bash scripts/train_backbone.sh <dataset_id> wan22_vae 4 4 5 1e-5 224 4 2
 
 ```bash
 bash train.sh \
-  <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
+  <registered_name|source/group/dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
-  [action_gap] <augmentation_mode> [tactile_encoder_path]
+  [action_gap] [augmentation_mode] [tactile_encoder_path]
 ```
+
+`dataset_mixture` 是 `$1`，`policy_type` 是 `$2`，后续参数依上面的顺序排列。
 
 关节动作示例：
 
 ```bash
-dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_processed
-bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
+dataset_id=rm_isf_umi_left_20260918_assemble_gearS_processed
+bash train.sh "Daimon/realman_single/${dataset_id}" starvla_groot 1 4 10000 \
   true none absolute_joint absolute_joint 0 none
 ```
 
 相对 EE 动作示例：
 
 ```bash
-dataset_id=rm_isf_umi_left_20260820_insert_easy_precise_processed
-bash train.sh "${dataset_id}" starvla_groot 1 4 10000 \
+dataset_id=rm_isf_umi_left_20260918_assemble_gearS_processed
+bash train.sh "Daimon/realman_single/${dataset_id}" starvla_groot 1 4 10000 \
   true none absolute_rot6d relative_rot6d 6 none
 ```
 
@@ -242,28 +263,62 @@ dr = rot6d(Rs.T @ Ra) - [1, 0, 0, 0, 1, 0]
 
 #### 3.3 数据集 Mixture
 
-在 `configs/data_mixtures.yaml` 中可以把已有数据集注册为一个不占额外数据存储的虚拟数据集：
+也可以在 `playground/data/data_mixtures.yaml` 中跨来源组合整个划分或单个数据集：
 
 ```yaml
 version: 1
 mixtures:
-  <data_all>:
-    root: playground/data
+  Mix:
     datasets:
-      - dataset_id: <data1>
-      - dataset_id: <data2>
-      - dataset_id: <data3>
+      - {source: Daimon, group: realman_single, dataset_id: all}
+      - {source: N0, group: umi, dataset_id: demo, weight: 2}
 ```
 
-mixture 和普通数据集使用同一个 ID 入口，不需要特殊前缀：
+训练 `data_mixtures.yaml` 中定义的组合时，直接传组合名：
 
 ```bash
-bash train.sh <data_all>
+bash train.sh Mix starvla_groot 1 4 10000
 
-bash train_backbone.sh <data_all>
+bash scripts/process_backbone_data.sh Mix
+bash scripts/train_backbone.sh Mix anytouch1
 ```
 
-每个成员的 `weight` 默认为 `1`，归一化后作为先选择数据集的概率；选中成员后再在它的有效 frame 中均匀采样。因此默认是数据集级等权，不受成员 frame 数量影响。成员必须具有一致的 `robot_type`、FPS 和 `tcp_contract`；TCP relative 统计也必须存在且使用相同动作窗口。feature schema 对每个 feature 严格比较 key、`dtype`、`shape`、`names`、`tactile_encoding` 和 `storage_dtype`；相机 `intrinsics`、`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 允许不同。因此不同设备的相机标定和封装参数可以保留，不会阻止 mixture 训练。
+`Mix` 对应 YAML 中的 `mixtures.Mix`；按其中的成员、episodes 和权重训练。
+普通数据集使用 `source/group/id`，最后一段可为 `all`。
+
+VLA 训练中，每个成员的 `weight` 默认为 `1`，表示**每帧采样倍率**。先按以下概率选择数据集，再在该成员的有效帧中均匀随机抽样：
+
+```text
+p_i = weight_i × N_i / Σ(weight_j × N_j)
+```
+
+`N_i` 是成员经过 `episodes` 筛选和训练帧裁剪后的有效帧数；当前 VLA 训练入口按策略配置应用尾帧裁剪。裁剪后没有有效帧的 episode 不参与采样；成员完全没有有效帧时会报错。采样有放回，允许重复抽帧，不保证一轮遍历每一帧。
+
+不设置权重时，所有有效帧获得相同采样机会，大数据集获得更多总采样次数。例如：
+
+| 成员 | 有效帧数 | 默认 `weight` | 数据集采样概率 |
+|---|---:|---:|---:|
+| A | 10,000 | 1 | 10% |
+| B | 90,000 | 1 | 90% |
+
+需要额外强调某个来源时，可以显式设置倍率：
+
+```yaml
+datasets:
+  - dataset_id: <data_a>
+    weight: 2.0
+  - dataset_id: <data_b>
+```
+
+此时 A 中每个有效帧被抽中的概率是 B 中每帧的两倍。若帧数仍为上表数值，来源概率为 `20,000 : 90,000`，即约 `18.2% : 81.8%`。已有非默认权重继续生效；若希望完全按有效帧数混合，应省略所有成员的权重或全部设为 `1`。
+
+VLA 的 mean/std 聚合使用同一来源概率；成员内部仍沿用已有全量统计，不会因筛选 episodes 或裁剪帧而重新计算子集统计。启动日志打印各成员的有效帧数、配置倍率和最终概率，训练日志中的 `Mixture sample fractions` 则反映实际采样比例。
+
+解析结果 `resolved_data_mixture.json` 和保存的训练配置会记录 `sampling_strategy=weighted_frames`、有效帧数及最终概率。加载旧 checkpoint 中没有策略标记的 resolved mixture 时，保持原来的 `p_i ∝ weight_i` 数据集级权重语义。
+
+上述变更仅适用于 VLA。Backbone 仍按原来的成员权重选择来源，不自动乘有效帧数。
+
+成员必须具有一致的 `robot_type`、FPS 和 `tcp_contract`；TCP relative 统计也必须存在且使用相同动作窗口。feature schema 对每个 feature 严格比较 key、`dtype`、`shape`、`names`、`tactile_encoding` 和 `storage_dtype`；相机 `intrinsics`、`imu_to_rgb_camera`、`extrinsics`，视频 codec/`pix_fmt`、`video_path` 和 `external_video` 允许不同。因此不同设备的相机标定和封装参数可以保留，不会阻止 mixture 训练。
 
 ### 4. 离线推理
 

@@ -197,22 +197,24 @@ python -m deployment.tools.hardware_check \
 在 [collect.sh](../collect.sh) 顶部设置 `robot_type`，然后运行：
 
 ```bash
-bash collect.sh <name> <task_text> <num_episodes> [teleop|drag] \
+bash collect.sh <source/group> <name> [task_text] [num_episodes] [teleop|drag] \
   [drag_gripper_close_value] [reset_before_episode]
 ```
 
 示例：
 
 ```bash
-bash collect.sh insert_easy \
+bash collect.sh Daimon/realman_single insert_easy \
   "insert the object to the hole" 25 drag 0.3 true
 ```
 
 输出目录为：
 
 ```text
-playground/data/<robot_type>_<YYYYMMDD>_<name>/
+playground/data/<source>/<group>/<dataset_id>/
 ```
+
+第一个参数指定 `source/group`；第二个参数 `name` 会生成 `<robot_type>_<YYYYMMDD>_<name>` 作为 `dataset_id`。缺失的 `source/group` 目录会自动创建，末级数据集目录由 LeRobot 创建。采集只能写入具体的数据集，不能使用注册组合名或 `all`。
 
 采集引擎把 `robot.robot_type` 原样写入 `meta/info.json.robot_type`。不要在采集后通过目录名推断类型。
 

@@ -103,10 +103,15 @@ class MixtureSampler(Sampler[int]):
         self.dataset = dataset
         self.seed = seed
         self.epoch = 0
-        self.valid_indices = [
-            self._valid_child_indices(child, drop_n_first_frames, drop_n_last_frames)
-            for child in dataset._datasets
-        ]
+        if hasattr(dataset, "valid_indices"):
+            if dataset.frame_trimming != (drop_n_first_frames, drop_n_last_frames):
+                raise ValueError("Sampler frame trimming must match mixture statistics and sampling probabilities.")
+            self.valid_indices = dataset.valid_indices
+        else:
+            self.valid_indices = [
+                self._valid_child_indices(child, drop_n_first_frames, drop_n_last_frames)
+                for child in dataset._datasets
+            ]
         empty = [dataset.repo_ids[i] for i, indices in enumerate(self.valid_indices) if not indices]
         if empty:
             raise ValueError(f"No valid frames remain for mixture members: {empty}")

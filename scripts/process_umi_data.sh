@@ -16,8 +16,9 @@ if [ -z "${task}" ]; then
   exit 1
 fi
 
-src="playground/data/${dataset_id}"
-dst="playground/data/${dataset_id}_processed"
+dataset_root="playground/data/${DATASET_SOURCE:-Daimon}/${DATASET_GROUP:-umi}"
+src="${dataset_root}/${dataset_id}"
+dst="${dataset_root}/${dataset_id}_processed"
 gripper_args=()
 if [ -n "${LEFT_GRIPPER_OPEN:-}" ]; then
   gripper_args+=(

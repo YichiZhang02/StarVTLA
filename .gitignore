@@ -6,6 +6,7 @@ playground/results/**
 playground/eval/**
 !playground/data/
 !playground/data/.gitkeep
+!playground/data/data_mixtures.yaml
 !playground/logs/
 !playground/logs/.gitkeep
 !playground/logs/backbones/
@@ -42,6 +43,9 @@ deployment/sdk/
 
 # Local reference repositories.
 /ref_repo/
+/simulations/UniVTAC/
+/playground/simulations/TacBench/
+/playground/simulations/UniVTAC/
 
 # Runtime logs from tactile / device clients (dmrobotics SDK writes to CWD)
 /logs/

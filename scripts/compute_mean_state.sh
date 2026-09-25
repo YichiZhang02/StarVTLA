@@ -16,7 +16,7 @@ dataset_id=${1:-rm_umi_dual_260708_pen_in_case_merged_3_notac_undist_256}
 frames=${2:-first}
 state_key=${3:-observation.state}
 
-dataset_root=playground/data
+dataset_root=playground/data/${DATASET_SOURCE:-Daimon}/${DATASET_GROUP:-realman_single}
 src=${dataset_root}/${dataset_id}
 
 export PYTHONPATH=${REPO_ROOT}:${PYTHONPATH}

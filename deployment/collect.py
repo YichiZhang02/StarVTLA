@@ -20,7 +20,8 @@
 最小命令:
     python -m deployment.collect \
         --robot.type=rm_base_umi_dual \
-        --dataset.repo_id=pick_pen \
+        --dataset_source_group=Daimon/realman_dual \
+        --dataset.repo_id=local/pick_pen \
         --dataset.single_task="抓笔" \
         --dataset.num_episodes=20
 
@@ -28,12 +29,13 @@
     python -m deployment.collect \
         --mode=drag \
         --robot.type=rm_isf_umi_left \
-        --dataset.repo_id=drag_demo \
+        --dataset_source_group=Daimon/realman_single \
+        --dataset.repo_id=local/drag_demo \
         --dataset.single_task="抓笔" \
         --drag_gripper_close_value=0.0
 
 默认行为:
-    - 数据存到 playground/data/<repo_id> (不传 --dataset.root 时)
+    - 通过 --dataset_source_group=source/group 和 repo_id 末段指定本地目录
     - 触觉随 robot 配置, 默认开; 不要触觉加 --robot.use_tactile=false
     - 不推 HuggingFace hub (需要才加 --dataset.push_to_hub=true)
     - 其余硬件参数 (IP/串口等) 走各自 config 默认, 需要时照样可 --robot.xxx / --teleop.xxx 覆盖
@@ -43,6 +45,7 @@ import math
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from deployment._record_engine import RecordConfig, StickyHint, run_record  # noqa: E402
 from deployment.teleoperators import TeleoperatorConfig
@@ -59,6 +62,7 @@ class CollectConfig(RecordConfig):
     """Collection control mode and an independent episode-reset policy."""
 
     mode: CollectMode = CollectMode.TELEOP
+    dataset_source_group: str | None = None
     # Independent of mode: both teleop and drag support reset=True/False.
     reset_before_episode: bool = False
     # LingKong normalized gripper convention: 1=open, 0=fully closed.
@@ -125,6 +129,19 @@ def _validate_reset_home(cfg: CollectConfig) -> None:
     if not math.isfinite(settle_timeout_s) or settle_timeout_s < 0:
         raise ValueError("--robot.home_settle_timeout_s 不能小于 0")
 
+
+def resolve_collection_root(dataset_source_group: str, dataset_id: str) -> Path:
+    """Resolve a concrete source/group/id target under the dataset catalog."""
+    from vtla.datasets.mixture_registry import parse_dataset_selection
+
+    if dataset_source_group.count("/") != 1:
+        raise ValueError("采集来源必须是 source/group")
+    source, group, dataset_id = parse_dataset_selection(f"{dataset_source_group}/{dataset_id}")
+    if "all" in (source, group, dataset_id):
+        raise ValueError("采集目标必须是具体的 source/group/dataset_id，不能使用 all")
+    return Path("playground/data") / source / group / dataset_id
+
+
 @parser.wrap()
 def collect(cfg: CollectConfig):
     if cfg.policy is not None:
@@ -138,9 +155,14 @@ def collect(cfg: CollectConfig):
     if cfg.dataset.single_task is None:
         raise ValueError("collect 需要任务描述: 请指定 --dataset.single_task=\"...\"")
 
-    # 默认存到 playground/data/<repo_id 末段> (时间戳命名由调用方/bash 负责)
-    if cfg.dataset.root is None:
-        cfg.dataset.root = f"playground/data/{cfg.dataset.repo_id.split('/')[-1]}"
+    if cfg.dataset_source_group is not None:
+        if cfg.dataset.root is not None:
+            raise ValueError("--dataset_source_group 不能与 --dataset.root 同时指定")
+        target = resolve_collection_root(cfg.dataset_source_group, cfg.dataset.repo_id.split("/")[-1])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cfg.dataset.root = str(target)
+    elif cfg.dataset.root is None:
+        raise ValueError("采集需要 --dataset_source_group=source/group 或 --dataset.root")
 
     if cfg.mode == CollectMode.DRAG:
         hint = " \033[30;42m 拖动采集中 ↑开始 | 空格开/关夹爪 | →复位并保存 | ←复位并重录 | ESC退出 \033[0m"

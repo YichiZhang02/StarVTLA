@@ -4,7 +4,7 @@
 
 `vtla/` 包含 LeRobot 数据集、训练配置、pre/postprocessor 和全部 policy 实现。日常训练入口是仓库根目录的 [train.sh](../train.sh)。
 
-命名数据集 mixture 定义在 [`configs/data_mixtures.yaml`](../configs/data_mixtures.yaml)。mixture ID 与普通 dataset ID 一样直接传给 `train.sh`；数据只从各成员原目录读取，不会生成合并副本。
+命名数据集 mixture 定义在 [`playground/data/data_mixtures.yaml`](../playground/data/data_mixtures.yaml)。训练时传注册名或 `source/group/id`；数据从各成员原目录读取，不会生成合并副本。
 
 mixture 成员必须具有相同的 `robot_type`、FPS，以及相同的 feature key、`dtype`、`shape`、
 `names`、`tactile_encoding` 和 `storage_dtype`，以及相同 `tcp_contract` 和动作统计窗口。各设备自己的相机 `intrinsics`、
@@ -27,33 +27,32 @@ mixture 成员必须具有相同的 `robot_type`、FPS，以及相同的 feature
 
 ```bash
 bash train.sh \
-  <dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
+  <registered_name|source/group/dataset_id> <policy_type> <num_processes> <batch_size> <steps> \
   <wrist_only> <tactile_mode> <state_mode> <action_mode> \
-  [action_gap] <augmentation_mode> \
-  [tactile_encoder_path] [tactile_insert_location] [tactile_pool_size]
+  [action_gap] [augmentation_mode] [tactile_encoder_path]
 ```
 
 | 位置 | 参数 | 脚本默认值 | 可选值或含义 |
 | ---: | --- | --- | --- |
-| 1 | `dataset_id` | 脚本内当前数据集 | `playground/data/` 下的目录名 |
-| 2 | `policy_type` | `starvla_groot_dinoalign` | 上表所列 policy 类型 |
+| 1 | `dataset_mixture` | 必填 | 已注册的 mixture 名称，或 `source/group/dataset_id`；`dataset_id` 可为 `all` |
+| 2 | `policy_type` | `pi05` | 上表所列 policy 类型 |
 | 3 | `num_processes` | `4` | Accelerate 进程数 |
-| 4 | `batch_size` | `4` | 每进程 batch size |
-| 5 | `steps` | `40000` | 训练步数 |
+| 4 | `batch_size` | `8` | 每进程 batch size |
+| 5 | `steps` | `20000` | 训练步数 |
 | 6 | `wrist_only` | `true` | 是否只使用 wrist RGB |
 | 7 | `tactile_mode` | `none` | `none`、`as_image`、`encode` |
 | 8 | `state_mode` | `none` | 见下文 |
 | 9 | `action_mode` | `relative_rot6d` | 见下文 |
 | 10 | `action_gap` | `6` | GT action 起点相对当前观测向未来偏移的帧数 |
-| 11 | `augmentation_mode` | `none` | `none`、`mild`、`strong` |
-| 12 | `tactile_encoder_path` | 空 | `train_backbone.sh` 生成的 checkpoint，仅用于首次初始化 `encode` 训练 |
-| 13 | `tactile_insert_location` | `encoder` | `encoder`、`decoder` |
-| 14 | `tactile_pool_size` | `3` | `3` 表示下游 `AdaptiveAvgPool2d(3,3)` |
+| 11 | `augmentation_mode` | `strong` | `none`、`mild`、`strong` |
+| 12 | `tactile_encoder_path` | 脚本内当前 checkpoint | `train_backbone.sh` 生成的 checkpoint，仅用于首次初始化 `encode` 训练 |
+
+`tactile_insert_location` 和 `tactile_pool_size` 可通过环境变量 `TACTILE_INSERT_LOCATION`、`TACTILE_POOL_SIZE` 设置。
 
 关节训练示例：
 
 ```bash
-bash train.sh <dataset_id> starvla_groot 1 4 10000 \
+bash train.sh Daimon/realman_single/<dataset_id> starvla_groot 1 4 10000 \
   true none absolute_joint absolute_joint 6 none
 ```
 

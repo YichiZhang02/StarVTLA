@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from vtla.datasets.mixture_registry import load_mixture_definitions, resolve_member_root
+from vtla.datasets.mixture_registry import resolve_dataset_root, resolve_member_root, resolve_mixture
 
 from .cache_schema import SPLIT_NAME_TO_ID, cache_signature, stable_hash, validate_cache
 
@@ -67,17 +67,27 @@ def _file_sha256(path: Path) -> str | None:
 def resolve_tactile_dataset(
     dataset_id: str,
     *,
+    dataset_source: str | None = None,
+    dataset_group: str | None = None,
     cache_root: str | Path | None = None,
     dataset_catalog_root: str | Path = "playground/data",
-    mixture_config: str | Path = "configs/data_mixtures.yaml",
+    mixture_config: str | Path = "playground/data/data_mixtures.yaml",
     require_caches: bool = True,
 ) -> ResolvedTactileDataset:
     catalog = Path(dataset_catalog_root)
+    if dataset_source is not None and dataset_group is None:
+        raise ValueError("dataset_group is required when dataset_source is set")
+    namespace = (
+        f"{dataset_source}/{dataset_group}"
+        if dataset_source is not None else dataset_group
+    )
     registry_path = Path(mixture_config)
-    definitions = load_mixture_definitions(registry_path)
-    definition = definitions.get(dataset_id)
-    physical = catalog / dataset_id
-    if definition is not None and physical.is_dir():
+    definition = resolve_mixture(
+        dataset_id, registry_path=registry_path, catalog_root=catalog,
+        namespace=namespace,
+    )
+    physical = resolve_dataset_root(dataset_id, catalog, namespace)
+    if definition is not None and (physical / "meta" / "info.json").is_file():
         raise ValueError(f"Dataset ID {dataset_id!r} is both a mixture and a directory: {physical}")
 
     if definition is None:

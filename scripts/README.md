@@ -15,7 +15,7 @@ bash scripts/<script>.sh ...
 | `process_backbone_data.sh` | 在 processed dataset 内生成触觉 backbone `.npy` cache |
 | `train_backbone.sh` | 统一训练 AnyTouch1、AnyTouch2 或 Sparsh reconstruction backbone |
 | `compute_mean_state.sh` | 统计 home joint 候选或全局 state |
-| `merge_datasets.sh` | 合并脚本内配置的一组数据集 |
+| `merge_datasets.sh` | 将指定的三级路径数据集合并到新的三级路径 |
 | `evaluate_policy_offline.sh` | 按完整 episode 离线评估 checkpoint |
 
 ## 关节数据处理
@@ -26,7 +26,7 @@ bash scripts/process_joint_data.sh <dataset_id> [size] [horizon] [action_gap]
 
 | 参数 | 默认值 | 含义 |
 | --- | ---: | --- |
-| `dataset_id` | 脚本内默认值 | `playground/data/` 下的源数据集 |
+| `dataset_id` | 脚本内默认值 | `playground/data/Daimon/realman_single/` 下的源数据集；可用 `DATASET_SOURCE`、`DATASET_GROUP` 覆盖 |
 | `size` | `224` | 最终视频边长 |
 | `horizon` | `32` | 相对 action 统计包含的动作数量，通常等于训练 `chunk_size` |
 | `action_gap` | `6` | 相对 action 统计的第一个 GT 偏移，必须与训练一致 |
@@ -146,7 +146,7 @@ TASK="Put the board eraser into the cup." \
 ```
 
 该流程适用于 unified-format UMI v2.5 双臂数据。它不修改源目录；全部验证成功后，输出
-`playground/data/<dataset_id>_processed`：
+`playground/data/Daimon/umi/<dataset_id>_processed`（可用 `DATASET_SOURCE`、`DATASET_GROUP` 覆盖）：
 
 ```text
 复制非视频 metadata/data
@@ -198,13 +198,13 @@ processed 数据只保留 `cam_top`、`left/right_cam_wrist` 和四个 `left/rig
 ## 触觉 Backbone 训练
 
 ```bash
-bash scripts/process_backbone_data.sh <dataset_id> [--num_workers 4] [--overwrite]
+bash scripts/process_backbone_data.sh <registered_name|source/group/dataset_id> [--num_workers 4] [--overwrite]
 bash scripts/train_backbone.sh \
-  <dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
+  <registered_name|source/group/dataset_id> <model_id> [num_processes] [batch_size] [epochs] \
   [lr] [image_size] [tactile_num_frames] [tactile_frame_offset] [resume]
 ```
 
-`dataset_id` 可以是普通 processed dataset，也可以是 `configs/data_mixtures.yaml` 中的 mixture。cache 固定写入每个 concrete dataset 的 `tactile_backbone_cache/`；训练阶段只读取这些 `.npy` 文件。预处理默认使用 4 个 episode worker，只 resize 和保存有效接触窗口实际引用的唯一帧；可按 CPU 和内存情况调整 `--num_workers`。
+`source/group/all` 可选整个划分；`source/all/all` 可选整个来源；配置中的组合直接用名称。cache 固定写入每个 concrete dataset 的 `tactile_backbone_cache/`；训练阶段只读取这些 `.npy` 文件。预处理默认使用 4 个 episode worker，只 resize 和保存有效接触窗口实际引用的唯一帧；可按 CPU 和内存情况调整 `--num_workers`。
 
 旧的 `tactile_backbone_npy_v1` 全量 cache 不会被静默复用。首次切换到紧凑 v2 cache 时使用 `--overwrite` 显式重建；之后相同配置直接运行会复用现有 cache。
 
@@ -227,14 +227,14 @@ reconstruction 加 `1e-6` 权重的 KL。它不会把 `T=4` 当作 Wan causal vi
 默认是 `4`，其他模型仍为 `32`。可用 `VAE_KL_WEIGHT` 环境变量覆盖 KL 权重。
 
 ```bash
-bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2
+bash scripts/train_backbone.sh Daimon/realman_single/dataset_a anytouch2 4 64 5 1e-5 224 4 2
 # 从 checkpoint 恢复
-bash scripts/train_backbone.sh dataset_a anytouch2 4 64 5 1e-5 224 4 2 path/to/last.pth
+bash scripts/train_backbone.sh Daimon/realman_single/dataset_a anytouch2 4 64 5 1e-5 224 4 2 path/to/last.pth
 ```
 
 | 参数 | 默认值 | 可选值 |
 | --- | --- | --- |
-| `dataset_id` | `backbone_training_data` | 普通 dataset 或 named mixture |
+| `dataset_mixture` | 必填 | 三级数据路径或注册组合名 |
 | `model_id` | `anytouch1` | `anytouch1`、`anytouch2`、`sparsh_vjepa`、`wan22_vae` |
 | `num_processes` | `4` | `1` 使用 Python，多进程使用 torchrun |
 | `batch_size` | `32` | 每进程 / 每 GPU batch size；`wan22_vae` 默认 `4` |
@@ -268,21 +268,13 @@ bash scripts/compute_mean_state.sh [dataset_id] [first|all] [state_key]
 
 ## 合并数据集
 
-当前 [merge_datasets.sh](merge_datasets.sh) 的输出 ID 和源数据集数组定义在脚本内。修改后运行：
-
-```bash
-bash scripts/merge_datasets.sh
-```
-
 底层工具会取所有输入数据集 dtype/shape 一致的公共 feature，再合并为单一数据集。数据集聚合还要求相同 `fps` 和完全相同的 `robot_type`；不同物理构型不能合并。TCP 数据还必须具有一致的 `tcp_contract` 和 relative stats 窗口。
 
-需要从命令行指定输入时直接使用：
+从命令行指定输出来源、划分、ID 及至少两个输入：
 
 ```bash
-python tools/merge_datasets.py \
-  --roots playground/data/A playground/data/B \
-  --out playground/data/A_B_merged \
-  --repo-id A_B_merged
+bash scripts/merge_datasets.sh Daimon realman_single A_B_merged \
+  Daimon/realman_single/A Daimon/realman_single/B
 ```
 
 ## Policy 离线评估

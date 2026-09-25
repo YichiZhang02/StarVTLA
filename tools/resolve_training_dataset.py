@@ -8,14 +8,19 @@ import json
 from pathlib import Path
 
 from vtla.datasets.feature_schema import mixture_feature_schema_diff
-from vtla.datasets.mixture_registry import load_mixture_definitions, resolve_member_root
+from vtla.datasets.mixture_registry import (
+    parse_dataset_selection,
+    resolve_dataset_root,
+    resolve_member_root,
+    resolve_mixture,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("dataset_id")
+    parser.add_argument("dataset_mixture", help="Registered name or source/group/dataset_id")
     parser.add_argument("--catalog-root", type=Path, default=Path("playground/data"))
-    parser.add_argument("--mixture-config", type=Path, default=Path("configs/data_mixtures.yaml"))
+    parser.add_argument("--mixture-config", type=Path, default=Path("playground/data/data_mixtures.yaml"))
     return parser.parse_args()
 
 
@@ -30,22 +35,28 @@ def load_features(root: Path) -> tuple[dict, dict]:
 
 def main() -> None:
     args = parse_args()
-    definitions = load_mixture_definitions(args.mixture_config)
-    definition = definitions.get(args.dataset_id)
-    physical_root = args.catalog_root / args.dataset_id
+    dataset_source, dataset_group, dataset_id = parse_dataset_selection(
+        args.dataset_mixture, args.mixture_config
+    )
+    namespace = f"{dataset_source}/{dataset_group}"
+    definition = resolve_mixture(
+        dataset_id, registry_path=args.mixture_config, catalog_root=args.catalog_root,
+        namespace=namespace,
+    )
+    physical_root = resolve_dataset_root(dataset_id, args.catalog_root, namespace)
     if definition is None:
         roots = [physical_root]
         kind = "dataset"
         normalized_weights = [1.0]
     else:
-        if physical_root.is_dir():
+        if (physical_root / "meta" / "info.json").is_file():
             raise ValueError(
-                f"Dataset ID {args.dataset_id!r} is both a mixture and a directory: {physical_root}"
+                f"Dataset ID {dataset_id!r} is both a mixture and a directory: {physical_root}"
             )
         roots = [resolve_member_root(definition, member, args.catalog_root) for member in definition.members]
         if any(root is None for root in roots):
             raise ValueError(
-                f"Mixture {args.dataset_id!r} has members without local roots; train.sh requires local datasets."
+                f"Mixture {dataset_id!r} has members without local roots; train.sh requires local datasets."
             )
         kind = "mixture"
         normalized_weights = list(definition.normalized_weights)
@@ -71,6 +82,9 @@ def main() -> None:
     wrist = [key for key, value in videos if not is_tactile(key, value) and "wrist" in key.lower()]
     top = [key for key, value in videos if not is_tactile(key, value) and key not in wrist]
 
+    print(dataset_source)
+    print(dataset_group)
+    print(dataset_id)
     print(kind)
     print("|".join(str(Path(root)) for root in roots))
     print("[" + ",".join(top) + "]")

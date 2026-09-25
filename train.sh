@@ -4,7 +4,7 @@ REPO_ROOT="$(pwd)"               # 自动探测 (仅用于 PYTHONPATH 等运行�
 
 # =================== 需要改动的配置 ===================
 # 模型和数据集配置
-dataset_id=${1:-cupgen_umi}  # 数据集名
+dataset_mixture=${1:?"Usage: bash train.sh <registered_name|source/group/dataset_id> [policy_type ...]"}  # registered_name|source/group/dataset_id
 policy_type=${2:-pi05}          # act | diffusion | pi05 | starvla_groot | starvla_groot_dinoalign | fastwam | dream_tac | n0_vtla
 
 # 训练配置
@@ -42,28 +42,31 @@ visualization_enabled=${VISUALIZATION_ENABLED:-true}
 # 保存的模型/日志名拼接规则
 policy_suffix="wristonly_${wrist_only}_tactile_${tactile_mode}_state_${state_mode}_action_${action_mode}_gap_${action_gap}_aug_${augmentation_mode}"
 # 运行名: <时间>_<数据集>_<framework>_<路由后缀>, 用于输出目录/job_name/日志名 (保持一致)
-run_name="$(date +%Y%m%d)_${dataset_id}_${policy_type}_${policy_suffix}"
+run_name="$(date +%Y%m%d)_${dataset_mixture//\//_}_${policy_type}_${policy_suffix}"
 
 # 路径配置 (相对路径, 会被写进 train_config.json -> 跨机器可移植)
 dataset_root=playground/data
 output_root=playground/results/models
-mixture_config=configs/data_mixtures.yaml
+mixture_config=playground/data/data_mixtures.yaml
 
 # 普通数据集和 mixture 共用同一个 dataset_id 解析入口。
 if ! resolved_dataset_output=$(PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} python tools/resolve_training_dataset.py \
-  "${dataset_id}" --catalog-root "${dataset_root}" --mixture-config "${mixture_config}"); then
+  "${dataset_mixture}" --catalog-root "${dataset_root}" --mixture-config "${mixture_config}"); then
   exit 1
 fi
 mapfile -t resolved_dataset <<< "${resolved_dataset_output}"
-if [ "${#resolved_dataset[@]}" -ne 6 ]; then
-  echo "Failed to resolve training dataset: ${dataset_id}"; exit 1
+if [ "${#resolved_dataset[@]}" -ne 9 ]; then
+  echo "Failed to resolve training dataset: ${dataset_mixture}"; exit 1
 fi
-dataset_kind=${resolved_dataset[0]}
-IFS='|' read -r -a dataset_member_roots <<< "${resolved_dataset[1]}"
-top_cam=${TOP_CAM:-${resolved_dataset[2]}}
-wrist_cam=${WRIST_CAM:-${resolved_dataset[3]}}
-tactile_keys=${TACTILE_KEYS:-${resolved_dataset[4]}}
-dataset_weights=${resolved_dataset[5]}
+dataset_source=${resolved_dataset[0]}
+dataset_group=${resolved_dataset[1]}
+dataset_id=${resolved_dataset[2]}
+dataset_kind=${resolved_dataset[3]}
+IFS='|' read -r -a dataset_member_roots <<< "${resolved_dataset[4]}"
+top_cam=${TOP_CAM:-${resolved_dataset[5]}}
+wrist_cam=${WRIST_CAM:-${resolved_dataset[6]}}
+tactile_keys=${TACTILE_KEYS:-${resolved_dataset[7]}}
+dataset_weights=${resolved_dataset[8]}
 dataset_root_arg=
 if [ "${dataset_kind}" = "dataset" ]; then
   dataset_root_arg="--dataset.root=${dataset_member_roots[0]}"
@@ -185,7 +188,7 @@ fi
 {
 echo "Log file: $log_file"
 echo "Training with dataset: $dataset_id"
-echo "Dataset kind: ${dataset_kind} | Members: ${dataset_member_roots[*]} | Weights: ${dataset_weights}"
+echo "Dataset kind: ${dataset_kind} | Members: ${dataset_member_roots[*]} | Relative frame multipliers (normalized): ${dataset_weights}"
 echo "Policy type: $policy_type"
 echo "Pretrained path: ${pretrained_path:-<scratch>} | Base VLM: ${base_vlm:-<none>}"
 echo "Steps: $steps | Batch size: $batch_size | Num processes: $num_processes"
@@ -240,6 +243,8 @@ PYTHONPATH=${REPO_ROOT}:${PYTHONPATH} accelerate launch \
     --num_processes=$num_processes \
     -m vtla.train \
     --dataset.repo_id=$dataset_id \
+    --dataset.dataset_source=$dataset_source \
+    --dataset.dataset_group=$dataset_group \
     ${dataset_root_arg} \
     --dataset.catalog_root=${dataset_root} \
     --dataset.mixture_config=${mixture_config} \

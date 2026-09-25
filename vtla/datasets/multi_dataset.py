@@ -15,9 +15,18 @@ import torch
 from .feature_schema import mixture_feature_schema_diff
 from .lerobot_dataset import LeRobotDataset
 from .mixture_registry import MixtureDefinition
+from .sampler import MixtureSampler
 from .visual_preprocess import validate_visual_preprocess
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_sampling_strategy(resolved: dict | None) -> str:
+    """Unmarked saved mixtures retain the historical dataset-level weights."""
+    strategy = "weighted_frames" if resolved is None else resolved.get("sampling_strategy", "dataset_weights")
+    if strategy not in {"weighted_frames", "dataset_weights"}:
+        raise ValueError(f"Unknown VLA mixture sampling strategy: {strategy!r}")
+    return strategy
 
 
 def validate_mixture_metadata(datasets: list[LeRobotDataset]) -> None:
@@ -145,7 +154,15 @@ class MixtureMetadata:
 class MixtureLeRobotDataset(torch.utils.data.Dataset):
     """A weighted virtual mixture with concatenated map-style index space."""
 
-    def __init__(self, datasets: list[LeRobotDataset], definition: MixtureDefinition):
+    def __init__(
+        self,
+        datasets: list[LeRobotDataset],
+        definition: MixtureDefinition,
+        *,
+        sampling_strategy: str = "weighted_frames",
+        drop_n_first_frames: int = 0,
+        drop_n_last_frames: int = 0,
+    ):
         super().__init__()
         if len(datasets) != len(definition.members):
             raise ValueError("Mixture definition and loaded dataset counts do not match.")
@@ -154,7 +171,27 @@ class MixtureLeRobotDataset(torch.utils.data.Dataset):
         self.repo_ids = [member.dataset_id for member in definition.members]
         self.definition = definition
         self._datasets = datasets
-        self.weights = definition.normalized_weights
+        self.sampling_strategy = resolve_sampling_strategy({"sampling_strategy": sampling_strategy})
+        if drop_n_first_frames < 0 or drop_n_last_frames < 0:
+            raise ValueError("Frame trimming must be non-negative.")
+        self.frame_trimming = (drop_n_first_frames, drop_n_last_frames)
+        # Build once, before processor statistics are constructed, and reuse in the sampler.
+        self.valid_indices = [
+            MixtureSampler._valid_child_indices(child, *self.frame_trimming) for child in datasets
+        ]
+        self.effective_num_frames = tuple(len(indices) for indices in self.valid_indices)
+        empty = [name for name, count in zip(self.repo_ids, self.effective_num_frames, strict=True) if count == 0]
+        if empty:
+            raise ValueError(f"No valid frames remain for mixture members: {empty}")
+        masses = np.asarray(definition.normalized_weights, dtype=np.float64)
+        if self.sampling_strategy == "weighted_frames":
+            masses *= np.asarray(self.effective_num_frames, dtype=np.float64)
+        self.weights = tuple(float(value) for value in masses / masses.sum())
+        for member, count, probability in zip(definition.members, self.effective_num_frames, self.weights, strict=True):
+            logger.info(
+                "VLA mixture member=%s strategy=%s effective_frames=%d weight=%g probability=%.6f",
+                member.dataset_id, self.sampling_strategy, count, member.weight, probability,
+            )
         self.roots = [Path(dataset.root) for dataset in datasets]
         self.root = None
         self.episodes = None

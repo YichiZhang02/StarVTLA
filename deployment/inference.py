@@ -81,12 +81,19 @@ def _task_from_checkpoint(pretrained_path: str) -> str | None:
         info = json.load(open(tc))
         ds = info.get("dataset", {}) or {}
         repo_id = ds.get("repo_id")
-        # 候选根目录: train_config 里的 root (可能是训练机绝对路径) + 本地约定 playground/data/<repo_id>
+        # 候选根目录: checkpoint 记录的 root，以及本地三级数据目录。
         candidates = []
         if ds.get("root"):
             candidates.append(Path(ds["root"]))
         if repo_id:
-            candidates.append(Path("playground/data") / repo_id)
+            source = ds.get("dataset_group")
+            top_source = ds.get("dataset_source")
+            if top_source and source:
+                candidates.append(Path("playground/data") / top_source / source / repo_id)
+            elif source:
+                candidates.append(Path("playground/data") / source / repo_id)
+            else:
+                candidates.append(Path("playground/data") / repo_id)
         tasks_pq = next((c / "meta" / "tasks.parquet"
                          for c in candidates if (c / "meta" / "tasks.parquet").is_file()), None)
         if tasks_pq is None:

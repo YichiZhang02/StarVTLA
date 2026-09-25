@@ -1,0 +1,38 @@
+version: 1
+
+# Member weight defaults to 1. VLA samples proportional to each member's
+# effective frame count times its weight. Backbone keeps its own sampler.
+mixtures:
+  backbone_training_data:
+    datasets:
+      - source: Daimon
+        group: realman_single
+        dataset_id: rm_isf_umi_left_20260918_assemble_gearS_processed
+        weight: 1.0
+      - source: Daimon
+        group: realman_single
+        dataset_id: rm_isf_umi_left_20260918_insert_usb_processed
+        weight: 1.0
+      - source: Daimon
+        group: realman_single
+        dataset_id: rm_isf_umi_left_20260920_assemble_gearL_processed
+        weight: 1.0
+  UniVTAC:
+    root: playground/data/UniVTAC
+    datasets:
+      - dataset_id: univtac_isaac45_grasp_classify_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_insert_HDMI_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_insert_hole_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_insert_tube_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_lift_bottle_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_lift_can_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_pull_out_key_lerobot
+        weight: 1.0
+      - dataset_id: univtac_isaac45_put_bottle_in_shelf_lerobot
+        weight: 1.0

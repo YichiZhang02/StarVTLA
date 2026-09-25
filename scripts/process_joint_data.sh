@@ -24,7 +24,7 @@ cameras_arg=${CAMERAS:+--cameras ${CAMERAS}}
 calib_arg=${CALIB:+--calib ${CALIB}}
 
 # =================== 路径 (逐级派生) ===================
-dataset_root=playground/data
+dataset_root=playground/data/${DATASET_SOURCE:-Daimon}/${DATASET_GROUP:-realman_single}
 src=${dataset_root}/${dataset_id}
 undist=${dataset_root}/${dataset_id}_undist
 uint8=${undist}_uint8

@@ -26,7 +26,7 @@ if [ "${step}" != "last" ]; then
   printf -v step "%06d" "$((10#${step}))"
 fi
 
-dataset_root="playground/data/${dataset_id}"
+dataset_root="playground/data/${DATASET_SOURCE:-Daimon}/${DATASET_GROUP:-realman_single}/${dataset_id}"
 checkpoint="playground/results/models/${pretrained_id}/checkpoints/${step}/pretrained_model"
 
 if [ ! -f "${dataset_root}/meta/info.json" ]; then

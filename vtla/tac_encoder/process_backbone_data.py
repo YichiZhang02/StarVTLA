@@ -307,7 +307,7 @@ def build_member_cache(
         raise ValueError("Processed dataset index must be contiguous from zero")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{dataset_id}.tmp-", dir=destination.parent))
+    temporary = Path(tempfile.mkdtemp(prefix=f".{dataset_id.replace('/', '_')}.tmp-", dir=destination.parent))
     try:
         sensor_count = len(sensor_names)
         frames_out = np.lib.format.open_memmap(
@@ -560,9 +560,12 @@ def _validate_member_metadata(resolved, requested_tactile_keys: list[str] | None
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset_id", required=True)
+    parser.add_argument("--dataset_id")
+    parser.add_argument("--dataset_selection")
+    parser.add_argument("--dataset_source")
+    parser.add_argument("--dataset_group")
     parser.add_argument("--dataset_catalog_root", type=Path, default=Path("playground/data"))
-    parser.add_argument("--mixture_config", type=Path, default=Path("configs/data_mixtures.yaml"))
+    parser.add_argument("--mixture_config", type=Path, default=Path("playground/data/data_mixtures.yaml"))
     parser.add_argument(
         "--cache_root",
         type=Path,
@@ -592,7 +595,18 @@ def parse_args() -> argparse.Namespace:
         help="Parallel episode decode workers (default: 4).",
     )
     parser.add_argument("--overwrite", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.dataset_selection is not None:
+        if args.dataset_id is not None or args.dataset_source is not None or args.dataset_group is not None:
+            parser.error("--dataset_selection cannot be combined with --dataset_id/source/group")
+        from vtla.datasets.mixture_registry import parse_dataset_selection
+
+        args.dataset_source, args.dataset_group, args.dataset_id = parse_dataset_selection(
+            args.dataset_selection, args.mixture_config
+        )
+    elif args.dataset_id is None:
+        parser.error("--dataset_id or --dataset_selection is required")
+    return args
 
 
 def main() -> None:
@@ -610,6 +624,8 @@ def main() -> None:
     )
     resolved = resolve_tactile_dataset(
         args.dataset_id,
+        dataset_source=args.dataset_source,
+        dataset_group=args.dataset_group,
         cache_root=args.cache_root,
         dataset_catalog_root=args.dataset_catalog_root,
         mixture_config=args.mixture_config,

@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min_lr", type=float)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--dataset_catalog_root", type=Path, default=Path("playground/data"))
-    parser.add_argument("--mixture_config", type=Path, default=Path("configs/data_mixtures.yaml"))
+    parser.add_argument("--mixture_config", type=Path, default=Path("playground/data/data_mixtures.yaml"))
     parser.add_argument("--anytouch1_arch", default="vit_l")
     parser.add_argument("--encoder_dim", type=int)
     parser.add_argument("--encoder_depth", type=int)

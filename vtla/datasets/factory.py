@@ -27,8 +27,8 @@ from vtla.engine.utils.constants import ACTION, IMAGENET_STATS, OBS_PREFIX, REWA
 
 from .dataset_metadata import LeRobotDatasetMetadata
 from .lerobot_dataset import LeRobotDataset
-from .mixture_registry import resolve_member_root, resolve_mixture
-from .multi_dataset import MixtureLeRobotDataset
+from .mixture_registry import resolve_dataset_root, resolve_member_root, resolve_mixture
+from .multi_dataset import MixtureLeRobotDataset, resolve_sampling_strategy
 
 
 def _metadata_fingerprint(root: Path) -> str:
@@ -133,16 +133,33 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
         ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
     )
     image_transform_keys = _resolve_image_transform_keys(cfg.trainable_config)
+    dataset_namespace = (
+        f"{cfg.dataset.dataset_source}/{cfg.dataset.dataset_group}"
+        if cfg.dataset.dataset_source is not None else cfg.dataset.dataset_group
+    )
 
     mixture = resolve_mixture(
         cfg.dataset.repo_id,
         registry_path=cfg.dataset.mixture_config,
         resolved=cfg.dataset.resolved_mixture,
+        catalog_root=cfg.dataset.catalog_root,
+        namespace=dataset_namespace,
     )
 
     if mixture is None:
+        dataset_root = cfg.dataset.root
+        if dataset_root is None and cfg.dataset.catalog_root is not None:
+            candidate = resolve_dataset_root(
+                cfg.dataset.repo_id, cfg.dataset.catalog_root, dataset_namespace
+            )
+            if (candidate / "meta" / "info.json").is_file():
+                dataset_root = str(candidate)
+            elif dataset_namespace is not None:
+                raise FileNotFoundError(f"Dataset metadata not found: {candidate / 'meta' / 'info.json'}")
+        if dataset_namespace is not None and dataset_root is None:
+            raise ValueError("dataset.catalog_root or dataset.root is required for a local source/group dataset")
         ds_meta = LeRobotDatasetMetadata(
-            cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
+            cfg.dataset.repo_id, root=dataset_root, revision=cfg.dataset.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.trainable_config, ds_meta)
         # Decode only the cameras the policy actually consumes (skips e.g. finger cams when
@@ -155,7 +172,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
         if not cfg.dataset.streaming:
             dataset = LeRobotDataset(
                 cfg.dataset.repo_id,
-                root=cfg.dataset.root,
+                root=dataset_root,
                 episodes=cfg.dataset.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
@@ -171,7 +188,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
 
             dataset = StreamingLeRobotDataset(
                 cfg.dataset.repo_id,
-                root=cfg.dataset.root,
+                root=dataset_root,
                 episodes=cfg.dataset.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
@@ -189,11 +206,13 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                 "Use per-member episodes in the mixture registry instead of dataset.episodes for a mixture."
             )
         collision_paths = []
-        if cfg.dataset.root is not None and Path(cfg.dataset.root).is_dir():
+        if cfg.dataset.root is not None and (Path(cfg.dataset.root) / "meta" / "info.json").is_file():
             collision_paths.append(Path(cfg.dataset.root))
         if cfg.dataset.catalog_root is not None:
-            catalog_candidate = Path(cfg.dataset.catalog_root) / cfg.dataset.repo_id
-            if catalog_candidate.is_dir() and catalog_candidate not in collision_paths:
+            catalog_candidate = resolve_dataset_root(
+                cfg.dataset.repo_id, cfg.dataset.catalog_root, dataset_namespace
+            )
+            if (catalog_candidate / "meta" / "info.json").is_file() and catalog_candidate not in collision_paths:
                 collision_paths.append(catalog_candidate)
         if collision_paths:
             raise ValueError(
@@ -204,6 +223,8 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
         member_datasets = []
         for member in mixture.members:
             member_root = resolve_member_root(mixture, member, cfg.dataset.catalog_root)
+            if member_root is not None and "/" in member.dataset_id and not (member_root / "meta" / "info.json").is_file():
+                raise FileNotFoundError(f"Mixture member metadata not found: {member_root / 'meta' / 'info.json'}")
             member_revision = member.revision or cfg.dataset.revision
             member_meta = LeRobotDatasetMetadata(
                 member.dataset_id,
@@ -238,8 +259,21 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MixtureLeRobotDat
                     image_transform_keys=image_transform_keys,
                 )
             )
-        dataset = MixtureLeRobotDataset(member_datasets, mixture)
+        dataset = MixtureLeRobotDataset(
+            member_datasets,
+            mixture,
+            sampling_strategy=resolve_sampling_strategy(cfg.dataset.resolved_mixture),
+            drop_n_last_frames=getattr(cfg.trainable_config, "drop_n_last_frames", 0),
+        )
         resolved_mixture = mixture.to_dict()
+        resolved_mixture["namespace"] = dataset_namespace
+        resolved_mixture.update(
+            sampling_strategy=dataset.sampling_strategy,
+            effective_num_frames=list(dataset.effective_num_frames),
+            normalized_weights=list(dataset.weights),
+            drop_n_first_frames=dataset.frame_trimming[0],
+            drop_n_last_frames=dataset.frame_trimming[1],
+        )
         resolved_mixture["metadata"] = [
             {
                 "dataset_id": child.repo_id,

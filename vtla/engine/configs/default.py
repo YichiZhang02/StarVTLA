@@ -26,13 +26,16 @@ class DatasetConfig:
     # Logical dataset ID. It resolves to a named mixture when present in mixture_config, otherwise to a
     # regular LeRobot dataset.
     repo_id: str
+    # Three-level local path: catalog_root / dataset_source / dataset_group / repo_id.
+    dataset_source: str | None = None
+    dataset_group: str | None = None
     # Root directory for a concrete local dataset tree (e.g. 'dataset/path'). If None, local datasets are
     # looked up under $HF_LEROBOT_HOME/repo_id and Hub downloads use a revision-safe cache under $HF_LEROBOT_HOME/hub.
     root: str | None = None
     # Parent directory used to resolve local mixture members. A mixture-level or member-level root in the
     # registry takes precedence. Ordinary datasets continue to use `root` as their concrete dataset path.
     catalog_root: str | None = None
-    mixture_config: str = "configs/data_mixtures.yaml"
+    mixture_config: str = "playground/data/data_mixtures.yaml"
     # Populated when a mixture is resolved and serialized into checkpoints for reproducible resume.
     resolved_mixture: dict[str, Any] | None = None
     episodes: list[int] | None = None
@@ -48,6 +51,13 @@ class DatasetConfig:
     def __post_init__(self) -> None:
         if not isinstance(self.repo_id, str) or not self.repo_id.strip():
             raise ValueError("dataset.repo_id must be a non-empty dataset or mixture ID.")
+        for label, value in (("dataset_source", self.dataset_source), ("dataset_group", self.dataset_group)):
+            if value is not None and (value in {"", ".", ".."} or "/" in value):
+                raise ValueError(f"{label} must be one directory name.")
+        if self.dataset_source is not None and self.dataset_group is None:
+            raise ValueError("dataset_group is required when dataset_source is set.")
+        if self.dataset_source is not None and "/" in self.repo_id:
+            raise ValueError("dataset.repo_id must be one directory name.")
         if self.episodes is not None:
             if any(ep < 0 for ep in self.episodes):
                 raise ValueError(

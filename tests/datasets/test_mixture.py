@@ -273,3 +273,102 @@ def test_mixture_rejects_tcp_contract_or_relative_stats_mismatch():
     second.meta.stats = {}
     with pytest.raises(ValueError, match='missing action_relative_ee'):
         validate_mixture_metadata([first, second])
+
+
+def _sampling_child(name, lengths, episodes=None, mean=0.0):
+    class Child(SimpleNamespace):
+        def __len__(self):
+            selected = range(len(lengths)) if self.episodes is None else self.episodes
+            return sum(lengths[i] for i in selected)
+
+    ends = np.cumsum(lengths)
+    starts = np.concatenate(([0], ends[:-1]))
+    return Child(
+        repo_id=name,
+        root=f"/tmp/{name}",
+        episodes=episodes,
+        num_episodes=len(lengths) if episodes is None else len(episodes),
+        meta=SimpleNamespace(
+            fps=30,
+            robot_type="umi",
+            visual_preprocess=make_visual_preprocess(size=224, wrist_undistort=True, tactile_encoding=None),
+            features={},
+            tasks=SimpleNamespace(index=[name]),
+            total_episodes=len(lengths),
+            episodes=[dict(dataset_from_index=int(a), dataset_to_index=int(b)) for a, b in zip(starts, ends)],
+            stats={"action": {"mean": np.array([mean]), "std": np.array([1.0])}},
+        ),
+    )
+
+
+def _sampling_definition(weights=(1.0, 1.0)):
+    return mixture_from_dict({
+        "dataset_id": "combined",
+        "members": [dict(dataset_id=name, weight=w) for name, w in zip(("a", "b"), weights)],
+    })
+
+
+@pytest.mark.parametrize("weights,expected", [((1.0, 1.0), (0.1, 0.9)), ((9.0, 1.0), (0.5, 0.5))])
+def test_vla_frame_weighted_sampling_and_statistics(weights, expected):
+    mixture = MixtureLeRobotDataset(
+        [_sampling_child("a", [10]), _sampling_child("b", [90], mean=10)],
+        _sampling_definition(weights),
+    )
+    np.testing.assert_allclose(mixture.weights, expected)
+    np.testing.assert_allclose(mixture.meta.stats["action"]["mean"], [10 * expected[1]])
+    np.testing.assert_allclose(mixture.meta.stats["action"]["std"], [np.sqrt(1 + 100 * expected[0] * expected[1])])
+    sampler = MixtureSampler(mixture, num_samples=30_000, seed=12)
+    assert sampler.valid_indices is mixture.valid_indices
+    np.testing.assert_allclose(sampler.weights.numpy(), expected)
+    indices = list(sampler)
+    assert all(0 <= index < len(mixture) for index in indices)
+    assert abs(sum(index < 10 for index in indices) / len(indices) - expected[0]) < 0.015
+
+
+def test_vla_effective_counts_use_selected_episodes_and_trimming():
+    mixture = MixtureLeRobotDataset(
+        [_sampling_child("a", [10, 4, 20, 100], episodes=[2, 0, 1]), _sampling_child("b", [12, 12])],
+        _sampling_definition(),
+        drop_n_last_frames=6,
+    )
+    # The four-frame episode is discarded; unselected episode 3 contributes nothing.
+    assert mixture.effective_num_frames == (18, 12)
+    np.testing.assert_allclose(mixture.weights, (0.6, 0.4))
+    sampler = MixtureSampler(mixture, drop_n_last_frames=6, num_samples=3000)
+    valid = set(range(4)) | set(range(14, 28)) | set(range(34, 40)) | set(range(46, 52))
+    assert set(sampler) <= valid
+    with pytest.raises(ValueError, match="must match"):
+        MixtureSampler(mixture)
+
+
+def test_vla_rejects_empty_member_after_trimming():
+    with pytest.raises(ValueError, match="No valid frames.*a"):
+        MixtureLeRobotDataset(
+            [_sampling_child("a", [4]), _sampling_child("b", [12])],
+            _sampling_definition(), drop_n_last_frames=6,
+        )
+
+
+def test_vla_saved_sampling_strategy_compatibility():
+    from vtla.datasets.multi_dataset import resolve_sampling_strategy
+
+    assert resolve_sampling_strategy(None) == "weighted_frames"
+    # Old resolved snapshots have normalized_weights but no strategy marker.
+    old_snapshot = _sampling_definition().to_dict()
+    assert resolve_sampling_strategy(old_snapshot) == "dataset_weights"
+    legacy = MixtureLeRobotDataset(
+        [_sampling_child("a", [10]), _sampling_child("b", [90], mean=10)],
+        mixture_from_dict(old_snapshot), sampling_strategy=resolve_sampling_strategy(old_snapshot),
+    )
+    np.testing.assert_allclose(legacy.weights, (0.5, 0.5))
+    np.testing.assert_allclose(legacy.meta.stats["action"]["mean"], [5.0])
+    new_snapshot = {**old_snapshot, "sampling_strategy": "weighted_frames", "normalized_weights": [0.1, 0.9]}
+    restored = MixtureLeRobotDataset(
+        legacy._datasets, mixture_from_dict(new_snapshot),
+        sampling_strategy=resolve_sampling_strategy(new_snapshot),
+    )
+    np.testing.assert_allclose(restored.weights, (0.1, 0.9))
+    # Shared definition normalization (used by backbone) is unchanged.
+    assert restored.definition.normalized_weights == (0.5, 0.5)
+    with pytest.raises(ValueError, match="Unknown VLA"):
+        resolve_sampling_strategy({"sampling_strategy": "typo"})

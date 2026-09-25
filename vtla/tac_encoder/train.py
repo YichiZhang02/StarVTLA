@@ -27,7 +27,10 @@ from .registry import get_training_recipe, supported_model_ids
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset_id", required=True)
+    parser.add_argument("--dataset_id")
+    parser.add_argument("--dataset_selection")
+    parser.add_argument("--dataset_source")
+    parser.add_argument("--dataset_group")
     parser.add_argument("--model_id", required=True, choices=supported_model_ids())
     parser.add_argument(
         "--cache_root",
@@ -35,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional centralized cache root; defaults to <dataset_root>/tactile_backbone_cache.",
     )
     parser.add_argument("--dataset_catalog_root", type=Path, default=Path("playground/data"))
-    parser.add_argument("--mixture_config", type=Path, default=Path("configs/data_mixtures.yaml"))
+    parser.add_argument("--mixture_config", type=Path, default=Path("playground/data/data_mixtures.yaml"))
     parser.add_argument("--output_dir", type=Path)
     parser.add_argument("--pretrained_path", default="")
     parser.add_argument("--resume", type=Path)
@@ -68,7 +71,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vis_per_level", type=int, default=1)
     parser.add_argument("--amp_dtype", choices=["none", "float16", "bfloat16"], default="bfloat16")
     parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.dataset_selection is not None:
+        if args.dataset_id is not None or args.dataset_source is not None or args.dataset_group is not None:
+            parser.error("--dataset_selection cannot be combined with --dataset_id/source/group")
+        from vtla.datasets.mixture_registry import parse_dataset_selection
+
+        args.dataset_source, args.dataset_group, args.dataset_id = parse_dataset_selection(
+            args.dataset_selection, args.mixture_config
+        )
+    elif args.dataset_id is None:
+        parser.error("--dataset_id or --dataset_selection is required")
+    return args
 
 
 def _distributed() -> tuple[int, int, int]:
@@ -166,6 +180,8 @@ def main() -> None:
 
     resolved = resolve_tactile_dataset(
         args.dataset_id,
+        dataset_source=args.dataset_source,
+        dataset_group=args.dataset_group,
         cache_root=args.cache_root,
         dataset_catalog_root=args.dataset_catalog_root,
         mixture_config=args.mixture_config,

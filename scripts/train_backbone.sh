@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-dataset_id=${1:-backbone_training_data}
+dataset_mixture=${1:?"Usage: bash scripts/train_backbone.sh <registered_name|source/group/dataset_id> [model_id ...]"}
 model_id=${2:-anytouch1}  # anytouch1 | anytouch2 | sparsh_vjepa | wan22_vae
 
 num_processes=${3:-4}
@@ -22,7 +22,7 @@ resume=${10:-}  # checkpoint 路径；留空表示不恢复训练
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PYTHONPATH="${repo_root}:${PYTHONPATH:-}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/starvtla_matplotlib}"
-run_name="$(date +%Y%m%d)_${dataset_id}_${model_id}_${tactile_num_frames}frames_${tactile_frame_offset}stride"
+run_name="$(date +%Y%m%d)_${dataset_mixture//\//_}_${model_id}_${tactile_num_frames}frames_${tactile_frame_offset}stride"
 output_root="${repo_root}/playground/results/backbones"
 output_dir="${output_dir:-${output_root}/${run_name}}"
 cd "${repo_root}"
@@ -53,7 +53,7 @@ if [[ ! -f "${pretrained_path}" ]]; then
 fi
 
 common_args=(
-  --dataset_id "${dataset_id}"
+  --dataset_selection "${dataset_mixture}"
   --model_id "${model_id}"
   --pretrained_path "${pretrained_path}"
   --output_dir "${output_dir}"
