@@ -10,7 +10,8 @@
 模型模式。旧 EE 数据需迁移、旧 EE checkpoint 需重训；定义和工具见
 [TCP 数据与动作约定](../../../tools/TCP_ACTIONS.md)。
 
-使用 `relative_rot6d` 时，数据统计必须匹配实际 `chunk_size` 和 `action_gap`。
+使用 `relative_rot6d` 时，数据统计偏移与训练偏移不一致会警告，但允许继续训练；
+归一化可能不够准确。
 本模型默认 chunk 为 50；gap=6 时，已迁移数据的统计重建命令为：
 
 ```bash

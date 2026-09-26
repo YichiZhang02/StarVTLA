@@ -52,8 +52,9 @@ using the UMI converter’s open/closed parameters; these are independent of TCP
 
 Both standard converters emit `tcp_contract` in `meta/info.json`. This records the
 encoding version, references, action offsets, padding convention and tool calibration.
-Statistics count only valid, unpadded within-episode action pairs. Training verifies
-its action offsets match these statistics; model loss masking remains framework-specific.
+Statistics count only valid, unpadded within-episode action pairs. Training warns
+when its action offsets differ from those used for statistics, then continues.
+Model loss masking remains framework-specific.
 No quaternion-derived pose features are generated; obsolete derived columns and stats
 are removed. Raw source vectors are preserved.
 

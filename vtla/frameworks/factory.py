@@ -566,7 +566,8 @@ def make_policy(
         if uses_tcp(cfg):
             contract = getattr(ds_meta, "tcp_contract", None)
             offsets = cfg.action_delta_indices if cfg.action_mode == "relative_rot6d" else None
-            validate_tcp_contract(contract, offsets=offsets, robot_type=dataset_robot_type)
+            validate_tcp_contract(contract, offsets=offsets, robot_type=dataset_robot_type,
+                                  warn_offset_mismatch=True)
             cfg.tcp_contract = contract
         cfg.robot_type = dataset_robot_type
         visual_preprocess = getattr(ds_meta, "visual_preprocess", None)

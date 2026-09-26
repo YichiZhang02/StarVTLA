@@ -222,6 +222,7 @@ python tools/rebuild_relative_ee_stats.py \
 `--offset-start` 与 `--action-gap` 二选一；前者允许负数，例如 Diffusion gap=0 时首偏移为 -1。
 其他模型使用 `horizon=chunk_size`，从 action_gap 开始；Dream-Tac 默认 20，N0-VTLA 默认 50。
 统计工具更新全局、逐 episode relative stats 和 `meta/info.json.tcp_contract`，不重写位姿或视频。
+训练偏移与统计偏移不同时允许继续，但会提示归一化可能不够准确。
 统计排除跨 episode 和 padding 动作对。训练会严格校验窗口；重建会替换该数据集原有窗口的统计，
 若需并行使用不同窗口，应分别维护数据副本。
 

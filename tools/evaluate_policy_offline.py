@@ -357,7 +357,8 @@ def evaluate(args: argparse.Namespace) -> Path:
     from vtla.datasets.tcp_contract import uses_tcp, validate_tcp_contract
     if uses_tcp(policy_cfg):
         validate_tcp_contract(metadata.tcp_contract, robot_type=metadata.robot_type,
-                              offsets=policy_cfg.action_delta_indices if policy_cfg.action_mode == "relative_rot6d" else None)
+                              offsets=policy_cfg.action_delta_indices if policy_cfg.action_mode == "relative_rot6d" else None,
+                              warn_offset_mismatch=True)
         if metadata.tcp_contract != policy_cfg.tcp_contract:
             raise ValueError("Dataset and checkpoint TCP contracts differ; use the training data contract.")
 

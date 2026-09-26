@@ -84,8 +84,13 @@ def test_stats_and_contract_reject_old_semantics():
         remap_ee_dataset_stats({'action_relative_ee_se3': {}}, config)
     contract = build_tcp_contract('umi', 3, 2)
     validate_tcp_contract(contract, offsets=[2, 3, 4], robot_type='umi')
+    with pytest.warns(RuntimeWarning, match='normalization may be less accurate'):
+        validate_tcp_contract(contract, offsets=[2, 3, 4, 5], robot_type='umi',
+                              warn_offset_mismatch=True)
     with pytest.raises(ValueError, match='offsets'):
         validate_tcp_contract(contract, offsets=[0, 1, 2])
+    with pytest.warns(RuntimeWarning, match='offsets'):
+        validate_tcp_contract(contract, offsets=[0, 1, 2, 3], warn_offset_mismatch=True)
     with pytest.raises(ValueError, match='obsolete'):
         validate_tcp_contract(None)
 
